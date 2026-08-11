@@ -1,0 +1,87 @@
+package meta
+
+import (
+	"context"
+	"time"
+)
+
+// Branch statuses — Phase 2 state machine.
+const (
+	StatusCreating  = "creating"
+	StatusActive    = "active"
+	StatusIdle      = "idle" // suspended compute, data kept
+	StatusResetting = "resetting"
+	StatusDeleting  = "deleting"
+	StatusError     = "error"
+)
+
+// Connector statuses — Phase 3.
+const (
+	ConnectorBootstrapping = "bootstrapping"
+	ConnectorReplicating   = "replicating"
+	ConnectorError         = "error"
+	ConnectorDisconnected  = "disconnected"
+)
+
+type BranchRecord struct {
+	ID           string    `json:"id"`
+	ProjectID    string    `json:"project_id"`
+	Name         string    `json:"name"`
+	Role         string    `json:"role"` // main | branch
+	Status       string    `json:"status"`
+	Port         int       `json:"port"`
+	DataDir      string    `json:"data_dir"`
+	SnapshotRef  string    `json:"snapshot_ref"`
+	ContainerID  string    `json:"container_id,omitempty"`
+	Compute      string    `json:"compute,omitempty"`
+	ConnString   string    `json:"connection_string"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+	SourceLSN    string    `json:"source_lsn,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	LastUsedAt   time.Time `json:"last_used_at"`
+}
+
+type Project struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Connector links a project to an upstream Postgres primary (Phase 3).
+type Connector struct {
+	ID           string    `json:"id"`
+	ProjectID    string    `json:"project_id"`
+	Name         string    `json:"name"`
+	PrimaryURL   string    `json:"primary_url"`
+	Mode         string    `json:"mode"` // physical | logical
+	Status       string    `json:"status"`
+	ErrorMessage string    `json:"error_message,omitempty"`
+	LastLSN      string    `json:"last_lsn,omitempty"`
+	LastLagBytes int64     `json:"last_lag_bytes"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// Store is the control-plane notebook.
+type Store interface {
+	EnsureProject(ctx context.Context, name string) (Project, error)
+	GetProject(ctx context.Context, idOrName string) (Project, error)
+	ListProjects(ctx context.Context) ([]Project, error)
+
+	AllocPort(ctx context.Context) (int, error)
+
+	PutBranch(ctx context.Context, b BranchRecord) error
+	GetBranch(ctx context.Context, projectID, name string) (BranchRecord, error)
+	GetBranchByID(ctx context.Context, id string) (BranchRecord, error)
+	ListBranches(ctx context.Context, projectID string) ([]BranchRecord, error)
+	ListAllBranches(ctx context.Context) ([]BranchRecord, error)
+	DeleteBranch(ctx context.Context, id string) error
+	UpdateBranch(ctx context.Context, b BranchRecord) error
+
+	PutConnector(ctx context.Context, c Connector) error
+	GetConnector(ctx context.Context, projectID string) (Connector, error)
+	ListConnectors(ctx context.Context) ([]Connector, error)
+	UpdateConnector(ctx context.Context, c Connector) error
+	DeleteConnector(ctx context.Context, id string) error
+}
