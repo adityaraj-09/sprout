@@ -6,9 +6,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/adityaraj/ardent-clone/internal/compute"
-	"github.com/adityaraj/ardent-clone/internal/meta"
-	"github.com/adityaraj/ardent-clone/internal/storage"
+	"github.com/adityaraj/sprout/internal/compute"
+	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/storage"
 )
 
 // Reconciler aligns metadata with real compute/storage after crashes.

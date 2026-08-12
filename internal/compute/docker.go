@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adityaraj/ardent-clone/internal/postgres"
+	"github.com/adityaraj/sprout/internal/postgres"
 )
 
 // Docker runs official postgres image with PGDATA bind-mounted from the clone.
@@ -44,7 +44,7 @@ func (d *Docker) containerName(spec Spec) string {
 			return '-'
 		}
 	}, spec.Name)
-	return "ardent-" + safe
+	return "sprout-" + safe
 }
 
 func (d *Docker) Start(ctx context.Context, spec Spec) (Handle, error) {

@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	DefaultPublication  = "ardent_pub"
-	DefaultSubscription = "ardent_sub"
+	DefaultPublication  = "sprout_pub"
+	DefaultSubscription = "sprout_sub"
 )
 
 // LogicalStatus is subscriber-side sync state (main is a normal primary).

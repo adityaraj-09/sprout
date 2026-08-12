@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adityaraj/ardent-clone/internal/postgres"
+	"github.com/adityaraj/sprout/internal/postgres"
 )
 
 // Conn is a parsed Postgres URL for physical replication bootstrap.
@@ -69,7 +69,7 @@ func (c Conn) PrimaryConnInfo() string {
 		fmt.Sprintf("port=%d", c.Port),
 		fmt.Sprintf("user=%s", c.User),
 		fmt.Sprintf("sslmode=%s", c.SSLMode),
-		"application_name=ardent-replica",
+		"application_name=sprout-replica",
 	}
 	if c.Password != "" {
 		parts = append(parts, fmt.Sprintf("password=%s", c.Password))
@@ -140,19 +140,19 @@ func (m *Manager) BaseBackup(ctx context.Context, c Conn, destDir string) error 
 // PrepareStandbyDataDir forces our listen port / socket after basebackup.
 func (m *Manager) PrepareStandbyDataDir(dataDir string, port int) error {
 	_ = os.Remove(filepath.Join(dataDir, "postmaster.pid"))
+	if err := postgres.ApplyNetworkSettings(dataDir, port); err != nil {
+		return err
+	}
 	conf := filepath.Join(dataDir, "postgresql.conf")
 	f, err := os.OpenFile(conf, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	_, err = fmt.Fprintf(f, `
-# --- ardent replica overrides ---
-port = %d
-listen_addresses = '127.0.0.1'
-unix_socket_directories = '%s'
+	_, err = f.WriteString(`
+# --- sprout replica ---
 hot_standby = on
-`, port, dataDir)
+`)
 	return err
 }
 

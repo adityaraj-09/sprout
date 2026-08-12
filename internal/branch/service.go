@@ -6,18 +6,19 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/adityaraj/ardent-clone/internal/compute"
-	"github.com/adityaraj/ardent-clone/internal/meta"
-	"github.com/adityaraj/ardent-clone/internal/postgres"
-	"github.com/adityaraj/ardent-clone/internal/replica"
-	"github.com/adityaraj/ardent-clone/internal/storage"
+	"github.com/adityaraj/sprout/internal/compute"
+	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/postgres"
+	"github.com/adityaraj/sprout/internal/replica"
+	"github.com/adityaraj/sprout/internal/storage"
 	"github.com/google/uuid"
 )
 
-const MainPort = 55432
+const MainPort = 55432 // local demo init only (sprout init)
 const DefaultProject = "default"
 
 var nameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
@@ -30,14 +31,17 @@ type Service struct {
 	Compute     compute.Provider
 	Bins        postgres.Binaries
 	ColdSnap    bool
-	MaxLagBytes int64 // refuse branch create if replica lag exceeds this
+	MaxLagBytes int64
 
-	mainMu sync.Mutex // serialize snapshots of main
-	opsMu  sync.Map   // per-branch name locks
+	opsMu sync.Map // per-branch / per-connector locks
 }
 
 func (s *Service) MainDir() string {
 	return filepath.Join(s.Root, "main")
+}
+
+func (s *Service) ReplicaDir(connectorName string) string {
+	return filepath.Join(s.Root, "replicas", connectorName)
 }
 
 func (s *Service) BranchDir(name string) string {
@@ -113,7 +117,7 @@ func (s *Service) InitMain(ctx context.Context) (meta.Project, error) {
 	return proj, nil
 }
 
-func (s *Service) Create(ctx context.Context, projectID, name string) (meta.BranchRecord, error) {
+func (s *Service) Create(ctx context.Context, projectID, name, fromConnector string) (meta.BranchRecord, error) {
 	if !nameRe.MatchString(name) || name == "main" {
 		return meta.BranchRecord{}, fmt.Errorf("invalid_name: use lowercase [a-z0-9-], not 'main'")
 	}
@@ -124,9 +128,14 @@ func (s *Service) Create(ctx context.Context, projectID, name string) (meta.Bran
 		return meta.BranchRecord{}, fmt.Errorf("branch_exists: %q", name)
 	}
 
-	mainRunning, _ := s.Compute.IsRunning(ctx, s.mainHandle())
-	if !mainRunning {
-		return meta.BranchRecord{}, fmt.Errorf("main_not_ready: run init first")
+	srcDir, srcPort, srcName, srcID, err := s.resolveBranchSource(ctx, projectID, fromConnector)
+	if err != nil {
+		return meta.BranchRecord{}, err
+	}
+
+	running, _ := s.Compute.IsRunning(ctx, compute.Handle{Port: srcPort})
+	if !running {
+		return meta.BranchRecord{}, fmt.Errorf("source_not_ready: %s is not running — connect/init first", srcName)
 	}
 
 	port, err := s.Store.AllocPort(ctx)
@@ -138,15 +147,16 @@ func (s *Service) Create(ctx context.Context, projectID, name string) (meta.Bran
 		ID: uuid.NewString(), ProjectID: projectID, Name: name, Role: "branch",
 		Status: meta.StatusCreating, Port: port, DataDir: s.BranchDir(name),
 		Compute: s.Compute.Name(),
+		SourceConnector: srcName, SourceConnectorID: srcID,
 	}
 	if err := s.Store.PutBranch(ctx, rec); err != nil {
 		return meta.BranchRecord{}, err
 	}
 
 	total := time.Now()
-	fmt.Printf("\n=== branch create %q (storage=%s compute=%s) ===\n", name, s.Storage.Name(), s.Compute.Name())
+	fmt.Printf("\n=== branch create %q from %q (storage=%s) ===\n", name, srcName, s.Storage.Name())
 
-	if err := s.createPipeline(ctx, &rec); err != nil {
+	if err := s.createPipeline(ctx, &rec, srcDir, srcPort, srcName); err != nil {
 		rec.Status = meta.StatusError
 		rec.ErrorMessage = err.Error()
 		_ = s.Store.UpdateBranch(ctx, rec)
@@ -164,14 +174,73 @@ func (s *Service) Create(ctx context.Context, projectID, name string) (meta.Bran
 	return rec, nil
 }
 
-func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord) error {
-	main := s.mainInst()
+// resolveBranchSource picks the parent dataset for CoW.
+// fromConnector empty → sole connector, else local "main" if running, else error.
+func (s *Service) resolveBranchSource(ctx context.Context, projectID, fromConnector string) (dataDir string, port int, name, id string, err error) {
+	if fromConnector == "main" {
+		return s.MainDir(), MainPort, "main", "", nil
+	}
+	if fromConnector != "" {
+		c, err := s.Store.GetConnectorByName(ctx, projectID, fromConnector)
+		if err != nil {
+			return "", 0, "", "", fmt.Errorf("connector_not_found: %s", fromConnector)
+		}
+		return s.connectorSource(c)
+	}
+
+	list, err := s.Store.ListConnectorsByProject(ctx, projectID)
+	if err != nil {
+		return "", 0, "", "", err
+	}
+	if len(list) == 1 {
+		return s.connectorSource(list[0])
+	}
+	if len(list) > 1 {
+		names := make([]string, 0, len(list))
+		for _, c := range list {
+			names = append(names, c.Name)
+		}
+		return "", 0, "", "", fmt.Errorf("multiple connectors — pass --from (%s)", strings.Join(names, ", "))
+	}
+
+	// No connectors: fall back to local init main if present.
+	if _, err := os.Stat(filepath.Join(s.MainDir(), "PG_VERSION")); err == nil {
+		return s.MainDir(), MainPort, "main", "", nil
+	}
+	return "", 0, "", "", fmt.Errorf("no source — run sprout connect --name <n> <url> or sprout init")
+}
+
+// connectorSource maps a connector to its local PGDATA (legacy connectors used data/main).
+func (s *Service) connectorSource(c meta.Connector) (dataDir string, port int, name, id string, err error) {
+	dir := c.DataDir
+	port = c.Port
+	if dir == "" {
+		dir = s.MainDir()
+	}
+	if port == 0 {
+		port = MainPort
+	}
+	return dir, port, c.Name, c.ID, nil
+}
+
+func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, srcDir string, srcPort int, srcName string) error {
 	rm := &replica.Manager{Bins: s.Bins}
+	srcInst := &postgres.Instance{
+		Name: srcName, DataDir: srcDir, Port: srcPort,
+		LogFile: s.logPath(srcName), Bins: s.Bins,
+	}
+	srcHandle := compute.Handle{
+		Provider: s.Compute.Name(), Name: srcName, Port: srcPort, DataDir: srcDir,
+	}
+	// Logical replicas use compute name replica-<connector>
+	if srcName != "main" && !strings.HasPrefix(srcName, "replica-") {
+		srcHandle.Name = replicaComputeName(srcName)
+	}
 
-	s.mainMu.Lock()
-	defer s.mainMu.Unlock()
+	unlock := s.lockBranch("snap:" + srcName)
+	defer unlock()
 
-	st, stErr := rm.Status(ctx, "127.0.0.1", MainPort)
+	st, stErr := rm.Status(ctx, "127.0.0.1", srcPort)
 	useReplayPause := stErr == nil && st.IsStandby
 
 	if useReplayPause {
@@ -181,46 +250,50 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord) er
 		}
 		fmt.Printf("  lag_bytes=%d replay_lsn=%s\n", st.LagBytes, st.ReplayLSN)
 		fmt.Println("→ Step 1: pause WAL replay + CHECKPOINT")
-		if err := rm.PauseReplay(ctx, "127.0.0.1", MainPort); err != nil {
+		if err := rm.PauseReplay(ctx, "127.0.0.1", srcPort); err != nil {
 			return fmt.Errorf("storage_failed: pause replay: %w", err)
 		}
-		if err := rm.Checkpoint(ctx, "127.0.0.1", MainPort); err != nil {
-			_ = rm.ResumeReplay(ctx, "127.0.0.1", MainPort)
+		if err := rm.Checkpoint(ctx, "127.0.0.1", srcPort); err != nil {
+			_ = rm.ResumeReplay(ctx, "127.0.0.1", srcPort)
 			return fmt.Errorf("storage_failed: checkpoint: %w", err)
 		}
 		rec.SourceLSN = st.ReplayLSN
 	} else {
 		fmt.Println("→ Step 1: CHECKPOINT (+ cold stop if enabled)")
-		if err := main.Checkpoint(); err != nil {
+		if err := srcInst.Checkpoint(); err != nil {
 			return fmt.Errorf("storage_failed: checkpoint: %w", err)
 		}
 		if s.ColdSnap {
-			if err := s.Compute.Stop(ctx, s.mainHandle()); err != nil {
+			if err := s.Compute.Stop(ctx, srcHandle); err != nil {
 				return err
 			}
 		}
 	}
 
 	fmt.Println("→ Step 2: snapshot")
-	snapRef, err := s.Storage.Snapshot(main.DataDir, rec.Name)
+	snapRef, err := s.Storage.Snapshot(srcDir, rec.Name)
 	if err != nil {
 		if useReplayPause {
-			_ = rm.ResumeReplay(ctx, "127.0.0.1", MainPort)
+			_ = rm.ResumeReplay(ctx, "127.0.0.1", srcPort)
 		} else if s.ColdSnap {
-			_, _ = s.Compute.Start(ctx, compute.Spec{Name: "main", DataDir: s.MainDir(), Port: MainPort, LogFile: s.logPath("main")})
+			_, _ = s.Compute.Start(ctx, compute.Spec{
+				Name: srcHandle.Name, DataDir: srcDir, Port: srcPort, LogFile: s.logPath(srcHandle.Name),
+			})
 		}
 		return fmt.Errorf("storage_failed: %w", err)
 	}
 	rec.SnapshotRef = snapRef
 
 	if useReplayPause {
-		fmt.Println("→ resume WAL replay on main")
-		if err := rm.ResumeReplay(ctx, "127.0.0.1", MainPort); err != nil {
+		fmt.Println("→ resume WAL replay on source")
+		if err := rm.ResumeReplay(ctx, "127.0.0.1", srcPort); err != nil {
 			return err
 		}
 	} else if s.ColdSnap {
-		fmt.Println("→ restart main")
-		if _, err := s.Compute.Start(ctx, compute.Spec{Name: "main", DataDir: s.MainDir(), Port: MainPort, LogFile: s.logPath("main")}); err != nil {
+		fmt.Println("→ restart source")
+		if _, err := s.Compute.Start(ctx, compute.Spec{
+			Name: srcHandle.Name, DataDir: srcDir, Port: srcPort, LogFile: s.logPath(srcHandle.Name),
+		}); err != nil {
 			return err
 		}
 	}

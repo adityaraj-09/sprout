@@ -4,7 +4,7 @@ set -euo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DATA="${ARDENT_DATA:-$ROOT/data}/lab-primary"
+DATA="${SPROUT_DATA:-$ROOT/data}/lab-primary"
 PORT="${LAB_PRIMARY_PORT:-55431}"
 LOG="$ROOT/data/logs/lab-primary.log"
 

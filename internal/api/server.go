@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adityaraj/ardent-clone/internal/branch"
-	"github.com/adityaraj/ardent-clone/internal/meta"
+	"github.com/adityaraj/sprout/internal/branch"
+	"github.com/adityaraj/sprout/internal/meta"
 )
 
 type Server struct {
@@ -33,6 +33,7 @@ func (s *Server) routes() {
 	s.Mux.HandleFunc("GET /v1/connectors", s.handleListConnectors)
 	s.Mux.HandleFunc("POST /v1/projects/{project}/connect", s.handleConnect)
 	s.Mux.HandleFunc("GET /v1/projects/{project}/replication", s.handleReplication)
+	s.Mux.HandleFunc("GET /v1/projects/{project}/connectors/{name}/replication", s.handleReplicationNamed)
 	s.Mux.HandleFunc("GET /v1/projects", s.handleListProjects)
 	s.Mux.HandleFunc("POST /v1/projects/{project}/branches", s.handleCreateBranch)
 	s.Mux.HandleFunc("GET /v1/projects/{project}/branches", s.handleListBranches)
@@ -112,14 +113,15 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		URL  string `json:"url"`
 		Mode string `json:"mode"` // physical (default) | logical
+		Name string `json:"name"` // unique per project; default "primary"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.URL == "" {
-		writeErr(w, http.StatusBadRequest, "invalid_body", `JSON {"url":"postgresql://...","mode":"logical|physical"} required`)
+		writeErr(w, http.StatusBadRequest, "invalid_body", `JSON {"url":"postgresql://...","mode":"logical|physical","name":"supabase"} required`)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Minute) // full bootstrap can be slow
 	defer cancel()
-	conn, lag, err := s.Service.Connect(ctx, proj.ID, body.URL, body.Mode)
+	conn, lag, err := s.Service.Connect(ctx, proj.ID, body.Name, body.URL, body.Mode)
 	if err != nil {
 		code, status := mapErr(err)
 		writeErr(w, status, code, err.Error())
@@ -133,16 +135,25 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReplication(w http.ResponseWriter, r *http.Request) {
+	s.writeReplication(w, r, r.URL.Query().Get("name"))
+}
+
+func (s *Server) handleReplicationNamed(w http.ResponseWriter, r *http.Request) {
+	s.writeReplication(w, r, r.PathValue("name"))
+}
+
+func (s *Server) writeReplication(w http.ResponseWriter, r *http.Request, name string) {
 	proj, err := s.resolveProject(r)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "project_not_found", err.Error())
 		return
 	}
-	conn, lag, err := s.Service.ReplicationStatus(r.Context(), proj.ID)
+	conn, lag, err := s.Service.ReplicationStatus(r.Context(), proj.ID, name)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "no_connector", err.Error())
 		return
 	}
+	conn.PrimaryURL = redactURL(conn.PrimaryURL)
 	writeJSON(w, http.StatusOK, map[string]any{"connector": conn, "lag": lag})
 }
 
@@ -171,14 +182,15 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Name string `json:"name"`
+		From string `json:"from"` // connector name or "main"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
-		writeErr(w, http.StatusBadRequest, "invalid_body", "JSON {\"name\":\"...\"} required")
+		writeErr(w, http.StatusBadRequest, "invalid_body", `JSON {"name":"...","from":"connector-name"} required`)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 	defer cancel()
-	rec, err := s.Service.Create(ctx, proj.ID, body.Name)
+	rec, err := s.Service.Create(ctx, proj.ID, body.Name, body.From)
 	if err != nil {
 		code, status := mapErr(err)
 		writeErr(w, status, code, err.Error())
@@ -271,8 +283,12 @@ func mapErr(err error) (code string, status int) {
 		return "invalid_name", http.StatusBadRequest
 	case strings.HasPrefix(msg, "invalid_state"):
 		return "invalid_state", http.StatusConflict
-	case strings.HasPrefix(msg, "main_not_ready"):
-		return "main_not_ready", http.StatusServiceUnavailable
+	case strings.HasPrefix(msg, "main_not_ready"), strings.HasPrefix(msg, "source_not_ready"):
+		return "source_not_ready", http.StatusServiceUnavailable
+	case strings.HasPrefix(msg, "connector_not_found"), strings.HasPrefix(msg, "no source"), strings.HasPrefix(msg, "multiple connectors"):
+		return "connector_required", http.StatusBadRequest
+	case strings.HasPrefix(msg, "connector_exists"):
+		return "connector_exists", http.StatusConflict
 	case strings.HasPrefix(msg, "invalid_mode"):
 		return "invalid_mode", http.StatusBadRequest
 	case strings.HasPrefix(msg, "replica_lag"):

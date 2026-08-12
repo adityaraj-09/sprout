@@ -12,8 +12,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// FileStore is a crash-safer Phase-2 notebook (JSON + mutex + atomic rename).
-// Same Store interface as a future SQLite backend — swap later without touching the API.
+// FileStore is a crash-safer control-plane notebook (JSON + mutex + atomic rename).
 type FileStore struct {
 	path string
 	mu   sync.Mutex
@@ -23,8 +22,8 @@ type FileStore struct {
 type fileData struct {
 	NextPort   int                     `json:"next_port"`
 	Projects   map[string]Project      `json:"projects"`
-	Branches   map[string]BranchRecord `json:"branches"` // keyed by id
-	Connectors map[string]Connector    `json:"connectors"` // keyed by project_id (one per project for MVP)
+	Branches   map[string]BranchRecord `json:"branches"`   // keyed by id
+	Connectors map[string]Connector    `json:"connectors"` // keyed by connector id
 }
 
 func OpenFile(path string) (*FileStore, error) {
@@ -50,10 +49,40 @@ func OpenFile(path string) (*FileStore, error) {
 		if s.data.NextPort == 0 {
 			s.data.NextPort = 55433
 		}
+		s.migrateConnectorsLocked()
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// migrateConnectorsLocked upgrades legacy project_id-keyed connectors to id-keyed.
+func (s *FileStore) migrateConnectorsLocked() {
+	migrated := map[string]Connector{}
+	changed := false
+	for key, c := range s.data.Connectors {
+		if c.ID == "" {
+			c.ID = uuid.NewString()
+			changed = true
+		}
+		if c.Name == "" {
+			c.Name = "primary"
+			changed = true
+		}
+		if c.Port == 0 {
+			// Legacy singleton used fixed main port
+			c.Port = 55432
+			changed = true
+		}
+		if key != c.ID {
+			changed = true
+		}
+		migrated[c.ID] = c
+	}
+	if changed {
+		s.data.Connectors = migrated
+		_ = s.saveLocked()
+	}
 }
 
 func (s *FileStore) Close() error { return nil }
@@ -223,19 +252,37 @@ func (s *FileStore) PutConnector(ctx context.Context, c Connector) error {
 	if s.data.Connectors == nil {
 		s.data.Connectors = map[string]Connector{}
 	}
-	s.data.Connectors[c.ProjectID] = c
+	// Enforce unique (project_id, name)
+	for id, existing := range s.data.Connectors {
+		if existing.ProjectID == c.ProjectID && existing.Name == c.Name && id != c.ID {
+			return fmt.Errorf("connector_exists: %q", c.Name)
+		}
+	}
+	s.data.Connectors[c.ID] = c
 	return s.saveLocked()
 }
 
-func (s *FileStore) GetConnector(ctx context.Context, projectID string) (Connector, error) {
+func (s *FileStore) GetConnectorByID(ctx context.Context, id string) (Connector, error) {
 	_ = ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c, ok := s.data.Connectors[projectID]
+	c, ok := s.data.Connectors[id]
 	if !ok {
 		return Connector{}, fmt.Errorf("connector not found")
 	}
 	return c, nil
+}
+
+func (s *FileStore) GetConnectorByName(ctx context.Context, projectID, name string) (Connector, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.data.Connectors {
+		if c.ProjectID == projectID && c.Name == name {
+			return c, nil
+		}
+	}
+	return Connector{}, fmt.Errorf("connector not found: %s", name)
 }
 
 func (s *FileStore) ListConnectors(ctx context.Context) ([]Connector, error) {
@@ -249,12 +296,28 @@ func (s *FileStore) ListConnectors(ctx context.Context) ([]Connector, error) {
 	return out, nil
 }
 
+func (s *FileStore) ListConnectorsByProject(ctx context.Context, projectID string) ([]Connector, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Connector
+	for _, c := range s.data.Connectors {
+		if c.ProjectID == projectID {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
 func (s *FileStore) UpdateConnector(ctx context.Context, c Connector) error {
 	_ = ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, ok := s.data.Connectors[c.ID]; !ok {
+		return fmt.Errorf("connector not found")
+	}
 	c.UpdatedAt = time.Now().UTC()
-	s.data.Connectors[c.ProjectID] = c
+	s.data.Connectors[c.ID] = c
 	return s.saveLocked()
 }
 
@@ -262,9 +325,13 @@ func (s *FileStore) DeleteConnector(ctx context.Context, id string) error {
 	_ = ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for pid, c := range s.data.Connectors {
-		if c.ID == id || pid == id {
-			delete(s.data.Connectors, pid)
+	if _, ok := s.data.Connectors[id]; ok {
+		delete(s.data.Connectors, id)
+		return s.saveLocked()
+	}
+	for cid, c := range s.data.Connectors {
+		if c.Name == id {
+			delete(s.data.Connectors, cid)
 			return s.saveLocked()
 		}
 	}

@@ -12,15 +12,15 @@ import (
 // ZFS implements Provider with real dataset snapshot + clone.
 //
 // Teaching notes:
-//   zfs snapshot tank/ardent/demo/main@alice   → almost free (metadata)
+//   zfs snapshot tank/sprout/demo/main@alice   → almost free (metadata)
 //   zfs clone   tank/.../main@alice tank/.../branch-alice
 //
-//   root is interpreted as a dataset prefix, e.g. "tank/ardent/demo".
+//   root is interpreted as a dataset prefix, e.g. "tank/sprout/demo".
 //   Mountpoints are whatever zfs set mountpoint=... configured.
 //
 //   Phase 1 on macOS will not use this; keep it for a Linux box later.
 type ZFS struct {
-	datasetRoot string // tank/ardent/demo
+	datasetRoot string // tank/sprout/demo
 	mainName    string // main
 }
 

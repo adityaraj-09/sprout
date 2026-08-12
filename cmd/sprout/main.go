@@ -1,4 +1,4 @@
-// Command ardent — Phase 2 thin CLI (HTTP client to ardent-server).
+// Command sprout — Phase 2 thin CLI (HTTP client to sprout-server).
 package main
 
 import (
@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/adityaraj/ardent-clone/internal/config"
-	"github.com/adityaraj/ardent-clone/internal/meta"
+	"github.com/adityaraj/sprout/internal/config"
+	"github.com/adityaraj/sprout/internal/meta"
 )
 
 func main() {
@@ -31,12 +31,17 @@ func main() {
 		}
 		fmt.Printf("✓ project %s (%s)\n", proj.Name, proj.ID)
 	case "connect":
-		// ardent connect [--mode=logical|physical] <url>
+		// sprout connect [--name=...] [--mode=logical|physical] <url>
 		mode := "physical"
+		name := "primary"
 		url := ""
 		for _, a := range os.Args[2:] {
 			if strings.HasPrefix(a, "--mode=") {
 				mode = strings.TrimPrefix(a, "--mode=")
+				continue
+			}
+			if strings.HasPrefix(a, "--name=") {
+				name = strings.TrimPrefix(a, "--name=")
 				continue
 			}
 			if a == "--logical" {
@@ -52,17 +57,21 @@ func main() {
 			}
 		}
 		if url == "" {
-			fatal(fmt.Errorf("usage: ardent connect [--mode=logical|physical] <postgresql-url>"))
+			fatal(fmt.Errorf("usage: sprout connect [--name=<id>] [--mode=logical|physical] <postgresql-url>"))
 		}
 		var out map[string]any
-		if err := c.do("POST", "/v1/projects/default/connect", map[string]string{"url": url, "mode": mode}, &out); err != nil {
+		if err := c.do("POST", "/v1/projects/default/connect", map[string]string{"url": url, "mode": mode, "name": name}, &out); err != nil {
 			fatal(err)
 		}
 		b, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(b))
 	case "status":
+		path := "/v1/projects/default/replication"
+		if len(os.Args) >= 3 && !strings.HasPrefix(os.Args[2], "-") {
+			path = "/v1/projects/default/connectors/" + os.Args[2] + "/replication"
+		}
 		var out map[string]any
-		if err := c.do("GET", "/v1/projects/default/replication", nil, &out); err != nil {
+		if err := c.do("GET", path, nil, &out); err != nil {
 			fatal(err)
 		}
 		b, _ := json.MarshalIndent(out, "", "  ")
@@ -83,8 +92,8 @@ func main() {
 				return
 			}
 			for _, conn := range list {
-				fmt.Printf("%-12s %-10s %-14s project=%s lag_bytes=%d lsn=%s\n  %s\n",
-					conn.Name, conn.Mode, conn.Status, conn.ProjectID, conn.LastLagBytes, conn.LastLSN, conn.PrimaryURL)
+				fmt.Printf("%-12s %-10s %-14s port=%-5d lag_bytes=%d lsn=%s\n  dir=%s\n  %s\n",
+					conn.Name, conn.Mode, conn.Status, conn.Port, conn.LastLagBytes, conn.LastLSN, conn.DataDir, conn.PrimaryURL)
 			}
 		default:
 			usage()
@@ -98,18 +107,48 @@ func main() {
 		switch os.Args[2] {
 		case "create":
 			need(4)
+			from := ""
+			name := ""
+			for _, a := range os.Args[3:] {
+				if strings.HasPrefix(a, "--from=") {
+					from = strings.TrimPrefix(a, "--from=")
+					continue
+				}
+				if name == "" && !strings.HasPrefix(a, "-") {
+					name = a
+				}
+			}
+			if name == "" {
+				fatal(fmt.Errorf("usage: sprout branch create <name> [--from=<connector>]"))
+			}
 			var rec meta.BranchRecord
-			if err := c.do("POST", "/v1/projects/default/branches", map[string]string{"name": os.Args[3]}, &rec); err != nil {
+			body := map[string]string{"name": name}
+			if from != "" {
+				body["from"] = from
+			}
+			if err := c.do("POST", "/v1/projects/default/branches", body, &rec); err != nil {
 				fatal(err)
 			}
-			fmt.Printf("✓ %s [%s]\n  %s\n", rec.Name, rec.Status, rec.ConnString)
+			src := rec.SourceConnector
+			if src == "" {
+				src = "main"
+			}
+			fmt.Printf("✓ %s [%s] from=%s\n  %s\n", rec.Name, rec.Status, src, rec.ConnString)
 		case "list":
 			var list []meta.BranchRecord
 			if err := c.do("GET", "/v1/projects/default/branches", nil, &list); err != nil {
 				fatal(err)
 			}
 			for _, b := range list {
-				fmt.Printf("%-16s %-10s port=%-5d %s\n", b.Name, b.Status, b.Port, b.ConnString)
+				src := b.SourceConnector
+				if src == "" && b.Role == "branch" {
+					src = "-"
+				}
+				if b.Role == "branch" {
+					fmt.Printf("%-16s %-10s port=%-5d from=%-12s %s\n", b.Name, b.Status, b.Port, src, b.ConnString)
+				} else {
+					fmt.Printf("%-16s %-10s port=%-5d role=%-8s %s\n", b.Name, b.Status, b.Port, b.Role, b.ConnString)
+				}
 			}
 		case "get":
 			need(4)
@@ -187,7 +226,7 @@ func (c *client) do(method, path string, body any, out any) error {
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	res, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("server unreachable (%s): %w\nStart it with: ./bin/ardent-server", c.base, err)
+		return fmt.Errorf("server unreachable (%s): %w\nStart it with: ./bin/sprout-server", c.base, err)
 	}
 	defer res.Body.Close()
 	data, _ := io.ReadAll(res.Body)
@@ -216,27 +255,28 @@ func need(n int) {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `ardent — Phase 2 CLI (talks to ardent-server)
+	fmt.Fprintf(os.Stderr, `sprout — Phase 2/3 CLI (talks to sprout-server)
 
 Usage:
-  ardent init
-  ardent connect [--mode=logical|physical] <url>
+  sprout init
+  sprout connect [--name=<id>] [--mode=logical|physical] <url>
+                                  Each --name gets data/replicas/<name>/ + its own port
                                   physical = pg_basebackup (full PGDATA twin)
                                   logical  = publication/subscription (table sync)
-  ardent status                     Replication lag / connector state
-  ardent connector list             List all connectors
-  ardent health
-  ardent branch create <name>
-  ardent branch list
-  ardent branch get <name>
-  ardent branch reset <name>
-  ardent branch delete <name>
-  ardent branch suspend <name>
-  ardent branch resume <name>
+  sprout status [name]              Replication lag (optional connector name)
+  sprout connector list             List connectors (name, mode, port, dir)
+  sprout health
+  sprout branch create <name> [--from=<connector|main>]
+  sprout branch list
+  sprout branch get <name>
+  sprout branch reset <name>
+  sprout branch delete <name>
+  sprout branch suspend <name>
+  sprout branch resume <name>
 
 Env:
-  ARDENT_SERVER  default http://127.0.0.1:8080
-  ARDENT_TOKEN   default dev-token
+  SPROUT_SERVER  default http://127.0.0.1:8080
+  SPROUT_TOKEN   default dev-token
 `)
 }
 

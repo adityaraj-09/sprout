@@ -1,4 +1,4 @@
-// Package storage is Layer 3 of Ardent-like branching.
+// Package storage is Layer 3 of Sprout-like branching.
 //
 // Why this exists:
 //   Branching a TB-sized Postgres must NOT copy bytes.

@@ -8,7 +8,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/adityaraj/ardent-clone/internal/postgres"
+	"github.com/adityaraj/sprout/internal/postgres"
 )
 
 // Spec describes one Postgres workload to run.

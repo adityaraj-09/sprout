@@ -9,14 +9,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/adityaraj/ardent-clone/internal/api"
-	"github.com/adityaraj/ardent-clone/internal/branch"
-	"github.com/adityaraj/ardent-clone/internal/compute"
-	"github.com/adityaraj/ardent-clone/internal/config"
-	"github.com/adityaraj/ardent-clone/internal/meta"
-	"github.com/adityaraj/ardent-clone/internal/postgres"
-	"github.com/adityaraj/ardent-clone/internal/reconcile"
-	"github.com/adityaraj/ardent-clone/internal/storage"
+	"github.com/adityaraj/sprout/internal/api"
+	"github.com/adityaraj/sprout/internal/branch"
+	"github.com/adityaraj/sprout/internal/compute"
+	"github.com/adityaraj/sprout/internal/config"
+	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/postgres"
+	"github.com/adityaraj/sprout/internal/reconcile"
+	"github.com/adityaraj/sprout/internal/storage"
 )
 
 func main() {
@@ -37,7 +37,7 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	store, err := meta.OpenFile(cfg.MetaPath())
+	store, err := meta.Open(cfg.MetaPath())
 	if err != nil {
 		fatal(err)
 	}
@@ -68,12 +68,16 @@ func main() {
 		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
 
-	fmt.Printf("ardent-server listening on http://%s\n", cfg.Listen)
+	fmt.Printf("sprout-server listening on http://%s\n", cfg.Listen)
 	fmt.Printf("  data_root: %s\n", cfg.DataRoot)
 	fmt.Printf("  storage:   %s\n", stor.Name())
 	fmt.Printf("  compute:   %s\n", comp.Name())
 	fmt.Printf("  meta:      %s\n", cfg.MetaPath())
 	fmt.Printf("  token:     %s\n", cfg.Token)
+	fmt.Printf("  pg_host:   %s (listen_addresses=%s)\n", postgres.PublicHost(), postgres.ListenAddresses())
+	if postgres.RemoteAccess() {
+		fmt.Println("  warning:   Postgres accepts remote TCP with trust auth — firewall + SPROUT_SAFE=true for anything real")
+	}
 
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fatal(err)

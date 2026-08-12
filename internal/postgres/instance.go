@@ -56,11 +56,7 @@ type Instance struct {
 }
 
 func (i *Instance) ConnString(db string) string {
-	if db == "" {
-		db = "postgres"
-	}
-	// trust auth locally for Phase 1 simplicity (see pg_hba.conf we write).
-	return fmt.Sprintf("postgresql://localhost:%d/%s", i.Port, db)
+	return FormatConnString(i.Port, db)
 }
 
 // Init creates a brand-new cluster in DataDir (only for MAIN, never for branches).
@@ -74,29 +70,11 @@ func (i *Instance) Init() error {
 	if err != nil {
 		return fmt.Errorf("initdb: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
-	return i.writeConfig()
+	return ApplyNetworkSettings(i.DataDir, i.Port)
 }
 
 func (i *Instance) writeConfig() error {
-	conf := filepath.Join(i.DataDir, "postgresql.conf")
-	extra := fmt.Sprintf(`
-# --- ardent-clone phase1 ---
-port = %d
-listen_addresses = '127.0.0.1'
-unix_socket_directories = '%s'
-logging_collector = off
-fsync = off          # Phase 1 lab only — faster demos, NOT for real data
-synchronous_commit = off
-full_page_writes = off
-`, i.Port, i.DataDir)
-
-	f, err := os.OpenFile(conf, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = f.WriteString(extra)
-	return err
+	return ApplyNetworkSettings(i.DataDir, i.Port)
 }
 
 // PrepareClone makes a CoW-cloned PGDATA safe to start as an independent primary.
@@ -113,20 +91,7 @@ func (i *Instance) PrepareClone() error {
 	_ = os.Remove(filepath.Join(i.DataDir, "standby.signal"))
 	_ = os.Remove(filepath.Join(i.DataDir, "recovery.signal"))
 
-	// Rewrite port / socket dir for this instance.
-	// Simplest Phase 1 approach: append overrides (last wins for many GUCs).
-	conf := filepath.Join(i.DataDir, "postgresql.conf")
-	f, err := os.OpenFile(conf, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = fmt.Fprintf(f, `
-# --- ardent branch override ---
-port = %d
-unix_socket_directories = '%s'
-`, i.Port, i.DataDir)
-	return err
+	return ApplyNetworkSettings(i.DataDir, i.Port)
 }
 
 func (i *Instance) Start() error {
