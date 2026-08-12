@@ -110,7 +110,12 @@ func (m *Manager) Ping(ctx context.Context, c Conn) error {
 	cmd.Env = c.pgEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("cannot connect to primary: %w (%s)", err, strings.TrimSpace(string(out)))
+		msg := strings.TrimSpace(string(out))
+		hint := ""
+		if strings.Contains(msg, "Network is unreachable") || strings.Contains(err.Error(), "network is unreachable") {
+			hint = " — tip: prefer IPv4 (hostaddr) or fix broken IPv6 on this VM; Sprout already tries tcp4 first"
+		}
+		return fmt.Errorf("cannot connect to primary: %w (%s)%s", err, msg, hint)
 	}
 	return nil
 }
@@ -274,7 +279,11 @@ func EnsurePrimaryReachable(host string, port int, timeout time.Duration) error 
 		}
 		errs = append(errs, fmt.Sprintf("%s: %v", network, err))
 	}
-	return fmt.Errorf("primary %s not reachable (%s)", addr, strings.Join(errs, "; "))
+	hint := ""
+	if strings.Contains(strings.Join(errs, " "), "network is unreachable") || strings.Contains(strings.Join(errs, " "), "no such host") {
+		hint = " — tip: host may be IPv6-only or DNS has no A record; enable IPv4 on the upstream, use a pooler with IPv4, or fix VM IPv6 routing"
+	}
+	return fmt.Errorf("primary %s not reachable (%s)%s", addr, strings.Join(errs, "; "), hint)
 }
 
 func lookupIPv4(host string) string {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/adityaraj/sprout/internal/branch"
 	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/postgres"
 )
 
 type Server struct {
@@ -29,15 +30,18 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes() {
 	s.Mux.HandleFunc("GET /healthz", s.handleHealth)
+	s.Mux.HandleFunc("GET /v1/doctor", s.handleDoctor)
 	s.Mux.HandleFunc("POST /v1/init", s.handleInit)
 	s.Mux.HandleFunc("GET /v1/connectors", s.handleListConnectors)
 	s.Mux.HandleFunc("POST /v1/projects/{project}/connect", s.handleConnect)
+	s.Mux.HandleFunc("DELETE /v1/projects/{project}/connectors/{name}", s.handleDeleteConnector)
 	s.Mux.HandleFunc("GET /v1/projects/{project}/replication", s.handleReplication)
 	s.Mux.HandleFunc("GET /v1/projects/{project}/connectors/{name}/replication", s.handleReplicationNamed)
 	s.Mux.HandleFunc("GET /v1/projects", s.handleListProjects)
 	s.Mux.HandleFunc("POST /v1/projects/{project}/branches", s.handleCreateBranch)
 	s.Mux.HandleFunc("GET /v1/projects/{project}/branches", s.handleListBranches)
 	s.Mux.HandleFunc("GET /v1/projects/{project}/branches/{name}", s.handleGetBranch)
+	s.Mux.HandleFunc("GET /v1/projects/{project}/branches/{name}/diff", s.handleDiffBranch)
 	s.Mux.HandleFunc("DELETE /v1/projects/{project}/branches/{name}", s.handleDeleteBranch)
 	s.Mux.HandleFunc("POST /v1/projects/{project}/branches/{name}/reset", s.handleResetBranch)
 	s.Mux.HandleFunc("POST /v1/projects/{project}/branches/{name}/suspend", s.handleSuspendBranch)
@@ -63,13 +67,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
+	rep := s.Service.Doctor(r.Context())
+	writeJSON(w, http.StatusOK, rep)
+}
+
 func (s *Server) handleListConnectors(w http.ResponseWriter, r *http.Request) {
 	list, err := s.Service.Store.ListConnectors(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "list_failed", err.Error())
 		return
 	}
-	// Redact passwords in URLs for list responses.
 	out := make([]meta.Connector, 0, len(list))
 	for _, c := range list {
 		c.PrimaryURL = redactURL(c.PrimaryURL)
@@ -79,7 +87,6 @@ func (s *Server) handleListConnectors(w http.ResponseWriter, r *http.Request) {
 }
 
 func redactURL(raw string) string {
-	// postgresql://user:pass@host → postgresql://user:***@host
 	if i := strings.Index(raw, "://"); i >= 0 {
 		rest := raw[i+3:]
 		if at := strings.Index(rest, "@"); at >= 0 {
@@ -111,27 +118,70 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		URL  string `json:"url"`
-		Mode string `json:"mode"` // physical (default) | logical
-		Name string `json:"name"` // unique per project; default "primary"
+		URL    string   `json:"url"`
+		Mode   string   `json:"mode"`
+		Name   string   `json:"name"`
+		Wipe   *bool    `json:"wipe"`
+		DryRun bool     `json:"dry_run"`
+		Tables []string `json:"tables"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.URL == "" {
-		writeErr(w, http.StatusBadRequest, "invalid_body", `JSON {"url":"postgresql://...","mode":"logical|physical","name":"supabase"} required`)
+		writeErr(w, http.StatusBadRequest, "invalid_body",
+			`JSON {"url":"postgresql://...","mode":"logical|physical","name":"...","wipe":true,"dry_run":false,"tables":["t"]} required`)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Minute) // full bootstrap can be slow
+	wipe := true
+	if body.Wipe != nil {
+		wipe = *body.Wipe
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Minute)
 	defer cancel()
-	conn, lag, err := s.Service.Connect(ctx, proj.ID, body.Name, body.URL, body.Mode)
+	res, err := s.Service.Connect(ctx, proj.ID, branch.ConnectOpts{
+		Name: body.Name, URL: body.URL, Mode: body.Mode,
+		Wipe: wipe, DryRun: body.DryRun, Tables: body.Tables,
+	})
 	if err != nil {
 		code, status := mapErr(err)
 		writeErr(w, status, code, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"connector": conn,
-		"lag":       lag,
+	if res.DryRun {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"dry_run":  true,
+			"estimate": res.Estimate,
+			"project":  proj,
+		})
+		return
+	}
+	if res.Connector != nil {
+		res.Connector.PrimaryURL = redactURL(res.Connector.PrimaryURL)
+	}
+	out := map[string]any{
+		"connector": res.Connector,
+		"lag":       res.Lag,
 		"project":   proj,
-	})
+	}
+	if res.Connector != nil {
+		out["connection_string"] = postgres.FormatConnString(res.Connector.Port, "postgres")
+		out["psql"] = postgres.PsqlOneLiner(res.Connector.Port)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleDeleteConnector(w http.ResponseWriter, r *http.Request) {
+	proj, err := s.resolveProject(r)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "project_not_found", err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	if err := s.Service.DeleteConnector(ctx, proj.ID, r.PathValue("name")); err != nil {
+		code, status := mapErr(err)
+		writeErr(w, status, code, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleReplication(w http.ResponseWriter, r *http.Request) {
@@ -182,7 +232,7 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Name string `json:"name"`
-		From string `json:"from"` // connector name or "main"
+		From string `json:"from"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_body", `JSON {"name":"...","from":"connector-name"} required`)
@@ -196,7 +246,44 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, status, code, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, rec)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"id":                 rec.ID,
+		"project_id":         rec.ProjectID,
+		"name":               rec.Name,
+		"role":               rec.Role,
+		"status":             rec.Status,
+		"port":               rec.Port,
+		"data_dir":           rec.DataDir,
+		"snapshot_ref":       rec.SnapshotRef,
+		"container_id":       rec.ContainerID,
+		"compute":            rec.Compute,
+		"connection_string":  rec.ConnString,
+		"psql":               postgres.PsqlOneLiner(rec.Port),
+		"error_message":      rec.ErrorMessage,
+		"source_lsn":         rec.SourceLSN,
+		"source_connector":   rec.SourceConnector,
+		"source_connector_id": rec.SourceConnectorID,
+		"created_at":         rec.CreatedAt,
+		"updated_at":         rec.UpdatedAt,
+		"last_used_at":       rec.LastUsedAt,
+	})
+}
+
+func (s *Server) handleDiffBranch(w http.ResponseWriter, r *http.Request) {
+	proj, err := s.resolveProject(r)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "project_not_found", err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	diff, err := s.Service.DiffBranch(ctx, proj.ID, r.PathValue("name"))
+	if err != nil {
+		code, status := mapErr(err)
+		writeErr(w, status, code, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, diff)
 }
 
 func (s *Server) handleListBranches(w http.ResponseWriter, r *http.Request) {
@@ -291,6 +378,10 @@ func mapErr(err error) (code string, status int) {
 		return "connector_exists", http.StatusConflict
 	case strings.HasPrefix(msg, "invalid_mode"):
 		return "invalid_mode", http.StatusBadRequest
+	case strings.HasPrefix(msg, "version_mismatch"):
+		return "version_mismatch", http.StatusBadRequest
+	case strings.HasPrefix(msg, "dry_run"):
+		return "invalid_body", http.StatusBadRequest
 	case strings.HasPrefix(msg, "replica_lag"):
 		return "replica_lag", http.StatusConflict
 	case strings.HasPrefix(msg, "compute_failed"):

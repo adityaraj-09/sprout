@@ -1,8 +1,11 @@
 export { SproutClient } from "./client.js";
 export type {
+  BranchDiff,
   BranchRecord,
   ConnectResult,
   Connector,
+  DoctorCheck,
+  DoctorReport,
   Project,
   ReplicationStatus,
   SproutClientOptions,

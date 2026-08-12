@@ -101,6 +101,8 @@ func (s *Service) InitMain(ctx context.Context) (meta.Project, error) {
 		}
 	}
 
+	_ = main.EnsureAppRoles()
+
 	// Seed demo rows (idempotent).
 	if err := main.SeedDemo(); err != nil {
 		return proj, fmt.Errorf("seed: %w", err)
@@ -114,6 +116,7 @@ func (s *Service) InitMain(ctx context.Context) (meta.Project, error) {
 	})
 
 	fmt.Println("✓ main ready:", main.ConnString("postgres"))
+	fmt.Println("  ", postgres.PsqlOneLiner(MainPort))
 	return proj, nil
 }
 
@@ -171,6 +174,7 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 	}
 	fmt.Printf("✓ branch %q ready in %s\n", name, time.Since(total).Round(time.Millisecond))
 	fmt.Println("  ", rec.ConnString)
+	fmt.Println("  ", postgres.PsqlOneLiner(rec.Port))
 	return rec, nil
 }
 
@@ -326,6 +330,7 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	}
 	rec.ContainerID = h.ContainerID
 	rec.ConnString = inst.ConnString("postgres")
+	_ = inst.EnsureAppRoles()
 	return nil
 }
 
@@ -373,6 +378,7 @@ func (s *Service) Reset(ctx context.Context, projectID, name string) (meta.Branc
 	rec.ErrorMessage = ""
 	rec.ConnString = inst.ConnString("postgres")
 	rec.LastUsedAt = time.Now().UTC()
+	_ = inst.EnsureAppRoles()
 	_ = s.Store.UpdateBranch(ctx, rec)
 	return rec, nil
 }
@@ -437,6 +443,9 @@ func (s *Service) Resume(ctx context.Context, projectID, name string) (meta.Bran
 	rec.ContainerID = started.ContainerID
 	rec.Status = meta.StatusActive
 	rec.LastUsedAt = time.Now().UTC()
+	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres")
+	inst := &postgres.Instance{Name: rec.Name, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(rec.Name), Bins: s.Bins}
+	_ = inst.EnsureAppRoles()
 	_ = s.Store.UpdateBranch(ctx, rec)
 	return rec, nil
 }

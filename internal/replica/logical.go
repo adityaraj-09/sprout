@@ -26,9 +26,8 @@ type LogicalStatus struct {
 }
 
 // EnsurePublication creates (or recreates) a publication on the primary.
-// Prefers TABLES IN SCHEMA public (PG15+) so cloud catalogs (e.g. Supabase auth)
-// are not pulled into a local subscriber that only imported public DDL.
-func (m *Manager) EnsurePublication(ctx context.Context, c Conn, pubName, schema string) error {
+// If tables is non-empty, publishes only those tables in schema; else TABLES IN SCHEMA.
+func (m *Manager) EnsurePublication(ctx context.Context, c Conn, pubName, schema string, tables []string) error {
 	if schema == "" {
 		schema = "public"
 	}
@@ -44,6 +43,19 @@ func (m *Manager) EnsurePublication(ctx context.Context, c Conn, pubName, schema
 	drop := fmt.Sprintf(`DROP PUBLICATION IF EXISTS %s;`, quoteIdent(pubName))
 	_, _ = m.psqlPrimary(ctx, c, drop)
 
+	if len(tables) > 0 {
+		parts := make([]string, 0, len(tables))
+		for _, t := range tables {
+			parts = append(parts, quoteIdent(schema)+"."+quoteIdent(t))
+		}
+		sql := fmt.Sprintf(`CREATE PUBLICATION %s FOR TABLE %s;`, quoteIdent(pubName), strings.Join(parts, ", "))
+		if _, err := m.psqlPrimary(ctx, c, sql); err != nil {
+			return fmt.Errorf("create publication (table list): %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "  publication %s for %d tables\n", pubName, len(tables))
+		return nil
+	}
+
 	scoped := fmt.Sprintf(`CREATE PUBLICATION %s FOR TABLES IN SCHEMA %s;`, quoteIdent(pubName), quoteIdent(schema))
 	if _, err := m.psqlPrimary(ctx, c, scoped); err != nil {
 		fallback := fmt.Sprintf(`CREATE PUBLICATION %s FOR ALL TABLES;`, quoteIdent(pubName))
@@ -56,7 +68,7 @@ func (m *Manager) EnsurePublication(ctx context.Context, c Conn, pubName, schema
 }
 
 // DumpSchema copies public schema DDL from primary into local subscriber (tables must exist before SUBSCRIPTION).
-func (m *Manager) DumpSchema(ctx context.Context, c Conn, localHost string, localPort int, schema string) error {
+func (m *Manager) DumpSchema(ctx context.Context, c Conn, localHost string, localPort int, schema string, tables []string) error {
 	if schema == "" {
 		schema = "public"
 	}
@@ -65,14 +77,21 @@ func (m *Manager) DumpSchema(ctx context.Context, c Conn, localHost string, loca
 		return fmt.Errorf("pg_dump not in PATH (install a client matching the primary major version)")
 	}
 	fmt.Fprintf(os.Stderr, "→ dumping schema %q from primary with %s\n", schema, pgDump)
-	dump := exec.CommandContext(ctx, pgDump,
+	args := []string{
 		"-h", c.DialHost(), "-p", strconv.Itoa(c.Port), "-U", c.User, "-d", c.Database,
-		"--schema="+schema,
 		"--schema-only",
 		"--no-owner",
 		"--no-acl",
 		"--no-comments",
-	)
+	}
+	if len(tables) > 0 {
+		for _, t := range tables {
+			args = append(args, "-t", schema+"."+t)
+		}
+	} else {
+		args = append(args, "--schema="+schema)
+	}
+	dump := exec.CommandContext(ctx, pgDump, args...)
 	dump.Env = c.pgEnv()
 	ddl, err := dump.Output()
 	if err != nil {
@@ -220,6 +239,7 @@ SELECT
 
 func (m *Manager) WaitLogicalSync(ctx context.Context, localHost string, localPort int, subName string, timeout time.Duration) (LogicalStatus, error) {
 	deadline := time.Now().Add(timeout)
+	started := time.Now()
 	var last LogicalStatus
 	for time.Now().Before(deadline) {
 		select {
@@ -230,8 +250,21 @@ func (m *Manager) WaitLogicalSync(ctx context.Context, localHost string, localPo
 		st, err := m.LogicalSyncStatus(ctx, localHost, localPort, subName)
 		if err == nil {
 			last = st
-			fmt.Fprintf(os.Stderr, "  sync tables ready=%d/%d enabled=%v lsn=%s\n", st.TableReady, st.TableTotal, st.Enabled, st.ReceivedLSN)
-			// Initial copy done when every subscribed relation is in state 'r'.
+			pct := 0
+			eta := "?"
+			if st.TableTotal > 0 {
+				pct = (100 * st.TableReady) / st.TableTotal
+				if st.TableReady > 0 && st.TableReady < st.TableTotal {
+					elapsed := time.Since(started)
+					per := elapsed / time.Duration(st.TableReady)
+					left := per * time.Duration(st.TableTotal-st.TableReady)
+					eta = left.Round(time.Second).String()
+				} else if st.TableReady >= st.TableTotal {
+					eta = "0s"
+				}
+			}
+			fmt.Fprintf(os.Stderr, "  sync tables %d/%d (%d%%) eta~%s enabled=%v lsn=%s\n",
+				st.TableReady, st.TableTotal, pct, eta, st.Enabled, st.ReceivedLSN)
 			if st.TableTotal > 0 && st.TableReady >= st.TableTotal {
 				return st, nil
 			}

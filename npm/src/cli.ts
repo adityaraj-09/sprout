@@ -15,14 +15,16 @@ Usage:
   sprout [--api-url=<url>] [--token=<token>] <command> ...
 
 Commands:
+  sprout doctor
   sprout init
-  sprout connect [--name=<id>] [--mode=logical|physical] <postgresql-url>
+  sprout connect [--name=<id>] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
   sprout status [name]
   sprout connector list
+  sprout connector delete <name>
   sprout health
   sprout branch create <name> [--from=<connector|main>]
   sprout branch list
-  sprout branch get|reset|delete|suspend|resume <name>
+  sprout branch get|diff|reset|delete|suspend|resume <name>
 
 Config (persisted in ~/.sprout/config.json):
   sprout config set api-url <url>
@@ -194,6 +196,17 @@ async function main(): Promise<void> {
 
   try {
     switch (cmd) {
+      case "doctor": {
+        const rep = await client.doctor();
+        console.log(rep.ok ? "✓ doctor ok" : "✗ doctor found problems");
+        for (const ch of rep.checks) {
+          const mark = !ch.ok ? "✗" : ch.level === "warn" ? "!" : "✓";
+          console.log(`${mark} ${ch.name.padEnd(16)} ${ch.detail}`);
+          if (ch.hint) console.log(`    hint: ${ch.hint}`);
+        }
+        if (!rep.ok) process.exit(1);
+        break;
+      }
       case "init": {
         const proj = await client.init();
         console.log(`✓ project ${proj.name} (${proj.id})`);
@@ -205,15 +218,34 @@ async function main(): Promise<void> {
         if (rest.includes("--logical")) mode = "logical";
         if (rest.includes("--physical")) mode = "physical";
         const name = flag(rest, "name") ?? "primary";
+        const wipe = !rest.includes("--no-wipe");
+        const dryRun = rest.includes("--dry-run");
+        const tablesRaw = flag(rest, "tables");
+        const tables = tablesRaw
+          ? tablesRaw
+              .split(",")
+              .map((t) => t.trim())
+              .filter(Boolean)
+          : undefined;
         const url = positional(rest)[0];
         if (!url) {
           fatal(
             new Error(
-              "usage: sprout connect [--name=<id>] [--mode=logical|physical] <postgresql-url>",
+              "usage: sprout connect [--name=<id>] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <postgresql-url>",
             ),
           );
         }
-        const out = await client.connect({ url, name, mode });
+        const out = await client.connect({ url, name, mode, wipe, dryRun, tables });
+        if (out.dry_run) {
+          console.log("dry-run estimate (will hit prod once for real bootstrap):");
+          console.log(JSON.stringify(out.estimate, null, 2));
+          break;
+        }
+        if (out.connection_string) {
+          console.log("✓ connected");
+          console.log(`  ${out.connection_string}`);
+          if (out.psql) console.log(`  ${out.psql}`);
+        }
         console.log(JSON.stringify(out, null, 2));
         break;
       }
@@ -224,17 +256,28 @@ async function main(): Promise<void> {
         break;
       }
       case "connector": {
-        if (argv[1] !== "list") usage();
-        const list = await client.listConnectors();
-        if (list.length === 0) {
-          console.log("(no connectors)");
+        const sub = argv[1];
+        if (sub === "list") {
+          const list = await client.listConnectors();
+          if (list.length === 0) {
+            console.log("(no connectors)");
+            break;
+          }
+          for (const conn of list) {
+            console.log(
+              `${conn.name.padEnd(12)} ${conn.mode.padEnd(10)} ${conn.status.padEnd(14)} port=${String(conn.port).padEnd(5)} lag_bytes=${conn.last_lag_bytes} lsn=${conn.last_lsn ?? ""}\n  dir=${conn.data_dir}\n  ${conn.primary_url}`,
+            );
+          }
           break;
         }
-        for (const conn of list) {
-          console.log(
-            `${conn.name.padEnd(12)} ${conn.mode.padEnd(10)} ${conn.status.padEnd(14)} port=${String(conn.port).padEnd(5)} lag_bytes=${conn.last_lag_bytes} lsn=${conn.last_lsn ?? ""}\n  dir=${conn.data_dir}\n  ${conn.primary_url}`,
-          );
+        if (sub === "delete") {
+          const name = argv[2];
+          if (!name) usage();
+          await client.deleteConnector(name);
+          console.log(`✓ deleted connector ${name}`);
+          break;
         }
+        usage();
         break;
       }
       case "health": {
@@ -256,6 +299,7 @@ async function main(): Promise<void> {
             const rec = await client.createBranch(name, from);
             const src = rec.source_connector || "main";
             console.log(`✓ ${rec.name} [${rec.status}] from=${src}\n  ${rec.connection_string}`);
+            if (rec.psql) console.log(`  ${rec.psql}`);
             break;
           }
           case "list": {
@@ -278,6 +322,14 @@ async function main(): Promise<void> {
             const name = argv[2];
             if (!name) usage();
             console.log(JSON.stringify(await client.getBranch(name), null, 2));
+            break;
+          }
+          case "diff": {
+            const name = argv[2];
+            if (!name) usage();
+            const diff = await client.diffBranch(name);
+            console.log(diff.summary);
+            console.log(JSON.stringify(diff, null, 2));
             break;
           }
           case "reset": {

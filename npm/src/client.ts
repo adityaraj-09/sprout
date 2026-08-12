@@ -1,7 +1,9 @@
 import {
+  BranchDiff,
   BranchRecord,
   ConnectResult,
   Connector,
+  DoctorReport,
   Project,
   ReplicationStatus,
   SproutClientOptions,
@@ -34,6 +36,10 @@ export class SproutClient {
     return this.request("GET", "/healthz");
   }
 
+  async doctor(): Promise<DoctorReport> {
+    return this.request("GET", "/v1/doctor");
+  }
+
   async init(): Promise<Project> {
     return this.request("POST", "/v1/init");
   }
@@ -50,12 +56,25 @@ export class SproutClient {
     url: string;
     name?: string;
     mode?: "physical" | "logical" | string;
+    wipe?: boolean;
+    dryRun?: boolean;
+    tables?: string[];
   }): Promise<ConnectResult> {
     return this.request("POST", `/v1/projects/${this.project}/connect`, {
       url: opts.url,
       name: opts.name ?? "primary",
       mode: opts.mode ?? "physical",
+      wipe: opts.wipe ?? true,
+      dry_run: opts.dryRun ?? false,
+      tables: opts.tables,
     });
+  }
+
+  async deleteConnector(name: string): Promise<void> {
+    await this.request(
+      "DELETE",
+      `/v1/projects/${this.project}/connectors/${encodeURIComponent(name)}`,
+    );
   }
 
   async replication(name?: string): Promise<ReplicationStatus> {
@@ -68,10 +87,17 @@ export class SproutClient {
     return this.request("GET", `/v1/projects/${this.project}/replication`);
   }
 
-  async createBranch(name: string, from?: string): Promise<BranchRecord> {
+  async createBranch(name: string, from?: string): Promise<BranchRecord & { psql?: string }> {
     const body: Record<string, string> = { name };
     if (from) body.from = from;
     return this.request("POST", `/v1/projects/${this.project}/branches`, body);
+  }
+
+  async diffBranch(name: string): Promise<BranchDiff> {
+    return this.request(
+      "GET",
+      `/v1/projects/${this.project}/branches/${encodeURIComponent(name)}/diff`,
+    );
   }
 
   async listBranches(): Promise<BranchRecord[]> {

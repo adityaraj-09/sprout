@@ -30,11 +30,43 @@ func main() {
 			fatal(err)
 		}
 		fmt.Printf("✓ project %s (%s)\n", proj.Name, proj.ID)
+	case "doctor":
+		var out map[string]any
+		if err := c.do("GET", "/v1/doctor", nil, &out); err != nil {
+			fatal(err)
+		}
+		ok, _ := out["ok"].(bool)
+		if ok {
+			fmt.Println("✓ doctor ok")
+		} else {
+			fmt.Println("✗ doctor found problems")
+		}
+		if checks, ok := out["checks"].([]any); ok {
+			for _, raw := range checks {
+				ch, _ := raw.(map[string]any)
+				mark := "✓"
+				if v, _ := ch["ok"].(bool); !v {
+					mark = "✗"
+				} else if lvl, _ := ch["level"].(string); lvl == "warn" {
+					mark = "!"
+				}
+				fmt.Printf("%s %-16s %v\n", mark, ch["name"], ch["detail"])
+				if hint, _ := ch["hint"].(string); hint != "" {
+					fmt.Printf("    hint: %s\n", hint)
+				}
+			}
+		}
+		if !ok {
+			os.Exit(1)
+		}
 	case "connect":
-		// sprout connect [--name=...] [--mode=logical|physical] <url>
+		// sprout connect [--name=...] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
 		mode := "physical"
 		name := "primary"
 		url := ""
+		wipe := true
+		dryRun := false
+		var tables []string
 		for _, a := range os.Args[2:] {
 			if strings.HasPrefix(a, "--mode=") {
 				mode = strings.TrimPrefix(a, "--mode=")
@@ -42,6 +74,16 @@ func main() {
 			}
 			if strings.HasPrefix(a, "--name=") {
 				name = strings.TrimPrefix(a, "--name=")
+				continue
+			}
+			if strings.HasPrefix(a, "--tables=") {
+				raw := strings.TrimPrefix(a, "--tables=")
+				for _, t := range strings.Split(raw, ",") {
+					t = strings.TrimSpace(t)
+					if t != "" {
+						tables = append(tables, t)
+					}
+				}
 				continue
 			}
 			if a == "--logical" {
@@ -52,16 +94,45 @@ func main() {
 				mode = "physical"
 				continue
 			}
+			if a == "--wipe" {
+				wipe = true
+				continue
+			}
+			if a == "--no-wipe" {
+				wipe = false
+				continue
+			}
+			if a == "--dry-run" {
+				dryRun = true
+				continue
+			}
 			if url == "" && !strings.HasPrefix(a, "-") {
 				url = a
 			}
 		}
 		if url == "" {
-			fatal(fmt.Errorf("usage: sprout connect [--name=<id>] [--mode=logical|physical] <postgresql-url>"))
+			fatal(fmt.Errorf("usage: sprout connect [--name=<id>] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <postgresql-url>"))
+		}
+		body := map[string]any{"url": url, "mode": mode, "name": name, "wipe": wipe, "dry_run": dryRun}
+		if len(tables) > 0 {
+			body["tables"] = tables
 		}
 		var out map[string]any
-		if err := c.do("POST", "/v1/projects/default/connect", map[string]string{"url": url, "mode": mode, "name": name}, &out); err != nil {
+		if err := c.do("POST", "/v1/projects/default/connect", body, &out); err != nil {
 			fatal(err)
+		}
+		if dry, _ := out["dry_run"].(bool); dry {
+			fmt.Println("dry-run estimate (will hit prod once for real bootstrap):")
+			b, _ := json.MarshalIndent(out["estimate"], "", "  ")
+			fmt.Println(string(b))
+			return
+		}
+		if cs, _ := out["connection_string"].(string); cs != "" {
+			fmt.Println("✓ connected")
+			fmt.Println(" ", cs)
+			if psql, _ := out["psql"].(string); psql != "" {
+				fmt.Println(" ", psql)
+			}
 		}
 		b, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(b))
@@ -95,6 +166,12 @@ func main() {
 				fmt.Printf("%-12s %-10s %-14s port=%-5d lag_bytes=%d lsn=%s\n  dir=%s\n  %s\n",
 					conn.Name, conn.Mode, conn.Status, conn.Port, conn.LastLagBytes, conn.LastLSN, conn.DataDir, conn.PrimaryURL)
 			}
+		case "delete":
+			need(4)
+			if err := c.do("DELETE", "/v1/projects/default/connectors/"+os.Args[3], nil, nil); err != nil {
+				fatal(err)
+			}
+			fmt.Printf("✓ deleted connector %s\n", os.Args[3])
 		default:
 			usage()
 			os.Exit(2)
@@ -121,7 +198,7 @@ func main() {
 			if name == "" {
 				fatal(fmt.Errorf("usage: sprout branch create <name> [--from=<connector>]"))
 			}
-			var rec meta.BranchRecord
+			var rec map[string]any
 			body := map[string]string{"name": name}
 			if from != "" {
 				body["from"] = from
@@ -129,11 +206,18 @@ func main() {
 			if err := c.do("POST", "/v1/projects/default/branches", body, &rec); err != nil {
 				fatal(err)
 			}
-			src := rec.SourceConnector
+			src, _ := rec["source_connector"].(string)
 			if src == "" {
 				src = "main"
 			}
-			fmt.Printf("✓ %s [%s] from=%s\n  %s\n", rec.Name, rec.Status, src, rec.ConnString)
+			cs, _ := rec["connection_string"].(string)
+			psql, _ := rec["psql"].(string)
+			status, _ := rec["status"].(string)
+			bname, _ := rec["name"].(string)
+			fmt.Printf("✓ %s [%s] from=%s\n  %s\n", bname, status, src, cs)
+			if psql != "" {
+				fmt.Println(" ", psql)
+			}
 		case "list":
 			var list []meta.BranchRecord
 			if err := c.do("GET", "/v1/projects/default/branches", nil, &list); err != nil {
@@ -159,6 +243,17 @@ func main() {
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			_ = enc.Encode(rec)
+		case "diff":
+			need(4)
+			var out map[string]any
+			if err := c.do("GET", "/v1/projects/default/branches/"+os.Args[3]+"/diff", nil, &out); err != nil {
+				fatal(err)
+			}
+			if sum, _ := out["summary"].(string); sum != "" {
+				fmt.Println(sum)
+			}
+			b, _ := json.MarshalIndent(out, "", "  ")
+			fmt.Println(string(b))
 		case "reset":
 			need(4)
 			var rec meta.BranchRecord
@@ -258,17 +353,21 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `sprout — Phase 2/3 CLI (talks to sprout-server)
 
 Usage:
+  sprout doctor
   sprout init
-  sprout connect [--name=<id>] [--mode=logical|physical] <url>
-                                  Each --name gets data/replicas/<name>/ + its own port
-                                  physical = pg_basebackup (full PGDATA twin)
-                                  logical  = publication/subscription (table sync)
-  sprout status [name]              Replication lag (optional connector name)
-  sprout connector list             List connectors (name, mode, port, dir)
+  sprout connect [--name=<id>] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
+                                  wipe (default) = destroy local replica and rebootstrap
+                                  --no-wipe      = resume existing replica when possible
+                                  --dry-run      = estimate tables/rows (logical only)
+                                  --tables=...   = allowlist for logical sync
+  sprout status [name]
+  sprout connector list
+  sprout connector delete <name>  drops local replica + remote publication (logical)
   sprout health
   sprout branch create <name> [--from=<connector|main>]
   sprout branch list
   sprout branch get <name>
+  sprout branch diff <name>       schema + row counts vs parent
   sprout branch reset <name>
   sprout branch delete <name>
   sprout branch suspend <name>
@@ -277,6 +376,7 @@ Usage:
 Env:
   SPROUT_SERVER  default http://127.0.0.1:8080
   SPROUT_TOKEN   default dev-token
+  SPROUT_DB_USER default sprout (advertised in connection strings)
 `)
 }
 

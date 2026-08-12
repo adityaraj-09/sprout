@@ -16,6 +16,7 @@ export type BranchRecord = {
   container_id?: string;
   compute?: string;
   connection_string: string;
+  psql?: string;
   error_message?: string;
   source_lsn?: string;
   source_connector?: string;
@@ -42,9 +43,48 @@ export type Connector = {
 };
 
 export type ConnectResult = {
-  connector: Connector;
-  lag: Record<string, unknown>;
-  project: Project;
+  connector?: Connector;
+  lag?: Record<string, unknown>;
+  project?: Project;
+  connection_string?: string;
+  psql?: string;
+  dry_run?: boolean;
+  estimate?: Record<string, unknown>;
+};
+
+export type DoctorCheck = {
+  name: string;
+  ok: boolean;
+  detail: string;
+  hint?: string;
+  level: string;
+};
+
+export type DoctorReport = {
+  ok: boolean;
+  checks: DoctorCheck[];
+};
+
+export type BranchDiff = {
+  branch: string;
+  parent: string;
+  schema: {
+    only_on_branch: string[];
+    only_on_parent: string[];
+    changed_columns: Array<{
+      table: string;
+      added?: string[];
+      removed?: string[];
+    }>;
+    tables?: Record<string, string[]>;
+  };
+  rows: Array<{
+    table: string;
+    branch_rows: number;
+    parent_rows: number;
+    delta: number;
+  }>;
+  summary: string;
 };
 
 export type ReplicationStatus = {

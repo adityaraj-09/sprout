@@ -41,7 +41,7 @@ func FormatConnString(port int, db string) string {
 	if db == "" {
 		db = "postgres"
 	}
-	return fmt.Sprintf("postgresql://%s:%d/%s", PublicHost(), port, db)
+	return fmt.Sprintf("postgresql://%s@%s:%d/%s", DBUser(), PublicHost(), port, db)
 }
 
 // ApplyNetworkSettings appends listen/port overrides and opens pg_hba for TCP clients.
