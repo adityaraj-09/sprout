@@ -66,7 +66,7 @@ func (m *Manager) DumpSchema(ctx context.Context, c Conn, localHost string, loca
 	}
 	fmt.Fprintf(os.Stderr, "→ dumping schema %q from primary with %s\n", schema, pgDump)
 	dump := exec.CommandContext(ctx, pgDump,
-		"-h", c.Host, "-p", strconv.Itoa(c.Port), "-U", c.User, "-d", c.Database,
+		"-h", c.DialHost(), "-p", strconv.Itoa(c.Port), "-U", c.User, "-d", c.Database,
 		"--schema="+schema,
 		"--schema-only",
 		"--no-owner",
@@ -143,6 +143,9 @@ func (m *Manager) CreateSubscription(ctx context.Context, c Conn, localHost stri
 		fmt.Sprintf("user=%s", c.User),
 		fmt.Sprintf("dbname=%s", c.Database),
 		fmt.Sprintf("sslmode=%s", c.SSLMode),
+	}
+	if ip := lookupIPv4(c.Host); ip != "" {
+		parts = append(parts, fmt.Sprintf("hostaddr=%s", ip))
 	}
 	if c.Password != "" {
 		parts = append(parts, fmt.Sprintf("password=%s", c.Password))
@@ -250,7 +253,7 @@ func (m *Manager) WaitLogicalSync(ctx context.Context, localHost string, localPo
 
 func (m *Manager) psqlPrimary(ctx context.Context, c Conn, sql string) (string, error) {
 	cmd := exec.CommandContext(ctx, m.Bins.Psql,
-		"-h", c.Host, "-p", strconv.Itoa(c.Port), "-U", c.User, "-d", c.Database,
+		"-h", c.DialHost(), "-p", strconv.Itoa(c.Port), "-U", c.User, "-d", c.Database,
 		"-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", sql,
 	)
 	cmd.Env = c.pgEnv()

@@ -71,6 +71,10 @@ func (c Conn) PrimaryConnInfo() string {
 		fmt.Sprintf("sslmode=%s", c.SSLMode),
 		"application_name=sprout-replica",
 	}
+	// Prefer IPv4 — many VMs (Azure) have broken IPv6 routes while DNS returns AAAA first.
+	if ip := lookupIPv4(c.Host); ip != "" {
+		parts = append(parts, fmt.Sprintf("hostaddr=%s", ip))
+	}
 	if c.Password != "" {
 		parts = append(parts, fmt.Sprintf("password=%s", c.Password))
 	}
@@ -84,6 +88,14 @@ func (c Conn) pgEnv() []string {
 	)
 }
 
+// DialHost returns an IPv4 address when available so clients skip broken IPv6 routes.
+func (c Conn) DialHost() string {
+	if ip := lookupIPv4(c.Host); ip != "" {
+		return ip
+	}
+	return c.Host
+}
+
 // Manager performs full physical bootstrap + standby helpers.
 type Manager struct {
 	Bins postgres.Binaries
@@ -91,7 +103,7 @@ type Manager struct {
 
 func (m *Manager) Ping(ctx context.Context, c Conn) error {
 	args := []string{
-		"-h", c.Host, "-p", strconv.Itoa(c.Port), "-U", c.User, "-d", c.Database,
+		"-h", c.DialHost(), "-p", strconv.Itoa(c.Port), "-U", c.User, "-d", c.Database,
 		"-v", "ON_ERROR_STOP=1", "-c", "SELECT 1;",
 	}
 	cmd := exec.CommandContext(ctx, m.Bins.Psql, args...)
@@ -117,7 +129,7 @@ func (m *Manager) BaseBackup(ctx context.Context, c Conn, destDir string) error 
 	start := time.Now()
 
 	args := []string{
-		"-h", c.Host,
+		"-h", c.DialHost(),
 		"-p", strconv.Itoa(c.Port),
 		"-U", c.User,
 		"-D", destDir,
@@ -249,12 +261,37 @@ func (m *Manager) execSQL(ctx context.Context, host string, port int, sql string
 	return nil
 }
 
-// EnsurePrimaryReachable is a quick TCP check before basebackup.
+// EnsurePrimaryReachable is a quick TCP check before bootstrap.
+// Tries IPv4 first — dual-stack dial often picks unreachable AAAA on cloud VMs.
 func EnsurePrimaryReachable(host string, port int, timeout time.Duration) error {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), timeout)
-	if err != nil {
-		return fmt.Errorf("primary %s:%d not reachable: %w", host, port, err)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	var errs []string
+	for _, network := range []string{"tcp4", "tcp6"} {
+		conn, err := net.DialTimeout(network, addr, timeout)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		errs = append(errs, fmt.Sprintf("%s: %v", network, err))
 	}
-	_ = conn.Close()
-	return nil
+	return fmt.Errorf("primary %s not reachable (%s)", addr, strings.Join(errs, "; "))
+}
+
+func lookupIPv4(host string) string {
+	if ip := net.ParseIP(host); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			return ip4.String()
+		}
+		return ""
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return ""
+	}
+	for _, ip := range ips {
+		if ip4 := ip.To4(); ip4 != nil {
+			return ip4.String()
+		}
+	}
+	return ""
 }
