@@ -24,7 +24,31 @@ func NewDocker(bins postgres.Binaries) (*Docker, error) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		return nil, fmt.Errorf("docker not in PATH: %w", err)
 	}
-	return &Docker{Bins: bins, Image: "postgres:14"}, nil
+	image := os.Getenv("SPROUT_PG_IMAGE")
+	if image == "" {
+		image = "postgres:" + majorFromBins(bins)
+	}
+	return &Docker{Bins: bins, Image: image}, nil
+}
+
+func majorFromBins(bins postgres.Binaries) string {
+	cmd := exec.Command(bins.Postgres, "--version")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "16"
+	}
+	// "postgres (PostgreSQL) 16.4 ..."
+	fields := strings.Fields(string(out))
+	for _, f := range fields {
+		if len(f) > 0 && f[0] >= '0' && f[0] <= '9' {
+			major := f
+			if i := strings.IndexByte(major, '.'); i > 0 {
+				major = major[:i]
+			}
+			return major
+		}
+	}
+	return "16"
 }
 
 func (d *Docker) Name() string { return "docker" }

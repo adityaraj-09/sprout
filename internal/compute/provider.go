@@ -7,6 +7,7 @@ package compute
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/adityaraj/sprout/internal/postgres"
 )
@@ -85,7 +86,9 @@ func (l *Local) IsRunning(ctx context.Context, h Handle) (bool, error) {
 	return inst.IsRunning(), nil
 }
 
-// Detect picks docker if the binary exists and the daemon responds; else local.
+// Detect picks compute. Default prefers local pg_ctl so initdb and runtime share
+// the same major version. Docker is used when SPROUT_COMPUTE=docker|auto and
+// SPROUT_COMPUTE=docker is set, or auto with SPROUT_PREFER_DOCKER=true.
 func Detect(bins postgres.Binaries, prefer string) (Provider, error) {
 	switch prefer {
 	case "local":
@@ -97,8 +100,11 @@ func Detect(bins postgres.Binaries, prefer string) (Provider, error) {
 		}
 		return d, nil
 	case "", "auto":
-		if d, err := NewDocker(bins); err == nil && d.Available() {
-			return d, nil
+		// Prefer local: initdb uses host binaries; docker:14 vs host:16 breaks PGDATA.
+		if os.Getenv("SPROUT_PREFER_DOCKER") == "true" {
+			if d, err := NewDocker(bins); err == nil && d.Available() {
+				return d, nil
+			}
 		}
 		return NewLocal(bins), nil
 	default:
