@@ -6,6 +6,7 @@ package postgres
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -98,13 +99,23 @@ func (i *Instance) Start() error {
 	if err := os.MkdirAll(filepath.Dir(i.LogFile), 0o755); err != nil {
 		return err
 	}
+	if err := ensurePortFree(i.Port); err != nil {
+		return err
+	}
 	cmd := exec.Command(i.Bins.PgCtl, "-D", i.DataDir, "-l", i.LogFile, "start", "-o", fmt.Sprintf("-p %d", i.Port))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		logTail, _ := os.ReadFile(i.LogFile)
 		return fmt.Errorf("pg_ctl start: %w (%s)\nlog:\n%s", err, strings.TrimSpace(string(out)), string(logTail))
 	}
-	return i.WaitReady(30 * time.Second)
+	if err := i.WaitReady(30 * time.Second); err != nil {
+		logTail, _ := os.ReadFile(i.LogFile)
+		if strings.Contains(string(logTail), "Address already in use") {
+			return fmt.Errorf("port %d already in use — stop the other Postgres (or sprout process) on that port, then retry\n%s", i.Port, err)
+		}
+		return err
+	}
+	return nil
 }
 
 func (i *Instance) Stop() error {
@@ -113,15 +124,35 @@ func (i *Instance) Stop() error {
 	if err != nil {
 		// Already stopped is OK for idempotent cleanup.
 		if strings.Contains(string(out), "Is server running?") || strings.Contains(string(out), "does not exist") {
-			return nil
+			return i.waitStopped(10 * time.Second)
 		}
 		return fmt.Errorf("pg_ctl stop: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return i.waitStopped(15 * time.Second)
+}
+
+func (i *Instance) waitStopped(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !i.IsRunning() && !portListening(i.Port) {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if i.IsRunning() || portListening(i.Port) {
+		return fmt.Errorf("postgres on port %d still running after stop — kill leftover postmaster and retry", i.Port)
 	}
 	return nil
 }
 
 func (i *Instance) IsRunning() bool {
-	cmd := exec.Command(i.Bins.PgIsReady, "-h", "127.0.0.1", "-p", strconv.Itoa(i.Port))
+	// Always pass -d postgres: without it libpq defaults to OS username as DB
+	// (e.g. "flagforge"), which does not exist and spams FATAL in logs / can fail ready checks.
+	cmd := exec.Command(i.Bins.PgIsReady,
+		"-h", "127.0.0.1",
+		"-p", strconv.Itoa(i.Port),
+		"-d", "postgres",
+	)
 	return cmd.Run() == nil
 }
 
@@ -136,6 +167,23 @@ func (i *Instance) WaitReady(timeout time.Duration) error {
 	logTail, _ := os.ReadFile(i.LogFile)
 	return fmt.Errorf("postgres on port %d not ready after %s\nlog:\n%s", i.Port, timeout, string(logTail))
 }
+
+func ensurePortFree(port int) error {
+	if !portListening(port) {
+		return nil
+	}
+	return fmt.Errorf("port %d already in use — stop leftover Postgres: pg_ctl -D <datadir> stop  (or fuser -k %d/tcp)", port, port)
+}
+
+func portListening(port int) bool {
+	c, err := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
+}
+
 
 // Checkpoint asks a running instance to flush dirty pages.
 // Used before snapshot so the frozen image needs less WAL replay.

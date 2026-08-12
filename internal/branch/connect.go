@@ -95,6 +95,14 @@ func (s *Service) connectPhysical(ctx context.Context, projectID, name, primaryU
 
 	h := s.connectorHandle(c)
 	_ = s.Compute.Stop(ctx, h)
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		running, _ := s.Compute.IsRunning(ctx, h)
+		if !running {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 	if wipe {
 		if err := os.RemoveAll(c.DataDir); err != nil {
 			return s.failConnector(ctx, c, err)
@@ -185,6 +193,15 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 		}
 
 		_ = s.Compute.Stop(ctx, h)
+		// Wait for postmaster to release the port before wiping PGDATA.
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			running, _ := s.Compute.IsRunning(ctx, h)
+			if !running {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
 		if err := os.RemoveAll(c.DataDir); err != nil {
 			_, _, e := s.failConnector(ctx, c, err)
 			return ConnectResult{}, e
