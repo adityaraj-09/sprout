@@ -77,6 +77,28 @@ export class SproutClient {
     );
   }
 
+  async suspendConnector(name: string): Promise<{
+    connector: Connector;
+    branches: BranchRecord[];
+    message?: string;
+  }> {
+    return this.request(
+      "POST",
+      `/v1/projects/${this.project}/connectors/${encodeURIComponent(name)}/suspend`,
+    );
+  }
+
+  async resumeConnector(name: string): Promise<{
+    connector: Connector;
+    branches: BranchRecord[];
+    message?: string;
+  }> {
+    return this.request(
+      "POST",
+      `/v1/projects/${this.project}/connectors/${encodeURIComponent(name)}/resume`,
+    );
+  }
+
   async replication(name?: string): Promise<ReplicationStatus> {
     if (name) {
       return this.request(

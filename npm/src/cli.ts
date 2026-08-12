@@ -21,6 +21,7 @@ Commands:
   sprout status [name]
   sprout connector list
   sprout connector delete <name>
+  sprout connector suspend|resume <name>
   sprout health
   sprout branch create <name> [--from=<connector|main>]
   sprout branch list
@@ -275,6 +276,17 @@ async function main(): Promise<void> {
           if (!name) usage();
           await client.deleteConnector(name);
           console.log(`✓ deleted connector ${name}`);
+          break;
+        }
+        if (sub === "suspend" || sub === "resume") {
+          const name = argv[2];
+          if (!name) usage();
+          const out =
+            sub === "suspend"
+              ? await client.suspendConnector(name)
+              : await client.resumeConnector(name);
+          console.log(`✓ ${out.message ?? `${sub}ed connector ${name}`}`);
+          console.log(JSON.stringify(out, null, 2));
           break;
         }
         usage();

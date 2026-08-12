@@ -19,6 +19,7 @@ const (
 const (
 	ConnectorBootstrapping = "bootstrapping"
 	ConnectorReplicating   = "replicating"
+	ConnectorIdle          = "idle" // compute stopped; data kept (suspend)
 	ConnectorError         = "error"
 	ConnectorDisconnected  = "disconnected"
 )

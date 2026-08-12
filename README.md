@@ -4,6 +4,8 @@ Open-source **Postgres CoW branching**: near-instant database branches plus prod
 
 Spin up independent Postgres instances that start as near-instant clones of a parent dataset (local demo or a replica of production), then diverge freely.
 
+**VM / Azure from scratch:** see [`SETUP.md`](SETUP.md) (ZFS disk, Postgres 17 tools, firewall, connect + branch).
+
 ---
 
 ## What it does
@@ -175,6 +177,8 @@ Connectors and branches each get an allocated port.
 | `sprout branch delete <name>` | Stop + destroy |
 | `sprout branch suspend <name>` | Stop compute (`idle`) |
 | `sprout branch resume <name>` | Start again |
+| `sprout connector suspend <name>` | Stop connector replica **and** all its branches |
+| `sprout connector resume <name>` | Start connector + idle branches again |
 
 Defaults:
 
@@ -204,6 +208,8 @@ Auth: `Authorization: Bearer <token>` (default `dev-token`; `/healthz` is open)
 | `POST` | `.../branches/{name}/reset` | reset |
 | `POST` | `.../branches/{name}/suspend` | suspend |
 | `POST` | `.../branches/{name}/resume` | resume |
+| `POST` | `.../connectors/{name}/suspend` | suspend connector + branches |
+| `POST` | `.../connectors/{name}/resume` | resume connector + branches |
 
 Use `project` = `default` (resolved by name) or a project UUID.
 

@@ -172,6 +172,30 @@ func main() {
 				fatal(err)
 			}
 			fmt.Printf("✓ deleted connector %s\n", os.Args[3])
+		case "suspend":
+			need(4)
+			var out map[string]any
+			if err := c.do("POST", "/v1/projects/default/connectors/"+os.Args[3]+"/suspend", nil, &out); err != nil {
+				fatal(err)
+			}
+			if msg, _ := out["message"].(string); msg != "" {
+				fmt.Println("✓", msg)
+			} else {
+				fmt.Printf("✓ suspended connector %s\n", os.Args[3])
+			}
+		case "resume":
+			need(4)
+			var out map[string]any
+			if err := c.do("POST", "/v1/projects/default/connectors/"+os.Args[3]+"/resume", nil, &out); err != nil {
+				fatal(err)
+			}
+			if msg, _ := out["message"].(string); msg != "" {
+				fmt.Println("✓", msg)
+			} else {
+				fmt.Printf("✓ resumed connector %s\n", os.Args[3])
+			}
+			b, _ := json.MarshalIndent(out, "", "  ")
+			fmt.Println(string(b))
 		default:
 			usage()
 			os.Exit(2)
@@ -363,6 +387,8 @@ Usage:
   sprout status [name]
   sprout connector list
   sprout connector delete <name>  drops local replica + remote publication (logical)
+  sprout connector suspend <name> stop connector + all its branches (data kept)
+  sprout connector resume <name>  start connector + all its idle branches
   sprout health
   sprout branch create <name> [--from=<connector|main>]
   sprout branch list

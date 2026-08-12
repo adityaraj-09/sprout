@@ -64,6 +64,8 @@ sprout branch delete my-feature
 
 sprout connector list
 sprout connector delete prod
+sprout connector suspend prod   # stop replica + all branches from it
+sprout connector resume prod
 ```
 
 ### Useful connect flags
@@ -120,7 +122,7 @@ sprout doctor
 sprout init
 sprout connect [--name=...] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
 sprout status [name]
-sprout connector list | delete <name>
+sprout connector list | delete | suspend | resume <name>
 sprout health
 sprout branch create <name> [--from=<connector|main>]
 sprout branch list | get | diff | reset | delete | suspend | resume <name>
