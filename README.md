@@ -30,11 +30,13 @@ upstream(s)  ──connect --name──►  data/replicas/<name>/
 ### Node client (npm)
 
 ```bash
-make npm-link          # builds npm/sproutdb and links `sprout` on PATH
-# or: cd npm && npm install && npm link
+npm install -g sproutdb-cli
+# or from this repo:
+make npm-link
 ```
 
-Package name: **`sproutdb`** — CLI bin `sprout` + `SproutClient` SDK. Still needs `./bin/sprout-server` running.
+Package: **[`sproutdb-cli`](https://www.npmjs.com/package/sproutdb-cli)** — installs the `sprout` binary + `SproutClient` SDK. Still needs `./bin/sprout-server` running.  
+Docs: [`npm/README.md`](npm/README.md) · Repo: [github.com/adityaraj-09/sprout](https://github.com/adityaraj-09/sprout)
 
 ---
 

@@ -1,7 +1,7 @@
 {
-  "name": "sproutdb",
+  "name": "sproutdb-cli",
   "version": "0.1.0",
-  "description": "Sprout — CoW Postgres branching client (CLI + SDK for sprout-server)",
+  "description": "Sprout CLI + SDK — CoW Postgres branching client for sprout-server",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -12,7 +12,7 @@
     }
   },
   "bin": {
-    "sprout": "./bin/sprout.js"
+    "sprout": "bin/sprout.js"
   },
   "files": [
     "bin",
@@ -33,12 +33,20 @@
     "branching",
     "cow",
     "database",
-    "sprout"
+    "sprout",
+    "cli",
+    "supabase"
   ],
   "license": "MIT",
+  "author": "adityaraj-09",
+  "homepage": "https://github.com/adityaraj-09/sprout#readme",
+  "bugs": {
+    "url": "https://github.com/adityaraj-09/sprout/issues"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/adityaraj/sprout.git"
+    "url": "git+https://github.com/adityaraj-09/sprout.git",
+    "directory": "npm"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
