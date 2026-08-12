@@ -195,6 +195,8 @@ CREATE SUBSCRIPTION %s
 
 	fmt.Fprintf(os.Stderr, "→ CREATE SUBSCRIPTION %s (initial copy_data; can take a while)\n", subName)
 	_ = run(drop) // ignore if missing
+	// Wipe may have destroyed the subscriber without DROP SUBSCRIPTION → slot remains on primary.
+	_ = m.DropReplicationSlot(ctx, c, subName)
 	if err := run(create); err != nil {
 		return fmt.Errorf("create subscription: %w", err)
 	}

@@ -385,7 +385,8 @@ func (s *Service) DeleteConnector(ctx context.Context, projectID, name string) e
 			if err := replica.EnsurePrimaryReachable(conn.Host, conn.Port, 5*time.Second); err == nil {
 				if err := rm.Ping(ctx, conn); err == nil {
 					_ = rm.DropPublication(ctx, conn, pubName(c.Name))
-					fmt.Printf("→ dropped publication %s on primary\n", pubName(c.Name))
+					_ = rm.DropReplicationSlot(ctx, conn, subName(c.Name))
+					fmt.Printf("→ dropped publication %s + slot on primary\n", pubName(c.Name))
 				} else {
 					fmt.Printf("! could not drop publication on primary: %v\n", err)
 				}

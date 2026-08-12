@@ -114,6 +114,21 @@ func (m *Manager) DropPublication(ctx context.Context, c Conn, pubName string) e
 	return err
 }
 
+// DropReplicationSlot removes a logical slot on the primary left behind after a wiped subscriber.
+func (m *Manager) DropReplicationSlot(ctx context.Context, c Conn, slotName string) error {
+	sql := fmt.Sprintf(`
+SELECT pg_drop_replication_slot(slot_name)
+FROM pg_replication_slots
+WHERE slot_name = %s;
+`, quoteLiteral(slotName))
+	_, err := m.psqlPrimary(ctx, c, sql)
+	if err != nil {
+		return fmt.Errorf("drop replication slot %s: %w", slotName, err)
+	}
+	fmt.Fprintf(os.Stderr, "  dropped replication slot %s on primary (if it existed)\n", slotName)
+	return nil
+}
+
 // DropSubscriptionLocal drops a subscription on the local subscriber.
 func (m *Manager) DropSubscriptionLocal(ctx context.Context, localHost string, localPort int, subName string) error {
 	sql := fmt.Sprintf(`DROP SUBSCRIPTION IF EXISTS %s;`, quoteIdent(subName))
