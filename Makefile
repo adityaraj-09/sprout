@@ -1,10 +1,13 @@
-.PHONY: build server lab-primary lab-primary-stop clean reset-data npm npm-link
+.PHONY: build server lab-primary lab-primary-stop clean reset-data npm npm-link test
 
 export PATH := /opt/homebrew/bin:/usr/local/bin:$(PATH)
 
 build:
 	go build -o bin/sprout ./cmd/sprout
 	go build -o bin/sprout-server ./cmd/sprout-server
+
+test:
+	go test ./...
 
 server: build
 	./bin/sprout-server

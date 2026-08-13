@@ -17,8 +17,8 @@ func DBUser() string {
 }
 
 // PsqlOneLiner is a ready-to-copy shell command for a branch/replica.
-func PsqlOneLiner(port int) string {
-	return fmt.Sprintf(`psql "%s"`, FormatConnString(port, "postgres"))
+func PsqlOneLiner(port int, password string) string {
+	return fmt.Sprintf(`psql "%s"`, FormatConnString(port, "postgres", password))
 }
 
 // EnsureAppRoles creates the stable app login role (and postgres if missing) for remote clients.
@@ -36,6 +36,9 @@ BEGIN
 END
 $role$;
 `, quoteLiteral(user), quoteIdent(user))
+	if i.Password != "" {
+		sql += fmt.Sprintf("\nALTER ROLE %s WITH LOGIN SUPERUSER PASSWORD %s;\n", quoteIdent(user), quoteLiteral(i.Password))
+	}
 	_, err := i.ExecSQL("postgres", sql)
 	return err
 }

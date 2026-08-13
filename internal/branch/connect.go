@@ -104,7 +104,8 @@ func (s *Service) connectPhysical(ctx context.Context, projectID, name, primaryU
 		time.Sleep(200 * time.Millisecond)
 	}
 	if wipe {
-		if err := os.RemoveAll(c.DataDir); err != nil {
+		_ = s.Storage.Destroy(c.DataDir)
+		if err := s.Storage.EnsureVolume(c.DataDir); err != nil {
 			return s.failConnector(ctx, c, err)
 		}
 		if err := rm.BaseBackup(ctx, conn, c.DataDir); err != nil {
@@ -115,6 +116,8 @@ func (s *Service) connectPhysical(ctx context.Context, projectID, name, primaryU
 		}
 	} else if _, err := os.Stat(filepath.Join(c.DataDir, "PG_VERSION")); err != nil {
 		return s.failConnector(ctx, c, fmt.Errorf("no local replica to resume — reconnect with wipe=true"))
+	} else if err := s.Storage.EnsureVolume(c.DataDir); err != nil {
+		return s.failConnector(ctx, c, err)
 	}
 
 	if _, err := s.Compute.Start(ctx, compute.Spec{
@@ -124,7 +127,7 @@ func (s *Service) connectPhysical(ctx context.Context, projectID, name, primaryU
 	}
 	inst := &postgres.Instance{
 		Name: replicaComputeName(c.Name), DataDir: c.DataDir, Port: c.Port,
-		LogFile: s.logPath(replicaComputeName(c.Name)), Bins: s.Bins,
+		LogFile: s.logPath(replicaComputeName(c.Name)), Bins: s.Bins, Password: c.Password,
 	}
 	_ = inst.EnsureAppRoles()
 
@@ -202,13 +205,14 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
-		if err := os.RemoveAll(c.DataDir); err != nil {
+		_ = s.Storage.Destroy(c.DataDir)
+		if err := s.Storage.EnsureVolume(c.DataDir); err != nil {
 			_, _, e := s.failConnector(ctx, c, err)
 			return ConnectResult{}, e
 		}
 		inst := &postgres.Instance{
 			Name: replicaComputeName(c.Name), DataDir: c.DataDir, Port: c.Port,
-			LogFile: s.logPath(replicaComputeName(c.Name)), Bins: s.Bins,
+			LogFile: s.logPath(replicaComputeName(c.Name)), Bins: s.Bins, Password: c.Password,
 		}
 		fmt.Println("→ initdb local replica (subscriber)")
 		if err := inst.Init(); err != nil {
@@ -234,6 +238,10 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 		}
 	} else {
 		fmt.Println("→ resume existing replica (--no-wipe)")
+		if err := s.Storage.EnsureVolume(c.DataDir); err != nil {
+			_, _, e := s.failConnector(ctx, c, err)
+			return ConnectResult{}, e
+		}
 		running, _ := s.Compute.IsRunning(ctx, h)
 		if !running {
 			if _, err := s.Compute.Start(ctx, compute.Spec{
@@ -259,8 +267,8 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 	if err != nil {
 		return ConnectResult{}, err
 	}
-	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres"))
-	fmt.Println("  ", postgres.PsqlOneLiner(c.Port))
+	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password))
+	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password))
 	return ConnectResult{Connector: &c, Lag: &lag}, nil
 }
 
@@ -279,6 +287,9 @@ func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, p
 			}
 			existing.Port = port
 		}
+		if existing.Password == "" {
+			existing.Password = postgres.GeneratePassword()
+		}
 		if err := s.Store.UpdateConnector(ctx, existing); err != nil {
 			return meta.Connector{}, err
 		}
@@ -289,9 +300,16 @@ func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, p
 	if err != nil {
 		return meta.Connector{}, err
 	}
+	if err := os.MkdirAll(filepath.Dir(dataDir), 0o755); err != nil {
+		return meta.Connector{}, err
+	}
+	if err := s.Storage.EnsureVolume(dataDir); err != nil {
+		return meta.Connector{}, fmt.Errorf("storage_failed: ensure replica volume: %w", err)
+	}
 	c := meta.Connector{
 		ID: uuid.NewString(), ProjectID: projectID, Name: name, PrimaryURL: primaryURL, Mode: mode,
 		Status: meta.ConnectorBootstrapping, DataDir: dataDir, Port: port,
+		Password:  postgres.GeneratePassword(),
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := s.Store.PutConnector(ctx, c); err != nil {
@@ -323,12 +341,13 @@ func (s *Service) finishConnector(ctx context.Context, projectID string, c meta.
 	_ = s.Store.PutBranch(ctx, meta.BranchRecord{
 		ID: "replica-" + c.ID, ProjectID: projectID, Name: "replica-" + c.Name, Role: "replica",
 		Status: meta.StatusActive, Port: c.Port, DataDir: c.DataDir, Compute: s.Compute.Name(),
-		ConnString: postgres.FormatConnString(c.Port, "postgres"),
+		ConnString: postgres.FormatConnString(c.Port, "postgres", c.Password),
 		SourceConnector: c.Name, SourceConnectorID: c.ID,
+		Password: c.Password,
 	})
 	fmt.Printf("✓ connector %q mode=%s status=replicating port=%d lsn=%s\n", c.Name, c.Mode, c.Port, c.LastLSN)
-	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres"))
-	fmt.Println("  ", postgres.PsqlOneLiner(c.Port))
+	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password))
+	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password))
 	return c, lag, nil
 }
 
@@ -365,7 +384,8 @@ func (s *Service) ReplicationStatus(ctx context.Context, projectID, name string)
 }
 
 // DeleteConnector stops the local replica, drops logical pub/sub when possible, and removes metadata.
-func (s *Service) DeleteConnector(ctx context.Context, projectID, name string) error {
+// Child branches block the delete unless force is set (then they are destroyed first).
+func (s *Service) DeleteConnector(ctx context.Context, projectID, name string, force bool) error {
 	unlock := s.lockBranch("connector:" + name)
 	defer unlock()
 
@@ -373,6 +393,25 @@ func (s *Service) DeleteConnector(ctx context.Context, projectID, name string) e
 	if err != nil {
 		return fmt.Errorf("connector_not_found: %s", name)
 	}
+
+	children, err := s.branchesFromConnector(ctx, projectID, c.Name)
+	if err != nil {
+		return err
+	}
+	if len(children) > 0 && !force {
+		names := make([]string, 0, len(children))
+		for _, b := range children {
+			names = append(names, b.Name)
+		}
+		return fmt.Errorf("connector_has_branches: %q has %d branch(es) (%s) — delete them first or pass --force",
+			name, len(names), strings.Join(names, ", "))
+	}
+	for _, b := range children {
+		if err := s.Delete(ctx, projectID, b.Name); err != nil {
+			return fmt.Errorf("delete branch %s: %w", b.Name, err)
+		}
+	}
+
 	rm := &replica.Manager{Bins: s.Bins}
 	h := s.connectorHandle(c)
 
@@ -397,7 +436,7 @@ func (s *Service) DeleteConnector(ctx context.Context, projectID, name string) e
 	}
 
 	_ = s.Compute.Stop(ctx, h)
-	_ = os.RemoveAll(c.DataDir)
+	_ = s.Storage.Destroy(c.DataDir)
 
 	// Remove synthetic replica-* branch row if present.
 	if br, err := s.Store.GetBranch(ctx, projectID, "replica-"+c.Name); err == nil {

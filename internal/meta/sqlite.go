@@ -101,6 +101,12 @@ CREATE TABLE IF NOT EXISTS connectors (
 	if err != nil {
 		return err
 	}
+	if err := s.ensureColumn("branches", "password", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("connectors", "password", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	var n int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM meta WHERE key = 'next_port'`).Scan(&n); err != nil {
 		return err
@@ -110,6 +116,32 @@ CREATE TABLE IF NOT EXISTS connectors (
 		return err
 	}
 	return nil
+}
+
+func (s *SQLiteStore) ensureColumn(table, column, decl string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull int
+		var dflt any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + decl)
+	return err
 }
 
 func (s *SQLiteStore) importJSONIfNeeded() error {
@@ -297,18 +329,19 @@ func putBranchTx(tx *sql.Tx, b BranchRecord) error {
 	_, err := tx.Exec(`
 INSERT INTO branches(
   id, project_id, name, role, status, port, data_dir, snapshot_ref, container_id, compute,
-  conn_string, error_message, source_lsn, source_connector, source_connector_id,
+  conn_string, error_message, source_lsn, source_connector, source_connector_id, password,
   created_at, updated_at, last_used_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   project_id=excluded.project_id, name=excluded.name, role=excluded.role, status=excluded.status,
   port=excluded.port, data_dir=excluded.data_dir, snapshot_ref=excluded.snapshot_ref,
   container_id=excluded.container_id, compute=excluded.compute, conn_string=excluded.conn_string,
   error_message=excluded.error_message, source_lsn=excluded.source_lsn,
   source_connector=excluded.source_connector, source_connector_id=excluded.source_connector_id,
+  password=excluded.password,
   updated_at=excluded.updated_at, last_used_at=excluded.last_used_at
 `, b.ID, b.ProjectID, b.Name, b.Role, b.Status, b.Port, b.DataDir, b.SnapshotRef, b.ContainerID, b.Compute,
-		b.ConnString, b.ErrorMessage, b.SourceLSN, b.SourceConnector, b.SourceConnectorID,
+		b.ConnString, b.ErrorMessage, b.SourceLSN, b.SourceConnector, b.SourceConnectorID, b.Password,
 		formatTime(b.CreatedAt), formatTime(b.UpdatedAt), formatTime(b.LastUsedAt))
 	return err
 }
@@ -328,18 +361,19 @@ func (s *SQLiteStore) PutBranch(ctx context.Context, b BranchRecord) error {
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO branches(
   id, project_id, name, role, status, port, data_dir, snapshot_ref, container_id, compute,
-  conn_string, error_message, source_lsn, source_connector, source_connector_id,
+  conn_string, error_message, source_lsn, source_connector, source_connector_id, password,
   created_at, updated_at, last_used_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   project_id=excluded.project_id, name=excluded.name, role=excluded.role, status=excluded.status,
   port=excluded.port, data_dir=excluded.data_dir, snapshot_ref=excluded.snapshot_ref,
   container_id=excluded.container_id, compute=excluded.compute, conn_string=excluded.conn_string,
   error_message=excluded.error_message, source_lsn=excluded.source_lsn,
   source_connector=excluded.source_connector, source_connector_id=excluded.source_connector_id,
+  password=excluded.password,
   updated_at=excluded.updated_at, last_used_at=excluded.last_used_at
 `, b.ID, b.ProjectID, b.Name, b.Role, b.Status, b.Port, b.DataDir, b.SnapshotRef, b.ContainerID, b.Compute,
-		b.ConnString, b.ErrorMessage, b.SourceLSN, b.SourceConnector, b.SourceConnectorID,
+		b.ConnString, b.ErrorMessage, b.SourceLSN, b.SourceConnector, b.SourceConnectorID, b.Password,
 		formatTime(b.CreatedAt), formatTime(b.UpdatedAt), formatTime(b.LastUsedAt))
 	return err
 }
@@ -349,11 +383,11 @@ func (s *SQLiteStore) UpdateBranch(ctx context.Context, b BranchRecord) error {
 	res, err := s.db.ExecContext(ctx, `
 UPDATE branches SET
   project_id=?, name=?, role=?, status=?, port=?, data_dir=?, snapshot_ref=?, container_id=?, compute=?,
-  conn_string=?, error_message=?, source_lsn=?, source_connector=?, source_connector_id=?,
+  conn_string=?, error_message=?, source_lsn=?, source_connector=?, source_connector_id=?, password=?,
   updated_at=?, last_used_at=?
 WHERE id=?`,
 		b.ProjectID, b.Name, b.Role, b.Status, b.Port, b.DataDir, b.SnapshotRef, b.ContainerID, b.Compute,
-		b.ConnString, b.ErrorMessage, b.SourceLSN, b.SourceConnector, b.SourceConnectorID,
+		b.ConnString, b.ErrorMessage, b.SourceLSN, b.SourceConnector, b.SourceConnectorID, b.Password,
 		formatTime(b.UpdatedAt), formatTime(b.LastUsedAt), b.ID)
 	if err != nil {
 		return err
@@ -366,7 +400,7 @@ WHERE id=?`,
 }
 
 const branchCols = `id, project_id, name, role, status, port, data_dir, snapshot_ref, container_id, compute,
-  conn_string, error_message, source_lsn, source_connector, source_connector_id,
+  conn_string, error_message, source_lsn, source_connector, source_connector_id, password,
   created_at, updated_at, last_used_at`
 
 func scanBranch(scanner interface {
@@ -376,7 +410,7 @@ func scanBranch(scanner interface {
 	var created, updated, lastUsed string
 	err := scanner.Scan(
 		&b.ID, &b.ProjectID, &b.Name, &b.Role, &b.Status, &b.Port, &b.DataDir, &b.SnapshotRef, &b.ContainerID, &b.Compute,
-		&b.ConnString, &b.ErrorMessage, &b.SourceLSN, &b.SourceConnector, &b.SourceConnectorID,
+		&b.ConnString, &b.ErrorMessage, &b.SourceLSN, &b.SourceConnector, &b.SourceConnectorID, &b.Password,
 		&created, &updated, &lastUsed,
 	)
 	if err != nil {
@@ -447,13 +481,13 @@ func putConnectorTx(tx *sql.Tx, c Connector) error {
 	c.UpdatedAt = now
 	_, err := tx.Exec(`
 INSERT INTO connectors(
-  id, project_id, name, primary_url, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, created_at, updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+  id, project_id, name, primary_url, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, password, created_at, updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   project_id=excluded.project_id, name=excluded.name, primary_url=excluded.primary_url, mode=excluded.mode,
   status=excluded.status, data_dir=excluded.data_dir, port=excluded.port, error_message=excluded.error_message,
-  last_lsn=excluded.last_lsn, last_lag_bytes=excluded.last_lag_bytes, updated_at=excluded.updated_at
-`, c.ID, c.ProjectID, c.Name, c.PrimaryURL, c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes,
+  last_lsn=excluded.last_lsn, last_lag_bytes=excluded.last_lag_bytes, password=excluded.password, updated_at=excluded.updated_at
+`, c.ID, c.ProjectID, c.Name, c.PrimaryURL, c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes, c.Password,
 		formatTime(c.CreatedAt), formatTime(c.UpdatedAt))
 	return err
 }
@@ -481,18 +515,18 @@ func (s *SQLiteStore) PutConnector(ctx context.Context, c Connector) error {
 
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO connectors(
-  id, project_id, name, primary_url, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, created_at, updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+  id, project_id, name, primary_url, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, password, created_at, updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   project_id=excluded.project_id, name=excluded.name, primary_url=excluded.primary_url, mode=excluded.mode,
   status=excluded.status, data_dir=excluded.data_dir, port=excluded.port, error_message=excluded.error_message,
-  last_lsn=excluded.last_lsn, last_lag_bytes=excluded.last_lag_bytes, updated_at=excluded.updated_at
-`, c.ID, c.ProjectID, c.Name, c.PrimaryURL, c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes,
+  last_lsn=excluded.last_lsn, last_lag_bytes=excluded.last_lag_bytes, password=excluded.password, updated_at=excluded.updated_at
+`, c.ID, c.ProjectID, c.Name, c.PrimaryURL, c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes, c.Password,
 		formatTime(c.CreatedAt), formatTime(c.UpdatedAt))
 	return err
 }
 
-const connectorCols = `id, project_id, name, primary_url, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, created_at, updated_at`
+const connectorCols = `id, project_id, name, primary_url, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, password, created_at, updated_at`
 
 func scanConnector(scanner interface {
 	Scan(dest ...any) error
@@ -501,7 +535,7 @@ func scanConnector(scanner interface {
 	var created, updated string
 	err := scanner.Scan(
 		&c.ID, &c.ProjectID, &c.Name, &c.PrimaryURL, &c.Mode, &c.Status, &c.DataDir, &c.Port,
-		&c.ErrorMessage, &c.LastLSN, &c.LastLagBytes, &created, &updated,
+		&c.ErrorMessage, &c.LastLSN, &c.LastLagBytes, &c.Password, &created, &updated,
 	)
 	if err != nil {
 		return Connector{}, err
@@ -558,9 +592,9 @@ func (s *SQLiteStore) UpdateConnector(ctx context.Context, c Connector) error {
 	c.UpdatedAt = time.Now().UTC()
 	res, err := s.db.ExecContext(ctx, `
 UPDATE connectors SET
-  project_id=?, name=?, primary_url=?, mode=?, status=?, data_dir=?, port=?, error_message=?, last_lsn=?, last_lag_bytes=?, updated_at=?
+  project_id=?, name=?, primary_url=?, mode=?, status=?, data_dir=?, port=?, error_message=?, last_lsn=?, last_lag_bytes=?, password=?, updated_at=?
 WHERE id=?`,
-		c.ProjectID, c.Name, c.PrimaryURL, c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes,
+		c.ProjectID, c.Name, c.PrimaryURL, c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes, c.Password,
 		formatTime(c.UpdatedAt), c.ID)
 	if err != nil {
 		return err

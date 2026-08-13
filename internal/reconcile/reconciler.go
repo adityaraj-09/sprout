@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/adityaraj/sprout/internal/compute"
@@ -11,25 +12,41 @@ import (
 	"github.com/adityaraj/sprout/internal/storage"
 )
 
+const stuckAfter = 2 * time.Minute
+
 // Reconciler aligns metadata with real compute/storage after crashes.
 type Reconciler struct {
-	Store   meta.Store
-	Compute compute.Provider
-	Storage storage.Provider
+	Store      meta.Store
+	Compute    compute.Provider
+	Storage    storage.Provider
+	Root       string
+	AutoResume bool
+}
+
+func (r *Reconciler) logPath(name string) string {
+	return filepath.Join(r.Root, "logs", name+".log")
 }
 
 func (r *Reconciler) RunOnce(ctx context.Context) {
+	r.reconcileBranches(ctx)
+	r.reconcileConnectors(ctx)
+}
+
+func (r *Reconciler) reconcileBranches(ctx context.Context) {
 	branches, err := r.Store.ListAllBranches(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "reconcile: list: %v\n", err)
+		fmt.Fprintf(os.Stderr, "reconcile: list branches: %v\n", err)
 		return
 	}
 	for _, b := range branches {
-		r.fixOne(ctx, b)
+		if b.Role == "replica" {
+			continue // owned by the connector row
+		}
+		r.fixBranch(ctx, b)
 	}
 }
 
-func (r *Reconciler) fixOne(ctx context.Context, b meta.BranchRecord) {
+func (r *Reconciler) fixBranch(ctx context.Context, b meta.BranchRecord) {
 	h := compute.Handle{
 		Provider: r.Compute.Name(), Name: b.Name, Port: b.Port,
 		DataDir: b.DataDir, ContainerID: b.ContainerID,
@@ -39,7 +56,7 @@ func (r *Reconciler) fixOne(ctx context.Context, b meta.BranchRecord) {
 
 	switch b.Status {
 	case meta.StatusCreating, meta.StatusResetting, meta.StatusDeleting:
-		if age > 2*time.Minute {
+		if age > stuckAfter {
 			fmt.Fprintf(os.Stderr, "reconcile: %s stuck in %s — marking error + cleanup\n", b.Name, b.Status)
 			_ = r.Compute.Stop(ctx, h)
 			if b.DataDir != "" && b.Role == "branch" {
@@ -60,13 +77,152 @@ func (r *Reconciler) fixOne(ctx context.Context, b meta.BranchRecord) {
 		if b.Role == "main" {
 			return
 		}
-		if !running {
-			fmt.Fprintf(os.Stderr, "reconcile: %s marked active but compute down — marking idle\n", b.Name)
-			b.Status = meta.StatusIdle
-			b.ContainerID = ""
-			_ = r.Store.UpdateBranch(ctx, b)
+		if running {
+			return
 		}
+		if r.AutoResume {
+			if err := r.startBranch(ctx, b); err != nil {
+				r.markBranch(ctx, b, meta.StatusCrashed, "reconcile: compute down: "+err.Error())
+				return
+			}
+			fmt.Fprintf(os.Stderr, "reconcile: auto-resumed branch %s\n", b.Name)
+			return
+		}
+		r.markBranch(ctx, b, meta.StatusCrashed, "reconcile: compute down")
+	case meta.StatusCrashed:
+		if !r.AutoResume {
+			return
+		}
+		if running {
+			r.markBranch(ctx, b, meta.StatusActive, "")
+			return
+		}
+		if err := r.startBranch(ctx, b); err != nil {
+			r.markBranch(ctx, b, meta.StatusCrashed, "reconcile: auto-resume failed: "+err.Error())
+			return
+		}
+		fmt.Fprintf(os.Stderr, "reconcile: auto-resumed crashed branch %s\n", b.Name)
 	}
+}
+
+func (r *Reconciler) startBranch(ctx context.Context, b meta.BranchRecord) error {
+	_, err := r.Compute.Start(ctx, compute.Spec{
+		Name: b.Name, DataDir: b.DataDir, Port: b.Port, LogFile: r.logPath(b.Name),
+	})
+	if err != nil {
+		return err
+	}
+	b.Status = meta.StatusActive
+	b.ErrorMessage = ""
+	return r.Store.UpdateBranch(ctx, b)
+}
+
+func (r *Reconciler) markBranch(ctx context.Context, b meta.BranchRecord, status, msg string) {
+	if b.Status != status || b.ErrorMessage != msg {
+		fmt.Fprintf(os.Stderr, "reconcile: %s %s → %s %s\n", b.Name, b.Status, status, msg)
+	}
+	b.Status = status
+	b.ErrorMessage = msg
+	b.ContainerID = ""
+	_ = r.Store.UpdateBranch(ctx, b)
+}
+
+func (r *Reconciler) reconcileConnectors(ctx context.Context) {
+	list, err := r.Store.ListConnectors(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reconcile: list connectors: %v\n", err)
+		return
+	}
+	for _, c := range list {
+		r.fixConnector(ctx, c)
+	}
+}
+
+func (r *Reconciler) fixConnector(ctx context.Context, c meta.Connector) {
+	h := compute.Handle{
+		Provider: r.Compute.Name(), Name: "replica-" + c.Name,
+		Port: c.Port, DataDir: c.DataDir,
+	}
+	running, _ := r.Compute.IsRunning(ctx, h)
+	age := time.Since(c.UpdatedAt)
+
+	switch c.Status {
+	case meta.ConnectorBootstrapping:
+		if age > stuckAfter {
+			fmt.Fprintf(os.Stderr, "reconcile: connector %s stuck bootstrapping — marking error\n", c.Name)
+			_ = r.Compute.Stop(ctx, h)
+			r.markConnector(ctx, c, meta.ConnectorError, "reconcile: bootstrap timed out")
+		}
+	case meta.ConnectorReplicating:
+		if running {
+			return
+		}
+		if r.AutoResume {
+			if err := r.startConnector(ctx, c); err != nil {
+				r.markConnector(ctx, c, meta.ConnectorCrashed, "reconcile: compute down: "+err.Error())
+				return
+			}
+			fmt.Fprintf(os.Stderr, "reconcile: auto-resumed connector %s\n", c.Name)
+			return
+		}
+		r.markConnector(ctx, c, meta.ConnectorCrashed, "reconcile: compute down")
+	case meta.ConnectorCrashed:
+		if !r.AutoResume {
+			return
+		}
+		if running {
+			r.markConnector(ctx, c, meta.ConnectorReplicating, "")
+			return
+		}
+		if err := r.startConnector(ctx, c); err != nil {
+			r.markConnector(ctx, c, meta.ConnectorCrashed, "reconcile: auto-resume failed: "+err.Error())
+			return
+		}
+		fmt.Fprintf(os.Stderr, "reconcile: auto-resumed crashed connector %s\n", c.Name)
+	}
+}
+
+func (r *Reconciler) startConnector(ctx context.Context, c meta.Connector) error {
+	_, err := r.Compute.Start(ctx, compute.Spec{
+		Name: "replica-" + c.Name, DataDir: c.DataDir, Port: c.Port,
+		LogFile: r.logPath("replica-" + c.Name),
+	})
+	if err != nil {
+		return err
+	}
+	c.Status = meta.ConnectorReplicating
+	c.ErrorMessage = ""
+	if err := r.Store.UpdateConnector(ctx, c); err != nil {
+		return err
+	}
+	r.syncReplicaRow(ctx, c)
+	return nil
+}
+
+func (r *Reconciler) markConnector(ctx context.Context, c meta.Connector, status, msg string) {
+	c.Status = status
+	c.ErrorMessage = msg
+	_ = r.Store.UpdateConnector(ctx, c)
+	r.syncReplicaRow(ctx, c)
+}
+
+func (r *Reconciler) syncReplicaRow(ctx context.Context, c meta.Connector) {
+	br, err := r.Store.GetBranch(ctx, c.ProjectID, "replica-"+c.Name)
+	if err != nil {
+		return
+	}
+	switch c.Status {
+	case meta.ConnectorReplicating:
+		br.Status = meta.StatusActive
+	case meta.ConnectorIdle:
+		br.Status = meta.StatusIdle
+	case meta.ConnectorCrashed:
+		br.Status = meta.StatusCrashed
+	default:
+		br.Status = meta.StatusError
+	}
+	br.ErrorMessage = c.ErrorMessage
+	_ = r.Store.UpdateBranch(ctx, br)
 }
 
 func (r *Reconciler) Loop(ctx context.Context, every time.Duration) {

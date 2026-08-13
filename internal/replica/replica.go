@@ -161,16 +161,10 @@ func (m *Manager) PrepareStandbyDataDir(dataDir string, port int) error {
 		return err
 	}
 	conf := filepath.Join(dataDir, "postgresql.conf")
-	f, err := os.OpenFile(conf, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = f.WriteString(`
-# --- sprout replica ---
-hot_standby = on
-`)
-	return err
+	return postgres.ReplaceManagedSection(conf,
+		"# --- sprout replica begin ---",
+		"# --- sprout replica end ---",
+		"hot_standby = on\n")
 }
 
 type Lag struct {

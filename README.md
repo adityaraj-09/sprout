@@ -169,6 +169,7 @@ Connectors and branches each get an allocated port.
 | `sprout connect [--name=id] [--mode=physical\|logical] <url>` | Bootstrap named replica |
 | `sprout status [name]` | Replication lag / logical sync for a connector |
 | `sprout connector list` | List connectors (password redacted) |
+| `sprout connector delete <name> [--force]` | Drop local replica + remote pub; `--force` also deletes child branches |
 | `sprout health` | `GET /healthz` |
 | `sprout branch create <name> [--from=<connector\|main>]` | CoW branch |
 | `sprout branch list` | Branches + replicas + main |
@@ -199,6 +200,7 @@ Auth: `Authorization: Bearer <token>` (default `dev-token`; `/healthz` is open)
 | `GET` | `/v1/projects` | list projects |
 | `GET` | `/v1/connectors` | all connectors (URL passwords redacted) |
 | `POST` | `/v1/projects/{project}/connect` | `{"url","mode","name"}` |
+| `DELETE` | `/v1/projects/{project}/connectors/{name}` | delete replica; `?force=true` also deletes child branches |
 | `GET` | `/v1/projects/{project}/replication?name=` | lag (name optional if sole connector) |
 | `GET` | `/v1/projects/{project}/connectors/{name}/replication` | lag for one connector |
 | `POST` | `/v1/projects/{project}/branches` | `{"name","from"}` |
@@ -241,6 +243,9 @@ Logical is for hosts that block physical replication (common on managed Postgres
 | `SPROUT_PUBLIC_HOST` | `localhost` | Hostname in branch connection strings |
 | `SPROUT_PG_LISTEN` | auto | Postgres `listen_addresses` (`*` when public host is set) |
 | `SPROUT_SAFE` | unset | Set `true` to keep fsync on (recommended when exposing) |
+| `SPROUT_TRUST_REMOTE` | unset | Set `true` to keep trust auth for remote TCP (lab only). Default remote auth is SCRAM-SHA-256 |
+| `SPROUT_DB_PASSWORD` | random | Shared DB password for advertised roles; otherwise generated per instance |
+| `SPROUT_AUTO_RESUME` | unset | Set `true` to restart crashed connectors/branches |
 | `SPROUT_COMPUTE` | `auto` | Compute provider (`local` / `docker` / `auto`) |
 | `SPROUT_COLD_SNAP` | `true` | Cold-stop parent for non-standby snapshots (`false` to skip) |
 
@@ -283,7 +288,7 @@ psql postgresql://db.example.com:55440/postgres
 ```
 
 Open firewall ports for the API and each branch port you use (or put a reverse proxy / VPN in front).  
-Auth is still **trust** over TCP when remote listen is on — fine for a locked-down VPC; not for the open internet without real passwords/TLS.
+Remote Postgres uses **SCRAM-SHA-256** by default (loopback stays trust so the control plane can still connect). Connection strings include the generated password. `SPROUT_TRUST_REMOTE=true` restores the old open-trust lab behavior.
 
 ---
 
@@ -291,6 +296,7 @@ Auth is still **trust** over TCP when remote listen is on — fine for a locked-
 
 ```bash
 make build              # bin/sprout + bin/sprout-server
+make test               # go test ./...
 make server             # build + run server
 make lab-primary        # start lab Postgres on :55431
 make lab-primary-stop
@@ -317,16 +323,17 @@ Exact ports for connectors/branches are stored in `data/control.db` and shown by
 - Connector URLs can contain credentials and are stored in `data/control.db`. Keep `data/` out of git (already ignored).
 - List APIs redact passwords in URLs; rotate any secret that was pasted into a shell history or chat.
 - Default token `dev-token` is for local use only — set `SPROUT_TOKEN` if you expose the listen address.
+- Remote Postgres uses SCRAM unless `SPROUT_TRUST_REMOTE=true`. `sprout doctor` fails if remote trust is on without `SPROUT_SAFE=true`.
 
 ---
 
 ## Status / limitations
 
 - **macOS + Homebrew Postgres** is the primary tested path (APFS CoW).
-- **ZFS** provider exists for Linux; Docker compute is stubbed.
+- **ZFS** provider creates a child dataset per main/replica/branch (not a single `main` snapshot). Docker compute is stubbed.
 - Supabase **physical** replication typically fails (`pg_hba` / replication privileges) — use **logical**.
 - Metadata is SQLite (`data/control.db`, WAL); legacy `control.json` is imported once if present.
-- Reconciler runs periodically to align compute with stored branch state.
+- Reconciler aligns compute with branch **and** connector state. Unexpected downtime is `crashed` (not user `idle`); set `SPROUT_AUTO_RESUME=true` to restart.
 
 ---
 

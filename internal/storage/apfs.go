@@ -34,6 +34,10 @@ func NewAPFS(root string) *APFS {
 
 func (a *APFS) Name() string { return "apfs" }
 
+func (a *APFS) EnsureVolume(path string) error {
+	return os.MkdirAll(path, 0o700)
+}
+
 func apfsLikely() bool {
 	return runtime.GOOS == "darwin"
 }

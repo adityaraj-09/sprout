@@ -14,7 +14,7 @@ package storage
 import (
 	"fmt"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -23,10 +23,15 @@ import (
 type Provider interface {
 	Name() string
 
+	// EnsureVolume makes path a first-class data volume (mkdir for copy/APFS;
+	// a child ZFS dataset mounted at path for ZFS).
+	EnsureVolume(path string) error
+
 	// Snapshot freezes sourceDir into a named point-in-time image.
 	Snapshot(sourceDir, snapshotName string) (snapshotRef string, err error)
 
 	// Clone creates a writable data directory from a snapshot.
+	// destDir is always a filesystem path (never a raw ZFS dataset name).
 	Clone(snapshotRef, destDir string) error
 
 	// Destroy removes a snapshot or a clone directory/dataset.
@@ -58,11 +63,11 @@ func Detect(root string) (Provider, error) {
 		if ds == "" {
 			return nil, fmt.Errorf("SPROUT_STORAGE=zfs requires SPROUT_ZFS_DATASET (e.g. sprout/data)")
 		}
-		return NewZFS(ds)
+		return NewZFS(ds, root)
 	}
 
 	if ds := strings.TrimSpace(os.Getenv("SPROUT_ZFS_DATASET")); ds != "" && zfsAvailable() {
-		return NewZFS(ds)
+		return NewZFS(ds, root)
 	}
 	if apfsLikely() {
 		return NewAPFS(root), nil
@@ -71,27 +76,40 @@ func Detect(root string) (Provider, error) {
 	return NewCopy(root), nil
 }
 
-func zfsDatasetForPath(path string) string {
-	cmd := exec.Command("zfs", "list", "-H", "-o", "name,mountpoint")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return ""
-	}
-	bestName, bestLen := "", -1
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
+// parseZFSList picks the dataset whose mountpoint is the longest prefix of path.
+func parseZFSList(out, path string) (bestName, bestMount string) {
+	path = filepathCleanSlash(path)
+	bestLen := -1
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
-		name, mp := fields[0], fields[1]
+		name, mp, ok := strings.Cut(line, "\t")
+		if !ok {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			name, mp = fields[0], fields[1]
+		}
 		if mp == "-" {
 			continue
 		}
+		mp = filepathCleanSlash(mp)
 		if path == mp || strings.HasPrefix(path, strings.TrimRight(mp, "/")+"/") {
 			if len(mp) > bestLen {
-				bestName, bestLen = name, len(mp)
+				bestName, bestMount, bestLen = name, mp, len(mp)
 			}
 		}
 	}
-	return bestName
+	return bestName, bestMount
+}
+
+func filepathCleanSlash(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	return filepath.Clean(path)
 }

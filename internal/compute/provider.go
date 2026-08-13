@@ -82,7 +82,7 @@ func (l *Local) Stop(ctx context.Context, h Handle) error {
 
 func (l *Local) IsRunning(ctx context.Context, h Handle) (bool, error) {
 	_ = ctx
-	inst := &postgres.Instance{Port: h.Port, Bins: l.Bins}
+	inst := &postgres.Instance{Port: h.Port, DataDir: h.DataDir, Bins: l.Bins}
 	return inst.IsRunning(), nil
 }
 

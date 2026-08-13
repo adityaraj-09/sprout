@@ -70,10 +70,11 @@ export class SproutClient {
     });
   }
 
-  async deleteConnector(name: string): Promise<void> {
+  async deleteConnector(name: string, opts?: { force?: boolean }): Promise<void> {
+    const q = opts?.force ? "?force=true" : "";
     await this.request(
       "DELETE",
-      `/v1/projects/${this.project}/connectors/${encodeURIComponent(name)}`,
+      `/v1/projects/${this.project}/connectors/${encodeURIComponent(name)}${q}`,
     );
   }
 

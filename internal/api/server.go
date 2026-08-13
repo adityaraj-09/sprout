@@ -164,8 +164,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		"project":   proj,
 	}
 	if res.Connector != nil {
-		out["connection_string"] = postgres.FormatConnString(res.Connector.Port, "postgres")
-		out["psql"] = postgres.PsqlOneLiner(res.Connector.Port)
+		out["connection_string"] = postgres.FormatConnString(res.Connector.Port, "postgres", res.Connector.Password)
+		out["psql"] = postgres.PsqlOneLiner(res.Connector.Port, res.Connector.Password)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -178,7 +178,8 @@ func (s *Server) handleDeleteConnector(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
-	if err := s.Service.DeleteConnector(ctx, proj.ID, r.PathValue("name")); err != nil {
+	force := r.URL.Query().Get("force") == "true" || r.URL.Query().Get("force") == "1"
+	if err := s.Service.DeleteConnector(ctx, proj.ID, r.PathValue("name"), force); err != nil {
 		code, status := mapErr(err)
 		writeErr(w, status, code, err.Error())
 		return
@@ -290,7 +291,7 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		"container_id":       rec.ContainerID,
 		"compute":            rec.Compute,
 		"connection_string":  rec.ConnString,
-		"psql":               postgres.PsqlOneLiner(rec.Port),
+		"psql":               postgres.PsqlOneLiner(rec.Port, rec.Password),
 		"error_message":      rec.ErrorMessage,
 		"source_lsn":         rec.SourceLSN,
 		"source_connector":   rec.SourceConnector,
@@ -406,6 +407,8 @@ func mapErr(err error) (code string, status int) {
 		return "source_not_ready", http.StatusServiceUnavailable
 	case strings.HasPrefix(msg, "connector_not_found"), strings.HasPrefix(msg, "no source"), strings.HasPrefix(msg, "multiple connectors"):
 		return "connector_required", http.StatusBadRequest
+	case strings.HasPrefix(msg, "connector_has_branches"):
+		return "connector_has_branches", http.StatusConflict
 	case strings.HasPrefix(msg, "connector_exists"):
 		return "connector_exists", http.StatusConflict
 	case strings.HasPrefix(msg, "invalid_mode"):

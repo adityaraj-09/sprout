@@ -79,7 +79,7 @@ func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (
 	}
 	inst := &postgres.Instance{
 		Name: h.Name, DataDir: h.DataDir, Port: h.Port,
-		LogFile: s.logPath(h.Name), Bins: s.Bins,
+		LogFile: s.logPath(h.Name), Bins: s.Bins, Password: c.Password,
 	}
 	_ = inst.EnsureAppRoles()
 	c.Status = meta.ConnectorReplicating
@@ -88,7 +88,8 @@ func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (
 
 	if br, err := s.Store.GetBranch(ctx, projectID, "replica-"+c.Name); err == nil {
 		br.Status = meta.StatusActive
-		br.ConnString = postgres.FormatConnString(c.Port, "postgres")
+		br.ErrorMessage = ""
+		br.ConnString = postgres.FormatConnString(c.Port, "postgres", c.Password)
 		_ = s.Store.UpdateBranch(ctx, br)
 	}
 
@@ -106,8 +107,8 @@ func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (
 	}
 
 	fmt.Printf("✓ connector %q resumed (%d branches)\n", c.Name, len(out))
-	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres"))
-	fmt.Println("  ", postgres.PsqlOneLiner(c.Port))
+	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password))
+	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password))
 	return ConnectorLifecycleResult{
 		Connector: c,
 		Branches:  out,
@@ -140,7 +141,7 @@ func (s *Service) suspendBranchBestEffort(ctx context.Context, projectID, name s
 	if rec.Status == meta.StatusIdle {
 		return rec, nil
 	}
-	if rec.Status != meta.StatusActive && rec.Status != meta.StatusError {
+	if rec.Status != meta.StatusActive && rec.Status != meta.StatusError && rec.Status != meta.StatusCrashed {
 		return rec, nil
 	}
 	unlock := s.lockBranch(name)
@@ -169,7 +170,7 @@ func (s *Service) resumeBranchBestEffort(ctx context.Context, projectID, name st
 	if rec.Status == meta.StatusActive {
 		return rec, nil
 	}
-	if rec.Status != meta.StatusIdle {
+	if rec.Status != meta.StatusIdle && rec.Status != meta.StatusCrashed {
 		return rec, fmt.Errorf("invalid_state: status=%s", rec.Status)
 	}
 	unlock := s.lockBranch(name)
@@ -189,8 +190,9 @@ func (s *Service) resumeBranchBestEffort(ctx context.Context, projectID, name st
 	}
 	rec.ContainerID = started.ContainerID
 	rec.Status = meta.StatusActive
-	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres")
-	inst := &postgres.Instance{Name: rec.Name, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(rec.Name), Bins: s.Bins}
+	rec.ErrorMessage = ""
+	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres", rec.Password)
+	inst := &postgres.Instance{Name: rec.Name, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(rec.Name), Bins: s.Bins, Password: rec.Password}
 	_ = inst.EnsureAppRoles()
 	_ = s.Store.UpdateBranch(ctx, rec)
 	return rec, nil

@@ -21,6 +21,10 @@ func NewCopy(root string) *Copy {
 
 func (c *Copy) Name() string { return "copy" }
 
+func (c *Copy) EnsureVolume(path string) error {
+	return os.MkdirAll(path, 0o700)
+}
+
 func (c *Copy) snapshotPath(name string) string {
 	return filepath.Join(c.root, "snapshots", name)
 }
