@@ -55,7 +55,10 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	rec := &reconcile.Reconciler{Store: store, Compute: comp, Storage: stor}
+	rec := &reconcile.Reconciler{
+		Store: store, Compute: comp, Storage: stor,
+		Root: cfg.DataRoot, AutoResume: cfg.AutoResume,
+	}
 	go rec.Loop(ctx, 30*time.Second)
 
 	srv := api.New(svc, cfg.Token)
@@ -76,7 +79,11 @@ func main() {
 	fmt.Printf("  token:     %s\n", cfg.Token)
 	fmt.Printf("  pg_host:   %s (listen_addresses=%s)\n", postgres.PublicHost(), postgres.ListenAddresses())
 	if postgres.RemoteAccess() {
-		fmt.Println("  warning:   Postgres accepts remote TCP with trust auth — firewall + SPROUT_SAFE=true for anything real")
+		if postgres.TrustRemote() {
+			fmt.Println("  warning:   Postgres accepts remote TCP with trust auth — firewall + SPROUT_SAFE=true; prefer default SCRAM")
+		} else {
+			fmt.Println("  auth:      remote SCRAM-SHA-256 (loopback trust); passwords are in connection strings")
+		}
 	}
 
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

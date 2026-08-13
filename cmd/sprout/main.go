@@ -167,11 +167,28 @@ func main() {
 					conn.Name, conn.Mode, conn.Status, conn.Port, conn.LastLagBytes, conn.LastLSN, conn.DataDir, conn.PrimaryURL)
 			}
 		case "delete":
-			need(4)
-			if err := c.do("DELETE", "/v1/projects/default/connectors/"+os.Args[3], nil, nil); err != nil {
+			force := false
+			name := ""
+			for _, a := range os.Args[3:] {
+				if a == "--force" {
+					force = true
+					continue
+				}
+				if name == "" && !strings.HasPrefix(a, "-") {
+					name = a
+				}
+			}
+			if name == "" {
+				fatal(fmt.Errorf("usage: sprout connector delete <name> [--force]"))
+			}
+			path := "/v1/projects/default/connectors/" + name
+			if force {
+				path += "?force=true"
+			}
+			if err := c.do("DELETE", path, nil, nil); err != nil {
 				fatal(err)
 			}
-			fmt.Printf("✓ deleted connector %s\n", os.Args[3])
+			fmt.Printf("✓ deleted connector %s\n", name)
 		case "suspend":
 			need(4)
 			var out map[string]any
@@ -386,7 +403,9 @@ Usage:
                                   --tables=...   = allowlist for logical sync
   sprout status [name]
   sprout connector list
-  sprout connector delete <name>  drops local replica + remote publication (logical)
+  sprout connector delete <name> [--force]
+                                  drops local replica + remote publication (logical)
+                                  --force also deletes branches created from it
   sprout connector suspend <name> stop connector + all its branches (data kept)
   sprout connector resume <name>  start connector + all its idle branches
   sprout health

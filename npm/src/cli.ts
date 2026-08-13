@@ -20,7 +20,7 @@ Commands:
   sprout connect [--name=<id>] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
   sprout status [name]
   sprout connector list
-  sprout connector delete <name>
+  sprout connector delete <name> [--force]
   sprout connector suspend|resume <name>
   sprout health
   sprout branch create <name> [--from=<connector|main>]
@@ -272,9 +272,11 @@ async function main(): Promise<void> {
           break;
         }
         if (sub === "delete") {
-          const name = argv[2];
+          const rest = argv.slice(2);
+          const force = rest.includes("--force");
+          const name = positional(rest)[0];
           if (!name) usage();
-          await client.deleteConnector(name);
+          await client.deleteConnector(name, { force });
           console.log(`✓ deleted connector ${name}`);
           break;
         }

@@ -74,16 +74,31 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 		}
 	}
 
-	// Public host / listen
+	// Public host / listen / auth
 	host := postgres.PublicHost()
 	listen := postgres.ListenAddresses()
 	remote := postgres.RemoteAccess()
 	add(DoctorCheck{Name: "public_host", OK: true, Level: "info",
 		Detail: fmt.Sprintf("SPROUT_PUBLIC_HOST=%s listen_addresses=%s db_user=%s", host, listen, postgres.DBUser())})
 	if remote {
+		if postgres.TrustRemote() {
+			if os.Getenv("SPROUT_SAFE") != "true" {
+				add(DoctorCheck{Name: "auth", OK: false, Level: "error",
+					Detail: "remote Postgres uses trust auth (SPROUT_TRUST_REMOTE=true)",
+					Hint:   "unset SPROUT_TRUST_REMOTE to use SCRAM, or set SPROUT_SAFE=true only on a locked-down lab"})
+			} else {
+				add(DoctorCheck{Name: "auth", OK: true, Level: "warn",
+					Detail: "remote Postgres uses trust auth; SPROUT_SAFE=true",
+					Hint:   "lock NSG to your IPs; prefer SCRAM (default) for anything real"})
+			}
+		} else {
+			add(DoctorCheck{Name: "auth", OK: true, Level: "info",
+				Detail: "remote auth=scram-sha-256 (loopback still trust)",
+				Hint:   "connection strings include a generated password; set SPROUT_TRUST_REMOTE=true only for labs"})
+		}
 		add(DoctorCheck{Name: "firewall", OK: true, Level: "warn",
-			Detail: "Postgres accepts remote TCP (trust auth)",
-			Hint:   "open NSG/security group for branch ports (typically 55432-55500) and keep SPROUT_SAFE=true outside labs"})
+			Detail: "Postgres accepts remote TCP",
+			Hint:   "open NSG/security group for branch ports (typically 55432-55500)"})
 	} else {
 		add(DoctorCheck{Name: "firewall", OK: true, Level: "info",
 			Detail: "Postgres bound to loopback only",
@@ -129,7 +144,7 @@ func storageHint(name string) string {
 	case "copy":
 		return "copy storage is correct for Azure without ZFS/APFS — branches are slower (full cp -a)"
 	case "zfs":
-		return "ZFS CoW enabled — set SPROUT_ZFS_DATASET if auto-detect fails"
+		return "ZFS CoW: each main/replica/branch is a child dataset; set SPROUT_STORAGE=copy to force full copies"
 	case "apfs":
 		return "APFS CoW clones enabled (macOS)"
 	default:

@@ -146,7 +146,7 @@ touch "$HOME/sprout-data/writetest" && rm "$HOME/sprout-data/writetest"
 
 Sprout storage detection:
 
-- Set **`SPROUT_ZFS_DATASET=sprout/data`** for real ZFS snapshot/clone CoW.
+- Set **`SPROUT_ZFS_DATASET=sprout/data`** for real ZFS snapshot/clone CoW. Sprout creates **child datasets** for `main`, each replica, and each branch (so branching from a connector does not snapshot `main`).
 - Or set **`SPROUT_STORAGE=copy`** to use `cp -a` under the mount (simpler; branches are slower).  
   This is what many early Azure labs used successfully.
 
@@ -179,6 +179,9 @@ export SPROUT_PUBLIC_HOST=20.244.18.205    # your VM public IP
 export SPROUT_TOKEN='change-me-long-secret'
 export SPROUT_SAFE=true
 export SPROUT_DB_USER=sprout               # login role in connection strings
+# optional:
+# export SPROUT_TRUST_REMOTE=true          # lab-only: remote trust instead of SCRAM
+# export SPROUT_AUTO_RESUME=true           # restart crashed connectors/branches
 ```
 
 Persist in `~/.bashrc` or a systemd unit (below).
@@ -278,7 +281,8 @@ sprout connector suspend sup
 sprout connector resume sup
 
 sprout branch diff my-feature
-sprout connector delete sup   # drops local replica + remote pub/slot (destructive)
+sprout connector delete sup              # blocked if branches still exist
+sprout connector delete sup --force      # also destroys branches from this connector
 ```
 
 ---
@@ -325,7 +329,7 @@ pkill -f sprout-server || true
 
 - Rotate any DB password pasted into chat or shell history.
 - `SPROUT_TOKEN` must not stay `dev-token` on a public IP.
-- Remote Postgres uses **trust** when `SPROUT_PUBLIC_HOST` is set — lock down NSG to your IPs; add SCRAM/TLS before any real multi-tenant use.
+- Remote Postgres uses **SCRAM-SHA-256** when `SPROUT_PUBLIC_HOST` is set (loopback stays trust). Connection strings include a generated password. `SPROUT_TRUST_REMOTE=true` is lab-only; `sprout doctor` errors if remote trust is on without `SPROUT_SAFE=true`.
 - `control.db` stores connector URLs (secrets). Keep `$SPROUT_DATA` private.
 
 ---

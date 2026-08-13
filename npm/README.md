@@ -122,7 +122,7 @@ sprout doctor
 sprout init
 sprout connect [--name=...] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
 sprout status [name]
-sprout connector list | delete | suspend | resume <name>
+sprout connector list | delete [--force] | suspend | resume <name>
 sprout health
 sprout branch create <name> [--from=<connector|main>]
 sprout branch list | get | diff | reset | delete | suspend | resume <name>

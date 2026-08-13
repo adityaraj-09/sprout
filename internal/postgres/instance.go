@@ -49,15 +49,16 @@ func LookBinaries() (Binaries, error) {
 
 // Instance is one Postgres process bound to one data directory + port.
 type Instance struct {
-	Name    string
-	DataDir string
-	Port    int
-	LogFile string
-	Bins    Binaries
+	Name     string
+	DataDir  string
+	Port     int
+	LogFile  string
+	Password string
+	Bins     Binaries
 }
 
 func (i *Instance) ConnString(db string) string {
-	return FormatConnString(i.Port, db)
+	return FormatConnString(i.Port, db, i.Password)
 }
 
 // Init creates a brand-new cluster in DataDir (only for MAIN, never for branches).
@@ -146,8 +147,15 @@ func (i *Instance) waitStopped(timeout time.Duration) error {
 }
 
 func (i *Instance) IsRunning() bool {
-	// Always pass -d postgres: without it libpq defaults to OS username as DB
-	// (e.g. "flagforge"), which does not exist and spams FATAL in logs / can fail ready checks.
+	if i.DataDir != "" && i.Bins.PgCtl != "" {
+		cmd := exec.Command(i.Bins.PgCtl, "-D", i.DataDir, "status")
+		return cmd.Run() == nil
+	}
+	if i.Bins.PgIsReady == "" || i.Port == 0 {
+		return false
+	}
+	// Fallback when DataDir is unknown: pg_isready on the port.
+	// Always pass -d postgres: without it libpq defaults to OS username as DB.
 	cmd := exec.Command(i.Bins.PgIsReady,
 		"-h", "127.0.0.1",
 		"-p", strconv.Itoa(i.Port),

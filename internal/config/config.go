@@ -11,6 +11,7 @@ type Config struct {
 	Token      string
 	Compute    string // local|docker|auto
 	ColdSnap   bool
+	AutoResume bool
 	PublicHost string
 	MetaDB     string
 	ServerURL  string // CLI only
@@ -28,6 +29,7 @@ func ServerDefaults() Config {
 		Token:      envOr("SPROUT_TOKEN", "dev-token"),
 		Compute:    envOr("SPROUT_COMPUTE", "auto"),
 		ColdSnap:   envOr("SPROUT_COLD_SNAP", "true") != "false",
+		AutoResume: envOr("SPROUT_AUTO_RESUME", "") == "true",
 		PublicHost: envOr("SPROUT_PUBLIC_HOST", "localhost"),
 		MetaDB:     "",
 	}

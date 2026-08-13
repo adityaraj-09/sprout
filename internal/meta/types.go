@@ -10,6 +10,7 @@ const (
 	StatusCreating  = "creating"
 	StatusActive    = "active"
 	StatusIdle      = "idle"
+	StatusCrashed   = "crashed" // compute died; not a user suspend
 	StatusResetting = "resetting"
 	StatusDeleting  = "deleting"
 	StatusError     = "error"
@@ -20,6 +21,7 @@ const (
 	ConnectorBootstrapping = "bootstrapping"
 	ConnectorReplicating   = "replicating"
 	ConnectorIdle          = "idle" // compute stopped; data kept (suspend)
+	ConnectorCrashed       = "crashed"
 	ConnectorError         = "error"
 	ConnectorDisconnected  = "disconnected"
 )
@@ -40,6 +42,7 @@ type BranchRecord struct {
 	SourceLSN          string    `json:"source_lsn,omitempty"`
 	SourceConnector    string    `json:"source_connector,omitempty"`    // connector name used as parent
 	SourceConnectorID  string    `json:"source_connector_id,omitempty"`
+	Password           string    `json:"-"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 	LastUsedAt         time.Time `json:"last_used_at"`
@@ -64,6 +67,7 @@ type Connector struct {
 	ErrorMessage string    `json:"error_message,omitempty"`
 	LastLSN      string    `json:"last_lsn,omitempty"`
 	LastLagBytes int64     `json:"last_lag_bytes"`
+	Password     string    `json:"-"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }

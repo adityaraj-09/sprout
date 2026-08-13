@@ -2,9 +2,21 @@ package postgres
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+)
+
+const (
+	netBegin    = "# --- sprout network begin ---"
+	netEnd      = "# --- sprout network end ---"
+	perfBegin   = "# --- sprout lab perf begin ---"
+	perfEnd     = "# --- sprout lab perf end ---"
+	remoteBegin = "# --- sprout remote begin ---"
+	remoteEnd   = "# --- sprout remote end ---"
 )
 
 // PublicHost is the hostname advertised in connection strings.
@@ -37,66 +49,52 @@ func RemoteAccess() bool {
 }
 
 // FormatConnString builds a libpq URL for a Sprout-managed instance.
-func FormatConnString(port int, db string) string {
+func FormatConnString(port int, db, password string) string {
 	if db == "" {
 		db = "postgres"
 	}
-	return fmt.Sprintf("postgresql://%s@%s:%d/%s", DBUser(), PublicHost(), port, db)
+	u := url.URL{
+		Scheme: "postgresql",
+		Host:   net.JoinHostPort(PublicHost(), strconv.Itoa(port)),
+		Path:   "/" + db,
+	}
+	if password != "" {
+		u.User = url.UserPassword(DBUser(), password)
+	} else {
+		u.User = url.User(DBUser())
+	}
+	return u.String()
 }
 
-// ApplyNetworkSettings appends listen/port overrides and opens pg_hba for TCP clients.
+// ApplyNetworkSettings rewrites managed listen/port/auth sections (idempotent).
 func ApplyNetworkSettings(dataDir string, port int) error {
 	listen := ListenAddresses()
 	conf := filepath.Join(dataDir, "postgresql.conf")
-	f, err := os.OpenFile(conf, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(f, `
-# --- sprout network ---
-port = %d
-listen_addresses = '%s'
-unix_socket_directories = '%s'
-`, port, listen, dataDir)
-	_ = f.Close()
-	if err != nil {
+	netBody := fmt.Sprintf("port = %d\nlisten_addresses = '%s'\nunix_socket_directories = '%s'\npassword_encryption = scram-sha-256\n",
+		port, listen, dataDir)
+	if err := ReplaceManagedSection(conf, netBegin, netEnd, netBody); err != nil {
 		return err
 	}
 
-	// Fast local demos (disable with SPROUT_SAFE=true).
-	if os.Getenv("SPROUT_SAFE") != "true" {
-		cf, err := os.OpenFile(conf, os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
+	if os.Getenv("SPROUT_SAFE") == "true" {
+		if err := RemoveManagedSection(conf, perfBegin, perfEnd); err != nil {
 			return err
 		}
-		_, err = cf.WriteString(`
-# --- sprout lab perf (SPROUT_SAFE=true to skip) ---
-logging_collector = off
-fsync = off
-synchronous_commit = off
-full_page_writes = off
-`)
-		_ = cf.Close()
-		if err != nil {
+	} else {
+		perfBody := "logging_collector = off\nfsync = off\nsynchronous_commit = off\nfull_page_writes = off\n"
+		if err := ReplaceManagedSection(conf, perfBegin, perfEnd, perfBody); err != nil {
 			return err
 		}
 	}
 
-	if !RemoteAccess() {
-		return nil
-	}
-	// Lab / early product: trust over TCP when exposing publicly.
-	// Replace with scram + roles before any real multi-tenant deploy.
 	hba := filepath.Join(dataDir, "pg_hba.conf")
-	hf, err := os.OpenFile(hba, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
+	if !RemoteAccess() {
+		return RemoveManagedSection(hba, remoteBegin, remoteEnd)
 	}
-	defer hf.Close()
-	_, err = hf.WriteString(`
-# --- sprout remote (SPROUT_PUBLIC_HOST / SPROUT_PG_LISTEN) ---
-host all all 0.0.0.0/0 trust
-host all all ::/0 trust
-`)
-	return err
+	auth := "scram-sha-256"
+	if TrustRemote() {
+		auth = "trust"
+	}
+	hbaBody := fmt.Sprintf("host all all 0.0.0.0/0 %s\nhost all all ::/0 %s\n", auth, auth)
+	return ReplaceManagedSection(hba, remoteBegin, remoteEnd, hbaBody)
 }
