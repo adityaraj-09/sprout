@@ -4,7 +4,8 @@ Open-source **Postgres CoW branching**: near-instant database branches plus prod
 
 Spin up independent Postgres instances that start as near-instant clones of a parent dataset (local demo or a replica of production), then diverge freely.
 
-**VM / Azure from scratch:** see [`SETUP.md`](SETUP.md) (ZFS disk, Postgres 17 tools, firewall, connect + branch).
+**VM / Azure from scratch:** see [`SETUP.md`](SETUP.md) (ZFS disk, Postgres 17 tools, firewall, connect + branch).  
+**System diagrams:** [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
@@ -110,9 +111,55 @@ If **one** connector exists, `--from` is optional. With **multiple**, `--from` i
 
 ## Architecture
 
+Full diagrams (context, SNI routing, connect, CoW branch create, reconciler): [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+```mermaid
+flowchart TB
+  subgraph clients [Clients]
+    CLI["sprout CLI / SDK"]
+    PSQL["psql / apps"]
+  end
+
+  subgraph vm ["sprout-server on the VM"]
+    API["HTTP API :8080"]
+    PX["TLS SNI proxy :5432"]
+    ORCH["branch orchestrator"]
+    META["SQLite control.db"]
+    ST["storage ZFS / APFS / copy"]
+    CMP["compute pg_ctl"]
+  end
+
+  subgraph data [PGDATA]
+    RX["replicas/x :55434"]
+    RY["replicas/y :55435"]
+    BX["branches/test-x :55440"]
+    BY["branches/test-y :55441"]
+  end
+
+  subgraph up [Upstreams]
+    U1["prod / Supabase"]
+    U2["lab primary"]
+  end
+
+  CLI -->|REST Bearer| API
+  API --> ORCH
+  ORCH --> META
+  ORCH --> ST
+  ORCH --> CMP
+  ORCH --> RX
+  ORCH --> RY
+  ORCH --> BX
+  ORCH --> BY
+  PX -->|"SNI test-x.host"| BX
+  PX -->|"SNI test-y.host"| BY
+  PSQL --> PX
+  RX -.->|physical or logical| U1
+  RY -.->|physical or logical| U2
+```
+
 ```text
 cmd/sprout          thin HTTP client (CLI)
-cmd/sprout-server   control plane + reconciler
+cmd/sprout-server   control plane + reconciler + SNI proxy
 
 internal/
   api/        HTTP routes, Bearer auth
@@ -121,6 +168,7 @@ internal/
   storage/    APFS / ZFS CoW provider
   compute/    local pg_ctl (Docker stub)
   postgres/   initdb, checkpoint, PrepareClone, seed
+  pgproxy/    TLS SNI router on :5432
   meta/       SQLite → data/control.db (imports legacy control.json once)
   reconcile/  keep compute vs metadata aligned
   config/     env defaults

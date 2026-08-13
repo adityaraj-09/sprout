@@ -2,7 +2,7 @@
 
 From-scratch guide that matches a working Azure Ubuntu lab: attach a data disk, optional ZFS, install Postgres **matching your upstream major** (e.g. 17 for Supabase), run `sprout-server`, connect logically, branch, and open firewall ports.
 
-Repo: [https://github.com/adityaraj-09/sprout](https://github.com/adityaraj-09/sprout)
+Repo: [https://github.com/adityaraj-09/sprout](https://github.com/adityaraj-09/sprout) · Architecture: [`ARCHITECTURE.md`](ARCHITECTURE.md)
 
 ---
 
