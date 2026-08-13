@@ -13,11 +13,11 @@ import (
 
 // DoctorCheck is one health/DX check result.
 type DoctorCheck struct {
-	Name    string `json:"name"`
-	OK      bool   `json:"ok"`
-	Detail  string `json:"detail"`
-	Hint    string `json:"hint,omitempty"`
-	Level   string `json:"level"` // info | warn | error
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"`
+	Hint   string `json:"hint,omitempty"`
+	Level  string `json:"level"` // info | warn | error
 }
 
 // DoctorReport aggregates environment readiness.
@@ -82,7 +82,7 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 		Detail: fmt.Sprintf("SPROUT_PUBLIC_HOST=%s listen_addresses=%s db_user=%s subdomain=%v", host, listen, postgres.DBUser(), postgres.BranchSubdomain())})
 	if postgres.BranchSubdomain() {
 		add(DoctorCheck{Name: "dns", OK: true, Level: "warn",
-			Detail: fmt.Sprintf("branch URLs use <name>.%s:<port>", host),
+			Detail: fmt.Sprintf("branch URLs use <name>-<connector>.%s:<port>", host),
 			Hint:   "create a wildcard A/AAAA record for *." + host + " pointing at this VM; port still selects the branch (no SNI proxy)"})
 	}
 	if remote {

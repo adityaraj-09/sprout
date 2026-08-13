@@ -50,6 +50,7 @@ func LookBinaries() (Binaries, error) {
 // Instance is one Postgres process bound to one data directory + port.
 type Instance struct {
 	Name     string
+	Source   string // source connector name for branch URLs; empty for connectors/main
 	DataDir  string
 	Port     int
 	LogFile  string
@@ -58,7 +59,7 @@ type Instance struct {
 }
 
 func (i *Instance) ConnString(db string) string {
-	return FormatConnString(i.Port, db, i.Password, i.Name)
+	return FormatConnString(i.Port, db, i.Password, i.Name, i.Source)
 }
 
 // Init creates a brand-new cluster in DataDir (only for MAIN, never for branches).

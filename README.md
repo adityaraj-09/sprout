@@ -173,11 +173,11 @@ Connectors and branches each get an allocated port.
 | `sprout health` | `GET /healthz` |
 | `sprout branch create <name> [--from=<connector\|main>]` | CoW branch |
 | `sprout branch list` | Branches + replicas + main |
-| `sprout branch get <name>` | JSON record |
-| `sprout branch reset <name>` | Re-clone from stored snapshot |
-| `sprout branch delete <name>` | Stop + destroy |
-| `sprout branch suspend <name>` | Stop compute (`idle`) |
-| `sprout branch resume <name>` | Start again |
+| `sprout branch get <name> [--from]` | JSON record |
+| `sprout branch reset <name> [--from]` | Re-clone from stored snapshot |
+| `sprout branch delete <name> [--from]` | Stop + destroy |
+| `sprout branch suspend <name> [--from]` | Stop compute (`idle`) |
+| `sprout branch resume <name> [--from]` | Start again |
 | `sprout connector suspend <name>` | Stop connector replica **and** all its branches |
 | `sprout connector resume <name>` | Start connector + idle branches again |
 
@@ -241,7 +241,7 @@ Logical is for hosts that block physical replication (common on managed Postgres
 | `SPROUT_LISTEN` | `127.0.0.1:8080` | API bind (`0.0.0.0:8080` to expose) |
 | `SPROUT_TOKEN` | `dev-token` | Bearer token |
 | `SPROUT_PUBLIC_HOST` | `localhost` | Hostname in branch connection strings |
-| `SPROUT_BRANCH_SUBDOMAIN` | auto | `true`/`false`. Auto-on when public host is a DNS name: URLs become `<branch>.<host>:<port>` |
+| `SPROUT_BRANCH_SUBDOMAIN` | auto | `true`/`false`. Auto-on when public host is a DNS name: URLs become `<name>-<connector>.<host>:<port>` |
 | `SPROUT_PG_LISTEN` | auto | Postgres `listen_addresses` (`*` when public host is set) |
 | `SPROUT_SAFE` | unset | Set `true` to keep fsync on (recommended when exposing) |
 | `SPROUT_TRUST_REMOTE` | unset | Set `true` to keep trust auth for remote TCP (lab only). Default remote auth is SCRAM-SHA-256 |
@@ -278,10 +278,11 @@ export SPROUT_SAFE=true                    # keep durable writes when public
 ./bin/sprout-server
 ```
 
-When `SPROUT_PUBLIC_HOST` is a DNS name, branch URLs use a subdomain (port still selects the process — no SNI proxy):
+When `SPROUT_PUBLIC_HOST` is a DNS name, branch URLs use a subdomain (port still selects the process — no SNI proxy). The host is `<name>-<connector>` so the same branch label from two connectors cannot collide, and `application_name` is not added:
 
 ```text
-postgresql://sprout:<pass>@testdb.strido.fit:55440/postgres?application_name=testdb
+postgresql://sprout:<pass>@testdb-lab.strido.fit:55440/postgres
+postgresql://sprout:<pass>@testdb-supabase.strido.fit:55441/postgres
 ```
 
 Point a wildcard record `*.strido.fit` (and `strido.fit`) at the VM. Localhost and raw IPs stay as-is (`localhost:55440`). `/postgres` is the database inside the instance, not the branch name.
@@ -292,8 +293,8 @@ Then:
 sprout config set api-url http://strido.fit:8080
 sprout config set token some-secret
 sprout branch create testdb --from=lab
-# connection_string → postgresql://sprout:<pass>@testdb.strido.fit:55440/postgres?application_name=testdb
-psql "postgresql://sprout:<pass>@testdb.strido.fit:55440/postgres?application_name=testdb"
+# connection_string → postgresql://sprout:<pass>@testdb-lab.strido.fit:55440/postgres
+psql "postgresql://sprout:<pass>@testdb-lab.strido.fit:55440/postgres"
 ```
 
 Open firewall ports for the API and each branch port you use (or put a reverse proxy / VPN in front).  

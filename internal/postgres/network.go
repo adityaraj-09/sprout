@@ -49,16 +49,16 @@ func RemoteAccess() bool {
 }
 
 // FormatConnString builds a libpq URL for a Sprout-managed instance.
-// name is the branch/connector/main id: used as DNS label when subdomains
-// are on, and as application_name (valid libpq param; does not change the DB).
-func FormatConnString(port int, db, password, name string) string {
+// name is the branch/connector/main id; from is the source connector (if any).
+// When subdomains are on, branches become <name>-<from>.<public host> so the
+// same branch label from two connectors cannot share a hostname.
+func FormatConnString(port int, db, password, name, from string) string {
 	if db == "" {
 		db = "postgres"
 	}
-	label := DNSLabel(name)
 	u := url.URL{
 		Scheme: "postgresql",
-		Host:   net.JoinHostPort(AdvertiseHost(label), strconv.Itoa(port)),
+		Host:   net.JoinHostPort(AdvertiseHost(name, from), strconv.Itoa(port)),
 		Path:   "/" + db,
 	}
 	if password != "" {
@@ -66,15 +66,10 @@ func FormatConnString(port int, db, password, name string) string {
 	} else {
 		u.User = url.User(DBUser())
 	}
-	if label != "" {
-		q := url.Values{}
-		q.Set("application_name", label)
-		u.RawQuery = q.Encode()
-	}
 	return u.String()
 }
 
-// DNSLabel turns an instance name into a single DNS / application_name label.
+// DNSLabel turns an instance name into a single DNS label.
 func DNSLabel(name string) string {
 	name = strings.TrimSpace(name)
 	name = strings.TrimPrefix(name, "replica-")
@@ -85,7 +80,31 @@ func DNSLabel(name string) string {
 	return name
 }
 
-// BranchSubdomain reports whether advertised hosts should be <name>.<public host>.
+// HostLabel is the DNS label for one instance.
+// Connectors/main (from empty): "lab" / "main".
+// Branches: always "<name>-<connector>" so testdb from lab and testdb from
+// supabase advertise testdb-lab vs testdb-supabase, and a branch named "lab"
+// does not collide with connector host "lab".
+func HostLabel(name, from string) string {
+	n, f := DNSLabel(name), DNSLabel(from)
+	if n == "" {
+		return f
+	}
+	if f == "" || f == "main" {
+		return n
+	}
+	joined := n + "-" + f
+	if len(joined) <= 63 {
+		return joined
+	}
+	keep := 63 - 1 - len(f)
+	if keep < 1 {
+		return joined[:63]
+	}
+	return n[:keep] + "-" + f
+}
+
+// BranchSubdomain reports whether advertised hosts should be <label>.<public host>.
 // Auto-on when SPROUT_PUBLIC_HOST is a DNS name (not localhost / IP).
 // Override with SPROUT_BRANCH_SUBDOMAIN=true|false.
 func BranchSubdomain() bool {
@@ -106,9 +125,9 @@ func BranchSubdomain() bool {
 }
 
 // AdvertiseHost is the hostname put in connection strings for one instance.
-func AdvertiseHost(name string) string {
+func AdvertiseHost(name, from string) string {
 	base := PublicHost()
-	label := DNSLabel(name)
+	label := HostLabel(name, from)
 	if label == "" || !BranchSubdomain() {
 		return base
 	}

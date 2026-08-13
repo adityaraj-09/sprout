@@ -44,12 +44,30 @@ func (s *Service) ReplicaDir(connectorName string) string {
 	return filepath.Join(s.Root, "replicas", connectorName)
 }
 
-func (s *Service) BranchDir(name string) string {
-	return filepath.Join(s.Root, "branches", name)
+func (s *Service) BranchDir(name, from string) string {
+	return filepath.Join(s.Root, "branches", postgres.HostLabel(name, from))
 }
 
 func (s *Service) logPath(name string) string {
 	return filepath.Join(s.Root, "logs", name+".log")
+}
+
+func (s *Service) instKey(rec meta.BranchRecord) string {
+	if k := postgres.HostLabel(rec.Name, rec.SourceConnector); k != "" {
+		return k
+	}
+	return rec.Name
+}
+
+func (s *Service) lookupBranch(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error) {
+	rec, err := s.Store.FindBranch(ctx, projectID, name, from)
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "ambiguous_branch") {
+			return meta.BranchRecord{}, err
+		}
+		return meta.BranchRecord{}, fmt.Errorf("branch_not_found")
+	}
+	return rec, nil
 }
 
 func (s *Service) lockBranch(name string) func() {
@@ -127,7 +145,7 @@ func (s *Service) InitMain(ctx context.Context) (meta.Project, error) {
 	})
 
 	fmt.Println("✓ main ready:", main.ConnString("postgres"))
-	fmt.Println("  ", postgres.PsqlOneLiner(MainPort, password, "main"))
+	fmt.Println("  ", postgres.PsqlOneLiner(MainPort, password, "main", ""))
 	return proj, nil
 }
 
@@ -135,16 +153,17 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 	if !nameRe.MatchString(name) || name == "main" {
 		return meta.BranchRecord{}, fmt.Errorf("invalid_name: use lowercase [a-z0-9-], not 'main'")
 	}
-	unlock := s.lockBranch(name)
-	defer unlock()
-
-	if _, err := s.Store.GetBranch(ctx, projectID, name); err == nil {
-		return meta.BranchRecord{}, fmt.Errorf("branch_exists: %q", name)
-	}
 
 	srcDir, srcPort, srcName, srcID, err := s.resolveBranchSource(ctx, projectID, fromConnector)
 	if err != nil {
 		return meta.BranchRecord{}, err
+	}
+
+	unlock := s.lockBranch(postgres.HostLabel(name, srcName))
+	defer unlock()
+
+	if _, err := s.Store.FindBranch(ctx, projectID, name, srcName); err == nil {
+		return meta.BranchRecord{}, fmt.Errorf("branch_exists: %q already exists from %s", name, srcName)
 	}
 
 	running, _ := s.Compute.IsRunning(ctx, compute.Handle{Port: srcPort, DataDir: srcDir})
@@ -159,12 +178,15 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 
 	rec := meta.BranchRecord{
 		ID: uuid.NewString(), ProjectID: projectID, Name: name, Role: "branch",
-		Status: meta.StatusCreating, Port: port, DataDir: s.BranchDir(name),
-		Compute: s.Compute.Name(),
+		Status: meta.StatusCreating, Port: port, DataDir: s.BranchDir(name, srcName),
+		Compute:         s.Compute.Name(),
 		SourceConnector: srcName, SourceConnectorID: srcID,
 		Password: postgres.GeneratePassword(),
 	}
 	if err := s.Store.PutBranch(ctx, rec); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			return meta.BranchRecord{}, fmt.Errorf("branch_exists: %q already exists from %s", name, srcName)
+		}
 		return meta.BranchRecord{}, err
 	}
 
@@ -186,7 +208,7 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 	}
 	fmt.Printf("✓ branch %q ready in %s\n", name, time.Since(total).Round(time.Millisecond))
 	fmt.Println("  ", rec.ConnString)
-	fmt.Println("  ", postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name))
+	fmt.Println("  ", postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector))
 	return rec, nil
 }
 
@@ -287,7 +309,7 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	}
 
 	fmt.Println("→ Step 2: snapshot")
-	snapRef, err := s.Storage.Snapshot(srcDir, rec.Name)
+	snapRef, err := s.Storage.Snapshot(srcDir, s.instKey(*rec))
 	if err != nil {
 		if useReplayPause {
 			_ = rm.ResumeReplay(ctx, "127.0.0.1", srcPort)
@@ -321,8 +343,8 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	}
 
 	inst := &postgres.Instance{
-		Name: rec.Name, DataDir: rec.DataDir, Port: rec.Port,
-		LogFile: s.logPath(rec.Name), Bins: s.Bins, Password: rec.Password,
+		Name: rec.Name, Source: rec.SourceConnector, DataDir: rec.DataDir, Port: rec.Port,
+		LogFile: s.logPath(s.instKey(*rec)), Bins: s.Bins, Password: rec.Password,
 	}
 	fmt.Println("→ Step 4: PrepareClone (promote branch to independent primary)")
 	if err := inst.PrepareClone(); err != nil {
@@ -333,7 +355,7 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 
 	fmt.Println("→ Step 5: start compute")
 	h, err := s.Compute.Start(ctx, compute.Spec{
-		Name: rec.Name, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(rec.Name),
+		Name: s.instKey(*rec), DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(s.instKey(*rec)),
 	})
 	if err != nil {
 		_ = s.Storage.Destroy(rec.DataDir)
@@ -346,13 +368,16 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	return nil
 }
 
-func (s *Service) Reset(ctx context.Context, projectID, name string) (meta.BranchRecord, error) {
-	unlock := s.lockBranch(name)
-	defer unlock()
-
-	rec, err := s.Store.GetBranch(ctx, projectID, name)
+func (s *Service) Reset(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error) {
+	rec, err := s.lookupBranch(ctx, projectID, name, from)
 	if err != nil {
-		return meta.BranchRecord{}, fmt.Errorf("branch_not_found")
+		return meta.BranchRecord{}, err
+	}
+	unlock := s.lockBranch(s.instKey(rec))
+	defer unlock()
+	rec, err = s.lookupBranch(ctx, projectID, name, from)
+	if err != nil {
+		return meta.BranchRecord{}, err
 	}
 	if rec.Role != "branch" {
 		return meta.BranchRecord{}, fmt.Errorf("invalid_state: cannot reset main")
@@ -364,7 +389,8 @@ func (s *Service) Reset(ctx context.Context, projectID, name string) (meta.Branc
 	rec.Status = meta.StatusResetting
 	_ = s.Store.UpdateBranch(ctx, rec)
 
-	h := compute.Handle{Provider: s.Compute.Name(), Name: rec.Name, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID}
+	key := s.instKey(rec)
+	h := compute.Handle{Provider: s.Compute.Name(), Name: key, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID}
 	_ = s.Compute.Stop(ctx, h)
 	_ = s.Storage.Destroy(rec.DataDir)
 
@@ -374,11 +400,11 @@ func (s *Service) Reset(ctx context.Context, projectID, name string) (meta.Branc
 		_ = s.Store.UpdateBranch(ctx, rec)
 		return meta.BranchRecord{}, err
 	}
-	inst := &postgres.Instance{Name: rec.Name, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(rec.Name), Bins: s.Bins, Password: rec.Password}
+	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
 	if err := inst.PrepareClone(); err != nil {
 		return meta.BranchRecord{}, err
 	}
-	started, err := s.Compute.Start(ctx, compute.Spec{Name: rec.Name, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(rec.Name)})
+	started, err := s.Compute.Start(ctx, compute.Spec{Name: key, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key)})
 	if err != nil {
 		rec.Status = meta.StatusError
 		rec.ErrorMessage = err.Error()
@@ -395,13 +421,16 @@ func (s *Service) Reset(ctx context.Context, projectID, name string) (meta.Branc
 	return rec, nil
 }
 
-func (s *Service) Delete(ctx context.Context, projectID, name string) error {
-	unlock := s.lockBranch(name)
-	defer unlock()
-
-	rec, err := s.Store.GetBranch(ctx, projectID, name)
+func (s *Service) Delete(ctx context.Context, projectID, name, from string) error {
+	rec, err := s.lookupBranch(ctx, projectID, name, from)
 	if err != nil {
-		return fmt.Errorf("branch_not_found")
+		return err
+	}
+	unlock := s.lockBranch(s.instKey(rec))
+	defer unlock()
+	rec, err = s.lookupBranch(ctx, projectID, name, from)
+	if err != nil {
+		return err
 	}
 	if rec.Role != "branch" {
 		return fmt.Errorf("invalid_state: cannot delete main via branch API")
@@ -409,24 +438,30 @@ func (s *Service) Delete(ctx context.Context, projectID, name string) error {
 	rec.Status = meta.StatusDeleting
 	_ = s.Store.UpdateBranch(ctx, rec)
 
-	h := compute.Handle{Provider: s.Compute.Name(), Name: rec.Name, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID}
+	key := s.instKey(rec)
+	h := compute.Handle{Provider: s.Compute.Name(), Name: key, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID}
 	_ = s.Compute.Stop(ctx, h)
 	_ = s.Storage.Destroy(rec.DataDir)
 	_ = s.Storage.Destroy(rec.SnapshotRef)
 	return s.Store.DeleteBranch(ctx, rec.ID)
 }
 
-func (s *Service) Suspend(ctx context.Context, projectID, name string) (meta.BranchRecord, error) {
-	unlock := s.lockBranch(name)
-	defer unlock()
-	rec, err := s.Store.GetBranch(ctx, projectID, name)
+func (s *Service) Suspend(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error) {
+	rec, err := s.lookupBranch(ctx, projectID, name, from)
 	if err != nil {
-		return meta.BranchRecord{}, fmt.Errorf("branch_not_found")
+		return meta.BranchRecord{}, err
+	}
+	unlock := s.lockBranch(s.instKey(rec))
+	defer unlock()
+	rec, err = s.lookupBranch(ctx, projectID, name, from)
+	if err != nil {
+		return meta.BranchRecord{}, err
 	}
 	if rec.Status != meta.StatusActive {
 		return meta.BranchRecord{}, fmt.Errorf("invalid_state: status=%s", rec.Status)
 	}
-	h := compute.Handle{Provider: s.Compute.Name(), Name: rec.Name, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID}
+	key := s.instKey(rec)
+	h := compute.Handle{Provider: s.Compute.Name(), Name: key, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID}
 	if err := s.Compute.Stop(ctx, h); err != nil {
 		return meta.BranchRecord{}, err
 	}
@@ -436,18 +471,23 @@ func (s *Service) Suspend(ctx context.Context, projectID, name string) (meta.Bra
 	return rec, nil
 }
 
-func (s *Service) Resume(ctx context.Context, projectID, name string) (meta.BranchRecord, error) {
-	unlock := s.lockBranch(name)
-	defer unlock()
-	rec, err := s.Store.GetBranch(ctx, projectID, name)
+func (s *Service) Resume(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error) {
+	rec, err := s.lookupBranch(ctx, projectID, name, from)
 	if err != nil {
-		return meta.BranchRecord{}, fmt.Errorf("branch_not_found")
+		return meta.BranchRecord{}, err
+	}
+	unlock := s.lockBranch(s.instKey(rec))
+	defer unlock()
+	rec, err = s.lookupBranch(ctx, projectID, name, from)
+	if err != nil {
+		return meta.BranchRecord{}, err
 	}
 	if rec.Status != meta.StatusIdle && rec.Status != meta.StatusCrashed {
 		return meta.BranchRecord{}, fmt.Errorf("invalid_state: status=%s", rec.Status)
 	}
+	key := s.instKey(rec)
 	started, err := s.Compute.Start(ctx, compute.Spec{
-		Name: rec.Name, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(rec.Name),
+		Name: key, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key),
 	})
 	if err != nil {
 		return meta.BranchRecord{}, err
@@ -456,8 +496,8 @@ func (s *Service) Resume(ctx context.Context, projectID, name string) (meta.Bran
 	rec.Status = meta.StatusActive
 	rec.ErrorMessage = ""
 	rec.LastUsedAt = time.Now().UTC()
-	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres", rec.Password, rec.Name)
-	inst := &postgres.Instance{Name: rec.Name, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(rec.Name), Bins: s.Bins, Password: rec.Password}
+	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres", rec.Password, rec.Name, rec.SourceConnector)
+	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
 	_ = inst.EnsureAppRoles()
 	_ = s.Store.UpdateBranch(ctx, rec)
 	return rec, nil
@@ -467,6 +507,6 @@ func (s *Service) List(ctx context.Context, projectID string) ([]meta.BranchReco
 	return s.Store.ListBranches(ctx, projectID)
 }
 
-func (s *Service) Get(ctx context.Context, projectID, name string) (meta.BranchRecord, error) {
-	return s.Store.GetBranch(ctx, projectID, name)
+func (s *Service) Get(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error) {
+	return s.lookupBranch(ctx, projectID, name, from)
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -277,8 +278,12 @@ func main() {
 			}
 		case "get":
 			need(4)
+			bname, from := parseNameFrom(os.Args[3:])
+			if bname == "" {
+				fatal(fmt.Errorf("usage: sprout branch get <name> [--from=<connector>]"))
+			}
 			var rec meta.BranchRecord
-			if err := c.do("GET", "/v1/projects/default/branches/"+os.Args[3], nil, &rec); err != nil {
+			if err := c.do("GET", branchURL(bname, from, ""), nil, &rec); err != nil {
 				fatal(err)
 			}
 			enc := json.NewEncoder(os.Stdout)
@@ -286,8 +291,12 @@ func main() {
 			_ = enc.Encode(rec)
 		case "diff":
 			need(4)
+			bname, from := parseNameFrom(os.Args[3:])
+			if bname == "" {
+				fatal(fmt.Errorf("usage: sprout branch diff <name> [--from=<connector>]"))
+			}
 			var out map[string]any
-			if err := c.do("GET", "/v1/projects/default/branches/"+os.Args[3]+"/diff", nil, &out); err != nil {
+			if err := c.do("GET", branchURL(bname, from, "/diff"), nil, &out); err != nil {
 				fatal(err)
 			}
 			if sum, _ := out["summary"].(string); sum != "" {
@@ -297,28 +306,44 @@ func main() {
 			fmt.Println(string(b))
 		case "reset":
 			need(4)
+			bname, from := parseNameFrom(os.Args[3:])
+			if bname == "" {
+				fatal(fmt.Errorf("usage: sprout branch reset <name> [--from=<connector>]"))
+			}
 			var rec meta.BranchRecord
-			if err := c.do("POST", "/v1/projects/default/branches/"+os.Args[3]+"/reset", nil, &rec); err != nil {
+			if err := c.do("POST", branchURL(bname, from, "/reset"), nil, &rec); err != nil {
 				fatal(err)
 			}
 			fmt.Printf("✓ reset %s\n  %s\n", rec.Name, rec.ConnString)
 		case "delete":
 			need(4)
-			if err := c.do("DELETE", "/v1/projects/default/branches/"+os.Args[3], nil, nil); err != nil {
+			bname, from := parseNameFrom(os.Args[3:])
+			if bname == "" {
+				fatal(fmt.Errorf("usage: sprout branch delete <name> [--from=<connector>]"))
+			}
+			if err := c.do("DELETE", branchURL(bname, from, ""), nil, nil); err != nil {
 				fatal(err)
 			}
-			fmt.Printf("✓ deleted %s\n", os.Args[3])
+			fmt.Printf("✓ deleted %s\n", bname)
 		case "suspend":
 			need(4)
+			bname, from := parseNameFrom(os.Args[3:])
+			if bname == "" {
+				fatal(fmt.Errorf("usage: sprout branch suspend <name> [--from=<connector>]"))
+			}
 			var rec meta.BranchRecord
-			if err := c.do("POST", "/v1/projects/default/branches/"+os.Args[3]+"/suspend", nil, &rec); err != nil {
+			if err := c.do("POST", branchURL(bname, from, "/suspend"), nil, &rec); err != nil {
 				fatal(err)
 			}
 			fmt.Printf("✓ suspended %s (status=%s)\n", rec.Name, rec.Status)
 		case "resume":
 			need(4)
+			bname, from := parseNameFrom(os.Args[3:])
+			if bname == "" {
+				fatal(fmt.Errorf("usage: sprout branch resume <name> [--from=<connector>]"))
+			}
 			var rec meta.BranchRecord
-			if err := c.do("POST", "/v1/projects/default/branches/"+os.Args[3]+"/resume", nil, &rec); err != nil {
+			if err := c.do("POST", branchURL(bname, from, "/resume"), nil, &rec); err != nil {
 				fatal(err)
 			}
 			fmt.Printf("✓ resumed %s\n  %s\n", rec.Name, rec.ConnString)
@@ -390,6 +415,27 @@ func need(n int) {
 	}
 }
 
+func parseNameFrom(args []string) (name, from string) {
+	for _, a := range args {
+		if strings.HasPrefix(a, "--from=") {
+			from = strings.TrimPrefix(a, "--from=")
+			continue
+		}
+		if name == "" && !strings.HasPrefix(a, "-") {
+			name = a
+		}
+	}
+	return name, from
+}
+
+func branchURL(name, from, extra string) string {
+	p := "/v1/projects/default/branches/" + url.PathEscape(name) + extra
+	if from != "" {
+		return p + "?from=" + url.QueryEscape(from)
+	}
+	return p
+}
+
 func usage() {
 	fmt.Fprintf(os.Stderr, `sprout — Phase 2/3 CLI (talks to sprout-server)
 
@@ -411,12 +457,16 @@ Usage:
   sprout health
   sprout branch create <name> [--from=<connector|main>]
   sprout branch list
-  sprout branch get <name>
-  sprout branch diff <name>       schema + row counts vs parent
-  sprout branch reset <name>
-  sprout branch delete <name>
-  sprout branch suspend <name>
-  sprout branch resume <name>
+  sprout branch get <name> [--from=<connector>]
+  sprout branch diff <name> [--from=<connector>]
+  sprout branch reset <name> [--from=<connector>]
+  sprout branch delete <name> [--from=<connector>]
+  sprout branch suspend <name> [--from=<connector>]
+  sprout branch resume <name> [--from=<connector>]
+
+  Same branch name is allowed on two connectors (testdb from lab vs testdb from
+  supabase). Hosts are testdb-lab.<host> vs testdb-supabase.<host>. Pass --from
+  when the name is ambiguous.
 
 Env:
   SPROUT_SERVER  default http://127.0.0.1:8080

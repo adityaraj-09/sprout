@@ -78,7 +78,7 @@ func TestApplyNetworkSettingsTrustRemote(t *testing.T) {
 func TestFormatConnStringPasswordEncoding(t *testing.T) {
 	t.Setenv("SPROUT_PUBLIC_HOST", "localhost")
 	t.Setenv("SPROUT_DB_USER", "sprout")
-	got := FormatConnString(55433, "postgres", "p@ss:word/x", "")
+	got := FormatConnString(55433, "postgres", "p@ss:word/x", "", "")
 	if !strings.Contains(got, "p%40ss") && !strings.Contains(got, "p%40ss%3Aword") {
 		if !strings.Contains(got, "sprout:") {
 			t.Fatalf("missing userinfo: %s", got)
@@ -89,40 +89,50 @@ func TestFormatConnStringPasswordEncoding(t *testing.T) {
 	}
 }
 
-func TestFormatConnStringBranchSubdomainAndAppName(t *testing.T) {
+func TestFormatConnStringBranchSubdomain(t *testing.T) {
 	t.Setenv("SPROUT_DB_USER", "sprout")
 	t.Setenv("SPROUT_PUBLIC_HOST", "localhost")
 	t.Setenv("SPROUT_BRANCH_SUBDOMAIN", "")
-	local := FormatConnString(55440, "postgres", "secret", "testdb")
+	local := FormatConnString(55440, "postgres", "secret", "testdb", "lab")
 	if !strings.Contains(local, "localhost:55440") {
 		t.Fatalf("local host: %s", local)
 	}
-	if strings.Contains(local, "testdb.localhost") {
-		t.Fatalf("localhost should not get a subdomain: %s", local)
-	}
-	if !strings.Contains(local, "application_name=testdb") {
-		t.Fatalf("missing application_name: %s", local)
+	if strings.Contains(local, "testdb.") || strings.Contains(local, "application_name") {
+		t.Fatalf("localhost should be a plain host with no app name: %s", local)
 	}
 
 	t.Setenv("SPROUT_PUBLIC_HOST", "strido.fit")
-	named := FormatConnString(55440, "postgres", "secret", "testdb")
-	if !strings.Contains(named, "testdb.strido.fit:55440") {
-		t.Fatalf("expected testdb.strido.fit:55440, got %s", named)
+	fromLab := FormatConnString(55440, "postgres", "secret", "testdb", "lab")
+	if !strings.Contains(fromLab, "testdb-lab.strido.fit:55440") {
+		t.Fatalf("expected testdb-lab.strido.fit:55440, got %s", fromLab)
 	}
-	if !strings.Contains(named, "/postgres") {
-		t.Fatalf("database path should stay /postgres: %s", named)
+	fromSupa := FormatConnString(55441, "postgres", "secret", "testdb", "supabase")
+	if !strings.Contains(fromSupa, "testdb-supabase.strido.fit:55441") {
+		t.Fatalf("same branch name from another connector: %s", fromSupa)
+	}
+	namedLikeConn := FormatConnString(55442, "postgres", "secret", "lab", "lab")
+	if !strings.Contains(namedLikeConn, "lab-lab.strido.fit:55442") {
+		t.Fatalf("branch named like connector must not collide: %s", namedLikeConn)
+	}
+	if !strings.Contains(fromLab, "/postgres") || strings.Contains(fromLab, "application_name") {
+		t.Fatalf("path should stay /postgres without application_name: %s", fromLab)
+	}
+
+	conn := FormatConnString(55434, "postgres", "secret", "lab", "")
+	if !strings.Contains(conn, "lab.strido.fit:55434") {
+		t.Fatalf("connector host: %s", conn)
 	}
 
 	t.Setenv("SPROUT_PUBLIC_HOST", "20.244.18.205")
-	ip := FormatConnString(55440, "postgres", "secret", "testdb")
-	if strings.Contains(ip, "testdb.20") {
+	ip := FormatConnString(55440, "postgres", "secret", "testdb", "lab")
+	if strings.Contains(ip, "testdb") && strings.Contains(ip, "20.244") {
 		t.Fatalf("IP should not get a subdomain: %s", ip)
 	}
 
 	t.Setenv("SPROUT_PUBLIC_HOST", "strido.fit")
 	t.Setenv("SPROUT_BRANCH_SUBDOMAIN", "false")
-	off := FormatConnString(55440, "postgres", "secret", "testdb")
-	if strings.Contains(off, "testdb.strido.fit") {
+	off := FormatConnString(55440, "postgres", "secret", "testdb", "lab")
+	if strings.Contains(off, "testdb-lab.strido.fit") {
 		t.Fatalf("subdomain disabled: %s", off)
 	}
 }
@@ -130,8 +140,17 @@ func TestFormatConnStringBranchSubdomainAndAppName(t *testing.T) {
 func TestAdvertiseHostReplicaPrefix(t *testing.T) {
 	t.Setenv("SPROUT_PUBLIC_HOST", "strido.fit")
 	t.Setenv("SPROUT_BRANCH_SUBDOMAIN", "true")
-	if got := AdvertiseHost("replica-sup"); got != "sup.strido.fit" {
+	if got := AdvertiseHost("replica-sup", ""); got != "sup.strido.fit" {
 		t.Fatalf("got %s", got)
+	}
+	if got := HostLabel("testdb", "lab"); got != "testdb-lab" {
+		t.Fatalf("host label: %s", got)
+	}
+	if got := HostLabel("lab", "lab"); got != "lab-lab" {
+		t.Fatalf("branch named like its connector: %s", got)
+	}
+	if got := HostLabel("testdb", "main"); got != "testdb" {
+		t.Fatalf("main-sourced branch stays unsuffixed: %s", got)
 	}
 }
 

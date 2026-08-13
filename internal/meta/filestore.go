@@ -166,6 +166,14 @@ func (s *FileStore) PutBranch(ctx context.Context, b BranchRecord) error {
 	if b.LastUsedAt.IsZero() {
 		b.LastUsedAt = now
 	}
+	for _, existing := range s.data.Branches {
+		if existing.ID == b.ID {
+			continue
+		}
+		if existing.ProjectID == b.ProjectID && existing.Name == b.Name && existing.SourceConnector == b.SourceConnector {
+			return fmt.Errorf("branch_exists: %q from %s", b.Name, b.SourceConnector)
+		}
+	}
 	s.data.Branches[b.ID] = b
 	return s.saveLocked()
 }
@@ -183,15 +191,20 @@ func (s *FileStore) UpdateBranch(ctx context.Context, b BranchRecord) error {
 }
 
 func (s *FileStore) GetBranch(ctx context.Context, projectID, name string) (BranchRecord, error) {
+	return s.FindBranch(ctx, projectID, name, "")
+}
+
+func (s *FileStore) FindBranch(ctx context.Context, projectID, name, from string) (BranchRecord, error) {
 	_ = ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var matches []BranchRecord
 	for _, b := range s.data.Branches {
 		if b.ProjectID == projectID && b.Name == name {
-			return b, nil
+			matches = append(matches, b)
 		}
 	}
-	return BranchRecord{}, fmt.Errorf("branch not found")
+	return ResolveBranch(name, from, matches)
 }
 
 func (s *FileStore) GetBranchByID(ctx context.Context, id string) (BranchRecord, error) {

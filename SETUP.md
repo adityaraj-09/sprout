@@ -50,7 +50,7 @@ On Azure/Linux you typically:
 From your laptop you will connect like:
 
 ```bash
-psql "postgresql://sprout:<pass>@testdb.strido.fit:<PORT>/postgres?application_name=testdb"
+psql "postgresql://sprout:<pass>@testdb-lab.strido.fit:<PORT>/postgres"
 # or with a public IP (no subdomain):
 psql "postgresql://sprout:<pass>@<PUBLIC_IP>:<PORT>/postgres"
 ```
