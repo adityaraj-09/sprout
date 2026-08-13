@@ -241,7 +241,10 @@ Logical is for hosts that block physical replication (common on managed Postgres
 | `SPROUT_LISTEN` | `127.0.0.1:8080` | API bind (`0.0.0.0:8080` to expose) |
 | `SPROUT_TOKEN` | `dev-token` | Bearer token |
 | `SPROUT_PUBLIC_HOST` | `localhost` | Hostname in branch connection strings |
-| `SPROUT_BRANCH_SUBDOMAIN` | auto | `true`/`false`. Auto-on when public host is a DNS name: URLs become `<name>-<connector>.<host>:<port>` |
+| `SPROUT_BRANCH_SUBDOMAIN` | auto | `true`/`false`. Auto-on when public host is a DNS name: URLs become `<name>-<connector>.<host>:5432` |
+| `SPROUT_PG_PROXY` | auto | SNI proxy on `:5432` when subdomains are on. `false` advertises unique ports instead |
+| `SPROUT_PG_PROXY_PORT` | `5432` | Public Postgres port for the SNI proxy |
+| `SPROUT_TLS_CERT` / `SPROUT_TLS_KEY` | auto | TLS cert for the proxy; otherwise a self-signed wildcard is written to `$SPROUT_DATA/tls` |
 | `SPROUT_PG_LISTEN` | auto | Postgres `listen_addresses` (`*` when public host is set) |
 | `SPROUT_SAFE` | unset | Set `true` to keep fsync on (recommended when exposing) |
 | `SPROUT_TRUST_REMOTE` | unset | Set `true` to keep trust auth for remote TCP (lab only). Default remote auth is SCRAM-SHA-256 |
@@ -278,14 +281,16 @@ export SPROUT_SAFE=true                    # keep durable writes when public
 ./bin/sprout-server
 ```
 
-When `SPROUT_PUBLIC_HOST` is a DNS name, branch URLs use a subdomain (port still selects the process — no SNI proxy). The host is `<name>-<connector>` so the same branch label from two connectors cannot collide, and `application_name` is not added:
+When `SPROUT_PUBLIC_HOST` is a DNS name, Sprout runs a TLS SNI proxy on **5432**. The hostname selects the process (`test-x` vs `test-y`); you do not put the unique backend port in the URL:
 
 ```text
-postgresql://sprout:<pass>@testdb-lab.strido.fit:55440/postgres
-postgresql://sprout:<pass>@testdb-supabase.strido.fit:55441/postgres
+postgresql://sprout:<pass>@testdb-lab.strido.fit:5432/postgres
+postgresql://sprout:<pass>@testdb-supabase.strido.fit:5432/postgres
 ```
 
-Point a wildcard record `*.strido.fit` (and `strido.fit`) at the VM. Localhost and raw IPs stay as-is (`localhost:55440`). `/postgres` is the database inside the instance, not the branch name.
+Point a wildcard record `*.strido.fit` (and `strido.fit`) at the VM. Open firewall **5432** (and 8080 for the API). Localhost and raw IPs stay as-is (`localhost:55440`) with no proxy. `/postgres` is the database inside the instance, not the branch name.
+
+Clients use TLS so SNI is visible (`sslmode=require` or libpq's default `prefer`). A self-signed `*.strido.fit` cert is created under `$SPROUT_DATA/tls` unless you set `SPROUT_TLS_CERT` / `SPROUT_TLS_KEY`. Binding `:5432` needs root or `setcap cap_net_bind_service=+ep ./bin/sprout-server`.
 
 Then:
 
@@ -293,12 +298,11 @@ Then:
 sprout config set api-url http://strido.fit:8080
 sprout config set token some-secret
 sprout branch create testdb --from=lab
-# connection_string → postgresql://sprout:<pass>@testdb-lab.strido.fit:55440/postgres
-psql "postgresql://sprout:<pass>@testdb-lab.strido.fit:55440/postgres"
+# connection_string → postgresql://sprout:<pass>@testdb-lab.strido.fit:5432/postgres
+psql "postgresql://sprout:<pass>@testdb-lab.strido.fit:5432/postgres"
 ```
 
-Open firewall ports for the API and each branch port you use (or put a reverse proxy / VPN in front).  
-Remote Postgres uses **SCRAM-SHA-256** by default (loopback stays trust so the control plane can still connect). Connection strings include the generated password. `SPROUT_TRUST_REMOTE=true` restores the old open-trust lab behavior.
+Remote auth through the proxy is **SCRAM-SHA-256** (loopback `127.0.0.1` stays trust so the control plane can still connect). Connection strings include the generated password. `SPROUT_PG_PROXY=false` restores unique ports in URLs and skips the proxy. `SPROUT_TRUST_REMOTE=true` restores the old open-trust lab behavior when unique ports are public.
 
 ---
 
@@ -320,9 +324,10 @@ make reset-data         # clean + wipe main, replicas, branches, snapshots, cont
 
 | Port | Role |
 |------|------|
+| `5432` | Public SNI proxy when `SPROUT_PUBLIC_HOST` is a DNS name |
 | `55431` | Lab primary (`scripts/lab-primary.sh`) |
 | `55432` | Local demo `main` (`sprout init`) |
-| `55433+` | Allocated for connectors and branches |
+| `55433+` | Internal connector/branch ports (loopback when the proxy is on) |
 
 Exact ports for connectors/branches are stored in `data/control.db` and shown by `connector list` / `branch list`.
 

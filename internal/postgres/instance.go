@@ -83,10 +83,10 @@ func (i *Instance) writeConfig() error {
 // PrepareClone makes a CoW-cloned PGDATA safe to start as an independent primary.
 //
 // Teaching notes — this is the "Postgres problem" from the architecture writeup:
-//   1. postmaster.pid may be leftover from the parent snapshot → must remove on CLONE only
-//   2. port must differ from parent
-//   3. standby.signal would make it try to be a replica → remove if present
-//   4. sockets/logs from parent are irrelevant
+//  1. postmaster.pid may be leftover from the parent snapshot → must remove on CLONE only
+//  2. port must differ from parent
+//  3. standby.signal would make it try to be a replica → remove if present
+//  4. sockets/logs from parent are irrelevant
 func (i *Instance) PrepareClone() error {
 	pid := filepath.Join(i.DataDir, "postmaster.pid")
 	_ = os.Remove(pid)
@@ -99,6 +99,9 @@ func (i *Instance) PrepareClone() error {
 
 func (i *Instance) Start() error {
 	if err := os.MkdirAll(filepath.Dir(i.LogFile), 0o755); err != nil {
+		return err
+	}
+	if err := i.writeConfig(); err != nil {
 		return err
 	}
 	if err := ensurePortFree(i.Port); err != nil {
@@ -192,7 +195,6 @@ func portListening(port int) bool {
 	_ = c.Close()
 	return true
 }
-
 
 // Checkpoint asks a running instance to flush dirty pages.
 // Used before snapshot so the frozen image needs less WAL replay.

@@ -24,7 +24,7 @@ On Azure/Linux you typically:
 2. Prefer **ZFS** for real CoW branches, or **`SPROUT_STORAGE=copy`** for a simple full-copy fallback.
 3. Install **Postgres client/server tools** whose major version is **≥ your primary** (Supabase 17 → PG 17 tools).
 4. Run with **`SPROUT_COMPUTE=local`** (Docker often mismatches `initdb` major).
-5. Open **NSG** for API `8080` and branch ports `55432–55500`.
+5. Open **NSG** for API `8080` and Postgres `5432` (SNI proxy when using a domain).
 
 ---
 
@@ -45,17 +45,17 @@ On Azure/Linux you typically:
 |------|---------|
 | `22` | SSH (your IP) |
 | `8080` | `sprout-server` API |
-| `55432–55500` | Connector + branch Postgres |
+| `5432` | Postgres SNI proxy (domain URLs). Unique branch ports stay on the VM loopback. |
 
 From your laptop you will connect like:
 
 ```bash
-psql "postgresql://sprout:<pass>@testdb-lab.strido.fit:<PORT>/postgres"
-# or with a public IP (no subdomain):
+psql "postgresql://sprout:<pass>@testdb-lab.strido.fit:5432/postgres"
+# or with a public IP (no subdomain / no SNI proxy):
 psql "postgresql://sprout:<pass>@<PUBLIC_IP>:<PORT>/postgres"
 ```
 
-Wildcard DNS: `*.strido.fit` A record → VM IP. The **port** still selects the branch.
+Wildcard DNS: `*.strido.fit` A record → VM IP. The **hostname** selects the branch; clients use port **5432**.
 
 ---
 
@@ -185,6 +185,7 @@ export SPROUT_SAFE=true
 export SPROUT_DB_USER=sprout               # login role in connection strings
 # optional:
 # export SPROUT_BRANCH_SUBDOMAIN=false     # keep host as-is (default auto-on for DNS names)
+# export SPROUT_PG_PROXY=false             # advertise unique ports; skip the :5432 SNI proxy
 # export SPROUT_TRUST_REMOTE=true          # lab-only: remote trust instead of SCRAM
 # export SPROUT_AUTO_RESUME=true           # restart crashed connectors/branches
 ```
@@ -211,6 +212,8 @@ After=network.target
 
 [Service]
 User=YOUR_USER
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 WorkingDirectory=/home/YOUR_USER/sprout
 Environment=PATH=/usr/lib/postgresql/17/bin:/usr/local/go/bin:/usr/bin
 Environment=SPROUT_DATA=/home/YOUR_USER/sprout-data
@@ -303,7 +306,7 @@ sprout connector delete sup --force      # also destroys branches from this conn
 | `replication slot … already exists` | Wiped subscriber left slot on prod | Fixed in recent builds; or `SELECT pg_drop_replication_slot('sprout_sub_<name>')` on primary |
 | `database "flagforge" does not exist` spam | `pg_isready` without `-d postgres` | Fixed; pull latest |
 | `Address already in use` / not ready | Leftover postmaster on port | `pg_ctl -D … stop` or `fuser -k PORT/tcp`, then reconnect |
-| Branch URL works remotely? | NSG missing branch ports | Open `55432–55500` |
+| Branch URL works remotely? | NSG missing 5432, or proxy not bound | Open `5432`; `setcap cap_net_bind_service=+ep ./bin/sprout-server` |
 | Publisher timeouts after sync | Egress / Supabase allowlist | Allow VM egress to primary `5432` |
 
 Clean leftover Postgres processes:
@@ -347,7 +350,7 @@ pkill -f sprout-server || true
 - [ ] Postgres **17** (or matching major) first on `PATH`
 - [ ] `SPROUT_COMPUTE=local`, `SPROUT_PUBLIC_HOST=<strido.fit or ip>`, `SPROUT_SAFE=true`
 - [ ] Wildcard DNS `*.strido.fit` → VM if using a domain (optional)
-- [ ] NSG: `8080` + `55432–55500`
+- [ ] NSG: `8080` + `5432` (domain) or unique branch ports (raw IP)
 - [ ] `make build` + `sprout-server` running
 - [ ] `sprout doctor` / `sprout health` OK from laptop
 - [ ] `connect --mode=logical` then `branch create`

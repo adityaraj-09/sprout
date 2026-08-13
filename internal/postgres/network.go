@@ -29,11 +29,16 @@ func PublicHost() string {
 }
 
 // ListenAddresses is written into postgresql.conf.
-// Default: 127.0.0.1 for local lab; "*" when SPROUT_PUBLIC_HOST is a real hostname.
+// Default: 127.0.0.1 for local lab; "*" when SPROUT_PUBLIC_HOST is a real hostname
+// without the SNI proxy. When the proxy is on, Postgres stays on loopback
+// (127.0.0.1 trust for the control plane, 127.0.0.2 SCRAM for the proxy).
 // Override with SPROUT_PG_LISTEN (e.g. "*", "0.0.0.0", "10.0.0.5").
 func ListenAddresses() string {
 	if a := strings.TrimSpace(os.Getenv("SPROUT_PG_LISTEN")); a != "" {
 		return a
+	}
+	if ProxyEnabled() {
+		return "127.0.0.1," + ProxyBackendHost()
 	}
 	h := PublicHost()
 	if h == "localhost" || h == "127.0.0.1" || h == "::1" {
@@ -45,7 +50,17 @@ func ListenAddresses() string {
 // RemoteAccess reports whether Postgres is configured to accept non-loopback clients.
 func RemoteAccess() bool {
 	a := ListenAddresses()
-	return a == "*" || a == "0.0.0.0" || a == "::" || (a != "127.0.0.1" && a != "localhost" && a != "::1")
+	if a == "*" || a == "0.0.0.0" || a == "::" {
+		return true
+	}
+	for _, part := range strings.Split(a, ",") {
+		p := strings.TrimSpace(part)
+		if p == "" || p == "127.0.0.1" || p == "localhost" || p == "::1" || strings.HasPrefix(p, "127.") {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // FormatConnString builds a libpq URL for a Sprout-managed instance.
@@ -58,7 +73,7 @@ func FormatConnString(port int, db, password, name, from string) string {
 	}
 	u := url.URL{
 		Scheme: "postgresql",
-		Host:   net.JoinHostPort(AdvertiseHost(name, from), strconv.Itoa(port)),
+		Host:   net.JoinHostPort(AdvertiseHost(name, from), strconv.Itoa(AdvertisePort(port))),
 		Path:   "/" + db,
 	}
 	if password != "" {
@@ -134,6 +149,51 @@ func AdvertiseHost(name, from string) string {
 	return label + "." + base
 }
 
+const defaultProxyPort = 5432
+
+// ProxyBackendHost is the loopback address the SNI proxy dials so pg_hba can
+// require SCRAM (stock initdb trusts only 127.0.0.1).
+func ProxyBackendHost() string {
+	if h := strings.TrimSpace(os.Getenv("SPROUT_PG_PROXY_BACKEND")); h != "" {
+		return h
+	}
+	return "127.0.0.2"
+}
+
+// ProxyPort is the public Postgres port advertised when the SNI proxy is on.
+func ProxyPort() int {
+	raw := strings.TrimSpace(os.Getenv("SPROUT_PG_PROXY_PORT"))
+	if raw == "" {
+		return defaultProxyPort
+	}
+	p, err := strconv.Atoi(raw)
+	if err != nil || p <= 0 || p > 65535 {
+		return defaultProxyPort
+	}
+	return p
+}
+
+// ProxyEnabled is true when branch subdomains are on and the SNI proxy is not disabled.
+// Clients then get host:5432; the proxy picks the backend from TLS SNI.
+func ProxyEnabled() bool {
+	if !BranchSubdomain() {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("SPROUT_PG_PROXY"))) {
+	case "false", "0", "no", "off":
+		return false
+	}
+	return true
+}
+
+// AdvertisePort is the TCP port written into connection URLs.
+func AdvertisePort(instancePort int) int {
+	if ProxyEnabled() {
+		return ProxyPort()
+	}
+	return instancePort
+}
+
 // ApplyNetworkSettings rewrites managed listen/port/auth sections (idempotent).
 func ApplyNetworkSettings(dataDir string, port int) error {
 	listen := ListenAddresses()
@@ -156,13 +216,20 @@ func ApplyNetworkSettings(dataDir string, port int) error {
 	}
 
 	hba := filepath.Join(dataDir, "pg_hba.conf")
-	if !RemoteAccess() {
+	var lines []string
+	if ProxyEnabled() {
+		// Proxy splices to 127.0.0.2 so it does not inherit 127.0.0.1 trust.
+		lines = append(lines, fmt.Sprintf("host all all %s/32 scram-sha-256", ProxyBackendHost()))
+	}
+	if RemoteAccess() {
+		auth := "scram-sha-256"
+		if TrustRemote() {
+			auth = "trust"
+		}
+		lines = append(lines, fmt.Sprintf("host all all 0.0.0.0/0 %s", auth), fmt.Sprintf("host all all ::/0 %s", auth))
+	}
+	if len(lines) == 0 {
 		return RemoveManagedSection(hba, remoteBegin, remoteEnd)
 	}
-	auth := "scram-sha-256"
-	if TrustRemote() {
-		auth = "trust"
-	}
-	hbaBody := fmt.Sprintf("host all all 0.0.0.0/0 %s\nhost all all ::/0 %s\n", auth, auth)
-	return ReplaceManagedSection(hba, remoteBegin, remoteEnd, hbaBody)
+	return ReplaceManagedSection(hba, remoteBegin, remoteEnd, strings.Join(lines, "\n")+"\n")
 }

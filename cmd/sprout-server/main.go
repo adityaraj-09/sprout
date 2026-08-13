@@ -14,6 +14,7 @@ import (
 	"github.com/adityaraj/sprout/internal/compute"
 	"github.com/adityaraj/sprout/internal/config"
 	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/pgproxy"
 	"github.com/adityaraj/sprout/internal/postgres"
 	"github.com/adityaraj/sprout/internal/reconcile"
 	"github.com/adityaraj/sprout/internal/storage"
@@ -61,6 +62,28 @@ func main() {
 	}
 	go rec.Loop(ctx, 30*time.Second)
 
+	if postgres.ProxyEnabled() {
+		tlsCfg, err := pgproxy.LoadTLSConfig(cfg.DataRoot)
+		if err != nil {
+			fatal(fmt.Errorf("pgproxy tls: %w", err))
+		}
+		proxy := &pgproxy.Server{
+			Addr:      pgproxy.ListenAddr(),
+			TLSConfig: tlsCfg,
+			Resolve:   pgproxy.StoreResolver(store),
+		}
+		if err := proxy.Listen(); err != nil {
+			fatal(err)
+		}
+		go func() {
+			_ = proxy.Serve()
+		}()
+		go func() {
+			<-ctx.Done()
+			_ = proxy.Close()
+		}()
+	}
+
 	srv := api.New(svc, cfg.Token)
 	httpSrv := &http.Server{Addr: cfg.Listen, Handler: srv.Handler()}
 
@@ -79,7 +102,11 @@ func main() {
 	fmt.Printf("  token:     %s\n", cfg.Token)
 	fmt.Printf("  pg_host:   %s (listen_addresses=%s subdomain=%v)\n", postgres.PublicHost(), postgres.ListenAddresses(), postgres.BranchSubdomain())
 	if postgres.BranchSubdomain() {
-		fmt.Printf("  dns:       *.%s → this VM (wildcard A/AAAA); URLs keep the branch port\n", postgres.PublicHost())
+		if postgres.ProxyEnabled() {
+			fmt.Printf("  dns:       *.%s → this VM; URLs use :%d (SNI proxy)\n", postgres.PublicHost(), postgres.ProxyPort())
+		} else {
+			fmt.Printf("  dns:       *.%s → this VM (wildcard A/AAAA); URLs keep the branch port\n", postgres.PublicHost())
+		}
 	}
 	if postgres.RemoteAccess() {
 		if postgres.TrustRemote() {

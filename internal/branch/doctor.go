@@ -81,11 +81,24 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 	add(DoctorCheck{Name: "public_host", OK: true, Level: "info",
 		Detail: fmt.Sprintf("SPROUT_PUBLIC_HOST=%s listen_addresses=%s db_user=%s subdomain=%v", host, listen, postgres.DBUser(), postgres.BranchSubdomain())})
 	if postgres.BranchSubdomain() {
-		add(DoctorCheck{Name: "dns", OK: true, Level: "warn",
-			Detail: fmt.Sprintf("branch URLs use <name>-<connector>.%s:<port>", host),
-			Hint:   "create a wildcard A/AAAA record for *." + host + " pointing at this VM; port still selects the branch (no SNI proxy)"})
+		if postgres.ProxyEnabled() {
+			add(DoctorCheck{Name: "dns", OK: true, Level: "warn",
+				Detail: fmt.Sprintf("URLs use <name>-<connector>.%s:5432 (SNI proxy)", host),
+				Hint:   "wildcard A/AAAA for *." + host + " → this VM; open NSG 5432; setcap cap_net_bind_service=+ep if bind fails"})
+		} else {
+			add(DoctorCheck{Name: "dns", OK: true, Level: "warn",
+				Detail: fmt.Sprintf("branch URLs use <name>-<connector>.%s:<port>", host),
+				Hint:   "create a wildcard A/AAAA record for *." + host + " pointing at this VM; SPROUT_PG_PROXY=false keeps unique ports"})
+		}
 	}
-	if remote {
+	if postgres.ProxyEnabled() {
+		add(DoctorCheck{Name: "pg_proxy", OK: true, Level: "info",
+			Detail: fmt.Sprintf("SNI proxy :%d → %s:<instance port>", postgres.ProxyPort(), postgres.ProxyBackendHost()),
+			Hint:   "clients connect on 5432; TLS SNI selects test-x vs test-y. Self-signed cert in $SPROUT_DATA/tls unless SPROUT_TLS_CERT is set"})
+		add(DoctorCheck{Name: "firewall", OK: true, Level: "warn",
+			Detail: "public Postgres is the SNI proxy on 5432",
+			Hint:   "open NSG/security group for 5432 (and 8080 for the API); unique branch ports stay on loopback"})
+	} else if remote {
 		if postgres.TrustRemote() {
 			if os.Getenv("SPROUT_SAFE") != "true" {
 				add(DoctorCheck{Name: "auth", OK: false, Level: "error",
