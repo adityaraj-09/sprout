@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -79,7 +80,7 @@ CREATE TABLE IF NOT EXISTS branches (
   created_at           TEXT NOT NULL,
   updated_at           TEXT NOT NULL,
   last_used_at         TEXT NOT NULL,
-  UNIQUE(project_id, name)
+  UNIQUE(project_id, source_connector, name)
 );
 CREATE TABLE IF NOT EXISTS connectors (
   id              TEXT PRIMARY KEY,
@@ -105,6 +106,9 @@ CREATE TABLE IF NOT EXISTS connectors (
 		return err
 	}
 	if err := s.ensureColumn("connectors", "password", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureBranchNameUniquePerSource(); err != nil {
 		return err
 	}
 	var n int
@@ -142,6 +146,69 @@ func (s *SQLiteStore) ensureColumn(table, column, decl string) error {
 	}
 	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + decl)
 	return err
+}
+
+// ensureBranchNameUniquePerSource rebuilds DBs created with UNIQUE(project_id, name)
+// so the same branch label can exist on two connectors (testdb from lab vs supabase).
+func (s *SQLiteStore) ensureBranchNameUniquePerSource() error {
+	var ddl string
+	err := s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='branches'`).Scan(&ddl)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(ddl, "UNIQUE(project_id, source_connector, name)") {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`
+CREATE TABLE branches_new (
+  id                   TEXT PRIMARY KEY,
+  project_id           TEXT NOT NULL,
+  name                 TEXT NOT NULL,
+  role                 TEXT NOT NULL DEFAULT 'branch',
+  status               TEXT NOT NULL,
+  port                 INTEGER NOT NULL DEFAULT 0,
+  data_dir             TEXT NOT NULL DEFAULT '',
+  snapshot_ref         TEXT NOT NULL DEFAULT '',
+  container_id         TEXT NOT NULL DEFAULT '',
+  compute              TEXT NOT NULL DEFAULT '',
+  conn_string          TEXT NOT NULL DEFAULT '',
+  error_message        TEXT NOT NULL DEFAULT '',
+  source_lsn           TEXT NOT NULL DEFAULT '',
+  source_connector     TEXT NOT NULL DEFAULT '',
+  source_connector_id  TEXT NOT NULL DEFAULT '',
+  password             TEXT NOT NULL DEFAULT '',
+  created_at           TEXT NOT NULL,
+  updated_at           TEXT NOT NULL,
+  last_used_at         TEXT NOT NULL,
+  UNIQUE(project_id, source_connector, name)
+)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+INSERT INTO branches_new(
+  id, project_id, name, role, status, port, data_dir, snapshot_ref, container_id, compute,
+  conn_string, error_message, source_lsn, source_connector, source_connector_id, password,
+  created_at, updated_at, last_used_at
+)
+SELECT
+  id, project_id, name, role, status, port, data_dir, snapshot_ref, container_id, compute,
+  conn_string, error_message, source_lsn, source_connector, source_connector_id, password,
+  created_at, updated_at, last_used_at
+FROM branches`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DROP TABLE branches`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`ALTER TABLE branches_new RENAME TO branches`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *SQLiteStore) importJSONIfNeeded() error {
@@ -423,12 +490,15 @@ func scanBranch(scanner interface {
 }
 
 func (s *SQLiteStore) GetBranch(ctx context.Context, projectID, name string) (BranchRecord, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+branchCols+` FROM branches WHERE project_id = ? AND name = ?`, projectID, name)
-	b, err := scanBranch(row)
-	if err == sql.ErrNoRows {
-		return BranchRecord{}, fmt.Errorf("branch not found")
+	return s.FindBranch(ctx, projectID, name, "")
+}
+
+func (s *SQLiteStore) FindBranch(ctx context.Context, projectID, name, from string) (BranchRecord, error) {
+	list, err := s.listBranchesQuery(ctx, `SELECT `+branchCols+` FROM branches WHERE project_id = ? AND name = ? ORDER BY source_connector`, projectID, name)
+	if err != nil {
+		return BranchRecord{}, err
 	}
-	return b, err
+	return ResolveBranch(name, from, list)
 }
 
 func (s *SQLiteStore) GetBranchByID(ctx context.Context, id string) (BranchRecord, error) {

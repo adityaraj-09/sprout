@@ -30,6 +30,7 @@ func TestApplyNetworkSettingsRemoteSCRAM(t *testing.T) {
 	t.Setenv("SPROUT_PUBLIC_HOST", "db.example.com")
 	t.Setenv("SPROUT_TRUST_REMOTE", "")
 	t.Setenv("SPROUT_SAFE", "true")
+	t.Setenv("SPROUT_PG_PROXY", "")
 	if err := ApplyNetworkSettings(dir, 55440); err != nil {
 		t.Fatal(err)
 	}
@@ -44,19 +45,14 @@ func TestApplyNetworkSettingsRemoteSCRAM(t *testing.T) {
 	if !strings.Contains(string(conf), "port = 55441") {
 		t.Fatalf("port not updated:\n%s", conf)
 	}
-	if strings.Count(string(hba), "0.0.0.0/0") != 1 {
-		t.Fatalf("expected one remote hba block:\n%s", hba)
+	if !strings.Contains(string(conf), "127.0.0.2") {
+		t.Fatalf("proxy backend listen missing:\n%s", conf)
 	}
-	if !strings.Contains(string(hba), "scram-sha-256") {
-		t.Fatalf("expected scram, got:\n%s", hba)
+	if !strings.Contains(string(hba), "127.0.0.2/32 scram-sha-256") {
+		t.Fatalf("expected proxy backend scram, got:\n%s", hba)
 	}
-	if strings.Contains(string(hba), "trust") && strings.Contains(string(hba), "0.0.0.0/0") {
-		// stock local trust is fine; remote must not be trust
-		for _, line := range strings.Split(string(hba), "\n") {
-			if strings.Contains(line, "0.0.0.0/0") && strings.Contains(line, "trust") {
-				t.Fatalf("remote trust line: %s", line)
-			}
-		}
+	if strings.Contains(string(hba), "0.0.0.0/0") {
+		t.Fatalf("unique ports should not be public when SNI proxy is on:\n%s", hba)
 	}
 }
 
@@ -78,7 +74,7 @@ func TestApplyNetworkSettingsTrustRemote(t *testing.T) {
 func TestFormatConnStringPasswordEncoding(t *testing.T) {
 	t.Setenv("SPROUT_PUBLIC_HOST", "localhost")
 	t.Setenv("SPROUT_DB_USER", "sprout")
-	got := FormatConnString(55433, "postgres", "p@ss:word/x")
+	got := FormatConnString(55433, "postgres", "p@ss:word/x", "", "")
 	if !strings.Contains(got, "p%40ss") && !strings.Contains(got, "p%40ss%3Aword") {
 		if !strings.Contains(got, "sprout:") {
 			t.Fatalf("missing userinfo: %s", got)
@@ -86,6 +82,78 @@ func TestFormatConnStringPasswordEncoding(t *testing.T) {
 	}
 	if !strings.Contains(got, "55433") || !strings.Contains(got, "sprout") {
 		t.Fatalf("unexpected url: %s", got)
+	}
+}
+
+func TestFormatConnStringBranchSubdomain(t *testing.T) {
+	t.Setenv("SPROUT_DB_USER", "sprout")
+	t.Setenv("SPROUT_PUBLIC_HOST", "localhost")
+	t.Setenv("SPROUT_BRANCH_SUBDOMAIN", "")
+	local := FormatConnString(55440, "postgres", "secret", "testdb", "lab")
+	if !strings.Contains(local, "localhost:55440") {
+		t.Fatalf("local host: %s", local)
+	}
+	if strings.Contains(local, "testdb.") || strings.Contains(local, "application_name") {
+		t.Fatalf("localhost should be a plain host with no app name: %s", local)
+	}
+
+	t.Setenv("SPROUT_PUBLIC_HOST", "strido.fit")
+	fromLab := FormatConnString(55440, "postgres", "secret", "testdb", "lab")
+	if !strings.Contains(fromLab, "testdb-lab.strido.fit:5432") {
+		t.Fatalf("expected testdb-lab.strido.fit:5432, got %s", fromLab)
+	}
+	fromSupa := FormatConnString(55441, "postgres", "secret", "testdb", "supabase")
+	if !strings.Contains(fromSupa, "testdb-supabase.strido.fit:5432") {
+		t.Fatalf("same branch name from another connector: %s", fromSupa)
+	}
+	namedLikeConn := FormatConnString(55442, "postgres", "secret", "lab", "lab")
+	if !strings.Contains(namedLikeConn, "lab-lab.strido.fit:5432") {
+		t.Fatalf("branch named like connector must not collide: %s", namedLikeConn)
+	}
+	if !strings.Contains(fromLab, "/postgres") || strings.Contains(fromLab, "application_name") {
+		t.Fatalf("path should stay /postgres without application_name: %s", fromLab)
+	}
+
+	conn := FormatConnString(55434, "postgres", "secret", "lab", "")
+	if !strings.Contains(conn, "lab.strido.fit:5432") {
+		t.Fatalf("connector host: %s", conn)
+	}
+
+	t.Setenv("SPROUT_PG_PROXY", "false")
+	direct := FormatConnString(55440, "postgres", "secret", "testdb", "lab")
+	if !strings.Contains(direct, "testdb-lab.strido.fit:55440") {
+		t.Fatalf("proxy off should keep instance port: %s", direct)
+	}
+	t.Setenv("SPROUT_PG_PROXY", "")
+
+	t.Setenv("SPROUT_PUBLIC_HOST", "20.244.18.205")
+	ip := FormatConnString(55440, "postgres", "secret", "testdb", "lab")
+	if strings.Contains(ip, "testdb") && strings.Contains(ip, "20.244") {
+		t.Fatalf("IP should not get a subdomain: %s", ip)
+	}
+
+	t.Setenv("SPROUT_PUBLIC_HOST", "strido.fit")
+	t.Setenv("SPROUT_BRANCH_SUBDOMAIN", "false")
+	off := FormatConnString(55440, "postgres", "secret", "testdb", "lab")
+	if strings.Contains(off, "testdb-lab.strido.fit") {
+		t.Fatalf("subdomain disabled: %s", off)
+	}
+}
+
+func TestAdvertiseHostReplicaPrefix(t *testing.T) {
+	t.Setenv("SPROUT_PUBLIC_HOST", "strido.fit")
+	t.Setenv("SPROUT_BRANCH_SUBDOMAIN", "true")
+	if got := AdvertiseHost("replica-sup", ""); got != "sup.strido.fit" {
+		t.Fatalf("got %s", got)
+	}
+	if got := HostLabel("testdb", "lab"); got != "testdb-lab" {
+		t.Fatalf("host label: %s", got)
+	}
+	if got := HostLabel("lab", "lab"); got != "lab-lab" {
+		t.Fatalf("branch named like its connector: %s", got)
+	}
+	if got := HostLabel("testdb", "main"); got != "testdb" {
+		t.Fatalf("main-sourced branch stays unsuffixed: %s", got)
 	}
 }
 

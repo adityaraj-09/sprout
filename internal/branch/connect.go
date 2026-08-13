@@ -32,10 +32,10 @@ type ConnectOpts struct {
 
 // ConnectResult is returned for dry-run or full connect.
 type ConnectResult struct {
-	Connector *meta.Connector   `json:"connector,omitempty"`
-	Lag       *replica.Lag      `json:"lag,omitempty"`
-	Estimate  map[string]any    `json:"estimate,omitempty"`
-	DryRun    bool              `json:"dry_run,omitempty"`
+	Connector *meta.Connector `json:"connector,omitempty"`
+	Lag       *replica.Lag    `json:"lag,omitempty"`
+	Estimate  map[string]any  `json:"estimate,omitempty"`
+	DryRun    bool            `json:"dry_run,omitempty"`
 }
 
 // Connect bootstraps a named local replica from an upstream Postgres.
@@ -267,8 +267,8 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 	if err != nil {
 		return ConnectResult{}, err
 	}
-	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password))
-	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password))
+	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, ""))
+	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password, c.Name, ""))
 	return ConnectResult{Connector: &c, Lag: &lag}, nil
 }
 
@@ -341,13 +341,13 @@ func (s *Service) finishConnector(ctx context.Context, projectID string, c meta.
 	_ = s.Store.PutBranch(ctx, meta.BranchRecord{
 		ID: "replica-" + c.ID, ProjectID: projectID, Name: "replica-" + c.Name, Role: "replica",
 		Status: meta.StatusActive, Port: c.Port, DataDir: c.DataDir, Compute: s.Compute.Name(),
-		ConnString: postgres.FormatConnString(c.Port, "postgres", c.Password),
+		ConnString:      postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, ""),
 		SourceConnector: c.Name, SourceConnectorID: c.ID,
 		Password: c.Password,
 	})
 	fmt.Printf("✓ connector %q mode=%s status=replicating port=%d lsn=%s\n", c.Name, c.Mode, c.Port, c.LastLSN)
-	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password))
-	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password))
+	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, ""))
+	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password, c.Name, ""))
 	return c, lag, nil
 }
 
@@ -407,7 +407,7 @@ func (s *Service) DeleteConnector(ctx context.Context, projectID, name string, f
 			name, len(names), strings.Join(names, ", "))
 	}
 	for _, b := range children {
-		if err := s.Delete(ctx, projectID, b.Name); err != nil {
+		if err := s.Delete(ctx, projectID, b.Name, b.SourceConnector); err != nil {
 			return fmt.Errorf("delete branch %s: %w", b.Name, err)
 		}
 	}

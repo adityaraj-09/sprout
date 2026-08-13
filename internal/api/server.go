@@ -164,8 +164,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		"project":   proj,
 	}
 	if res.Connector != nil {
-		out["connection_string"] = postgres.FormatConnString(res.Connector.Port, "postgres", res.Connector.Password)
-		out["psql"] = postgres.PsqlOneLiner(res.Connector.Port, res.Connector.Password)
+		out["connection_string"] = postgres.FormatConnString(res.Connector.Port, "postgres", res.Connector.Password, res.Connector.Name, "")
+		out["psql"] = postgres.PsqlOneLiner(res.Connector.Port, res.Connector.Password, res.Connector.Name, "")
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -280,25 +280,25 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":                 rec.ID,
-		"project_id":         rec.ProjectID,
-		"name":               rec.Name,
-		"role":               rec.Role,
-		"status":             rec.Status,
-		"port":               rec.Port,
-		"data_dir":           rec.DataDir,
-		"snapshot_ref":       rec.SnapshotRef,
-		"container_id":       rec.ContainerID,
-		"compute":            rec.Compute,
-		"connection_string":  rec.ConnString,
-		"psql":               postgres.PsqlOneLiner(rec.Port, rec.Password),
-		"error_message":      rec.ErrorMessage,
-		"source_lsn":         rec.SourceLSN,
-		"source_connector":   rec.SourceConnector,
+		"id":                  rec.ID,
+		"project_id":          rec.ProjectID,
+		"name":                rec.Name,
+		"role":                rec.Role,
+		"status":              rec.Status,
+		"port":                rec.Port,
+		"data_dir":            rec.DataDir,
+		"snapshot_ref":        rec.SnapshotRef,
+		"container_id":        rec.ContainerID,
+		"compute":             rec.Compute,
+		"connection_string":   rec.ConnString,
+		"psql":                postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector),
+		"error_message":       rec.ErrorMessage,
+		"source_lsn":          rec.SourceLSN,
+		"source_connector":    rec.SourceConnector,
 		"source_connector_id": rec.SourceConnectorID,
-		"created_at":         rec.CreatedAt,
-		"updated_at":         rec.UpdatedAt,
-		"last_used_at":       rec.LastUsedAt,
+		"created_at":          rec.CreatedAt,
+		"updated_at":          rec.UpdatedAt,
+		"last_used_at":        rec.LastUsedAt,
 	})
 }
 
@@ -310,7 +310,7 @@ func (s *Server) handleDiffBranch(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
-	diff, err := s.Service.DiffBranch(ctx, proj.ID, r.PathValue("name"))
+	diff, err := s.Service.DiffBranch(ctx, proj.ID, r.PathValue("name"), branchFrom(r))
 	if err != nil {
 		code, status := mapErr(err)
 		writeErr(w, status, code, err.Error())
@@ -339,9 +339,10 @@ func (s *Server) handleGetBranch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "project_not_found", err.Error())
 		return
 	}
-	rec, err := s.Service.Get(r.Context(), proj.ID, r.PathValue("name"))
+	rec, err := s.Service.Get(r.Context(), proj.ID, r.PathValue("name"), branchFrom(r))
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "branch_not_found", err.Error())
+		code, status := mapErr(err)
+		writeErr(w, status, code, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, rec)
@@ -353,7 +354,7 @@ func (s *Server) handleDeleteBranch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "project_not_found", err.Error())
 		return
 	}
-	if err := s.Service.Delete(r.Context(), proj.ID, r.PathValue("name")); err != nil {
+	if err := s.Service.Delete(r.Context(), proj.ID, r.PathValue("name"), branchFrom(r)); err != nil {
 		code, status := mapErr(err)
 		writeErr(w, status, code, err.Error())
 		return
@@ -373,7 +374,11 @@ func (s *Server) handleResumeBranch(w http.ResponseWriter, r *http.Request) {
 	s.mutateBranch(w, r, s.Service.Resume)
 }
 
-type branchMutator func(ctx context.Context, projectID, name string) (meta.BranchRecord, error)
+type branchMutator func(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error)
+
+func branchFrom(r *http.Request) string {
+	return strings.TrimSpace(r.URL.Query().Get("from"))
+}
 
 func (s *Server) mutateBranch(w http.ResponseWriter, r *http.Request, fn branchMutator) {
 	proj, err := s.resolveProject(r)
@@ -383,7 +388,7 @@ func (s *Server) mutateBranch(w http.ResponseWriter, r *http.Request, fn branchM
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 	defer cancel()
-	rec, err := fn(ctx, proj.ID, r.PathValue("name"))
+	rec, err := fn(ctx, proj.ID, r.PathValue("name"), branchFrom(r))
 	if err != nil {
 		code, status := mapErr(err)
 		writeErr(w, status, code, err.Error())
@@ -397,6 +402,8 @@ func mapErr(err error) (code string, status int) {
 	switch {
 	case strings.HasPrefix(msg, "branch_exists"):
 		return "branch_exists", http.StatusConflict
+	case strings.HasPrefix(msg, "ambiguous_branch"):
+		return "ambiguous_branch", http.StatusConflict
 	case strings.HasPrefix(msg, "branch_not_found"):
 		return "branch_not_found", http.StatusNotFound
 	case strings.HasPrefix(msg, "invalid_name"):

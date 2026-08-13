@@ -38,9 +38,12 @@ type TableRowDiff struct {
 }
 
 // DiffBranch compares a branch against its source connector (or main).
-func (s *Service) DiffBranch(ctx context.Context, projectID, name string) (BranchDiff, error) {
-	rec, err := s.Store.GetBranch(ctx, projectID, name)
+func (s *Service) DiffBranch(ctx context.Context, projectID, name, from string) (BranchDiff, error) {
+	rec, err := s.lookupBranch(ctx, projectID, name, from)
 	if err != nil || rec.Role != "branch" {
+		if err != nil && strings.HasPrefix(err.Error(), "ambiguous_branch") {
+			return BranchDiff{}, err
+		}
 		return BranchDiff{}, fmt.Errorf("branch_not_found")
 	}
 	parentDir, parentPort, parentName, _, err := s.resolveBranchSource(ctx, projectID, rec.SourceConnector)

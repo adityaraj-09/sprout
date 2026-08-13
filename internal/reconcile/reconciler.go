@@ -9,6 +9,7 @@ import (
 
 	"github.com/adityaraj/sprout/internal/compute"
 	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/postgres"
 	"github.com/adityaraj/sprout/internal/storage"
 )
 
@@ -25,6 +26,13 @@ type Reconciler struct {
 
 func (r *Reconciler) logPath(name string) string {
 	return filepath.Join(r.Root, "logs", name+".log")
+}
+
+func instKey(b meta.BranchRecord) string {
+	if k := postgres.HostLabel(b.Name, b.SourceConnector); k != "" {
+		return k
+	}
+	return b.Name
 }
 
 func (r *Reconciler) RunOnce(ctx context.Context) {
@@ -47,8 +55,9 @@ func (r *Reconciler) reconcileBranches(ctx context.Context) {
 }
 
 func (r *Reconciler) fixBranch(ctx context.Context, b meta.BranchRecord) {
+	key := instKey(b)
 	h := compute.Handle{
-		Provider: r.Compute.Name(), Name: b.Name, Port: b.Port,
+		Provider: r.Compute.Name(), Name: key, Port: b.Port,
 		DataDir: b.DataDir, ContainerID: b.ContainerID,
 	}
 	running, _ := r.Compute.IsRunning(ctx, h)
@@ -107,7 +116,7 @@ func (r *Reconciler) fixBranch(ctx context.Context, b meta.BranchRecord) {
 
 func (r *Reconciler) startBranch(ctx context.Context, b meta.BranchRecord) error {
 	_, err := r.Compute.Start(ctx, compute.Spec{
-		Name: b.Name, DataDir: b.DataDir, Port: b.Port, LogFile: r.logPath(b.Name),
+		Name: instKey(b), DataDir: b.DataDir, Port: b.Port, LogFile: r.logPath(instKey(b)),
 	})
 	if err != nil {
 		return err

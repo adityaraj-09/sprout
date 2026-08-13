@@ -27,25 +27,25 @@ const (
 )
 
 type BranchRecord struct {
-	ID                 string    `json:"id"`
-	ProjectID          string    `json:"project_id"`
-	Name               string    `json:"name"`
-	Role               string    `json:"role"` // main | replica | branch
-	Status             string    `json:"status"`
-	Port               int       `json:"port"`
-	DataDir            string    `json:"data_dir"`
-	SnapshotRef        string    `json:"snapshot_ref"`
-	ContainerID        string    `json:"container_id,omitempty"`
-	Compute            string    `json:"compute,omitempty"`
-	ConnString         string    `json:"connection_string"`
-	ErrorMessage       string    `json:"error_message,omitempty"`
-	SourceLSN          string    `json:"source_lsn,omitempty"`
-	SourceConnector    string    `json:"source_connector,omitempty"`    // connector name used as parent
-	SourceConnectorID  string    `json:"source_connector_id,omitempty"`
-	Password           string    `json:"-"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
-	LastUsedAt         time.Time `json:"last_used_at"`
+	ID                string    `json:"id"`
+	ProjectID         string    `json:"project_id"`
+	Name              string    `json:"name"`
+	Role              string    `json:"role"` // main | replica | branch
+	Status            string    `json:"status"`
+	Port              int       `json:"port"`
+	DataDir           string    `json:"data_dir"`
+	SnapshotRef       string    `json:"snapshot_ref"`
+	ContainerID       string    `json:"container_id,omitempty"`
+	Compute           string    `json:"compute,omitempty"`
+	ConnString        string    `json:"connection_string"`
+	ErrorMessage      string    `json:"error_message,omitempty"`
+	SourceLSN         string    `json:"source_lsn,omitempty"`
+	SourceConnector   string    `json:"source_connector,omitempty"` // connector name used as parent
+	SourceConnectorID string    `json:"source_connector_id,omitempty"`
+	Password          string    `json:"-"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+	LastUsedAt        time.Time `json:"last_used_at"`
 }
 
 type Project struct {
@@ -82,6 +82,7 @@ type Store interface {
 
 	PutBranch(ctx context.Context, b BranchRecord) error
 	GetBranch(ctx context.Context, projectID, name string) (BranchRecord, error)
+	FindBranch(ctx context.Context, projectID, name, from string) (BranchRecord, error)
 	GetBranchByID(ctx context.Context, id string) (BranchRecord, error)
 	ListBranches(ctx context.Context, projectID string) ([]BranchRecord, error)
 	ListAllBranches(ctx context.Context) ([]BranchRecord, error)

@@ -79,10 +79,15 @@ func (d *Docker) Start(ctx context.Context, spec Spec) (Handle, error) {
 		"run", "-d",
 		"--name", name,
 		"-p", fmt.Sprintf("127.0.0.1:%d:5432", spec.Port),
-		"-v", spec.DataDir + ":/var/lib/postgresql/data",
+	}
+	if postgres.ProxyEnabled() {
+		args = append(args, "-p", fmt.Sprintf("%s:%d:5432", postgres.ProxyBackendHost(), spec.Port))
+	}
+	args = append(args,
+		"-v", spec.DataDir+":/var/lib/postgresql/data",
 		"-e", "POSTGRES_HOST_AUTH_METHOD=trust",
 		d.Image,
-	}
+	)
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
