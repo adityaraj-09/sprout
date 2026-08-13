@@ -164,8 +164,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		"project":   proj,
 	}
 	if res.Connector != nil {
-		out["connection_string"] = postgres.FormatConnString(res.Connector.Port, "postgres", res.Connector.Password)
-		out["psql"] = postgres.PsqlOneLiner(res.Connector.Port, res.Connector.Password)
+		out["connection_string"] = postgres.FormatConnString(res.Connector.Port, "postgres", res.Connector.Password, res.Connector.Name)
+		out["psql"] = postgres.PsqlOneLiner(res.Connector.Port, res.Connector.Password, res.Connector.Name)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -291,7 +291,7 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		"container_id":       rec.ContainerID,
 		"compute":            rec.Compute,
 		"connection_string":  rec.ConnString,
-		"psql":               postgres.PsqlOneLiner(rec.Port, rec.Password),
+		"psql":               postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name),
 		"error_message":      rec.ErrorMessage,
 		"source_lsn":         rec.SourceLSN,
 		"source_connector":   rec.SourceConnector,

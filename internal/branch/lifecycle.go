@@ -89,7 +89,7 @@ func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (
 	if br, err := s.Store.GetBranch(ctx, projectID, "replica-"+c.Name); err == nil {
 		br.Status = meta.StatusActive
 		br.ErrorMessage = ""
-		br.ConnString = postgres.FormatConnString(c.Port, "postgres", c.Password)
+		br.ConnString = postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name)
 		_ = s.Store.UpdateBranch(ctx, br)
 	}
 
@@ -107,8 +107,8 @@ func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (
 	}
 
 	fmt.Printf("✓ connector %q resumed (%d branches)\n", c.Name, len(out))
-	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password))
-	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password))
+	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name))
+	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password, c.Name))
 	return ConnectorLifecycleResult{
 		Connector: c,
 		Branches:  out,
@@ -191,7 +191,7 @@ func (s *Service) resumeBranchBestEffort(ctx context.Context, projectID, name st
 	rec.ContainerID = started.ContainerID
 	rec.Status = meta.StatusActive
 	rec.ErrorMessage = ""
-	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres", rec.Password)
+	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres", rec.Password, rec.Name)
 	inst := &postgres.Instance{Name: rec.Name, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(rec.Name), Bins: s.Bins, Password: rec.Password}
 	_ = inst.EnsureAppRoles()
 	_ = s.Store.UpdateBranch(ctx, rec)

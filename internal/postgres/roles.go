@@ -17,8 +17,8 @@ func DBUser() string {
 }
 
 // PsqlOneLiner is a ready-to-copy shell command for a branch/replica.
-func PsqlOneLiner(port int, password string) string {
-	return fmt.Sprintf(`psql "%s"`, FormatConnString(port, "postgres", password))
+func PsqlOneLiner(port int, password, name string) string {
+	return fmt.Sprintf(`psql "%s"`, FormatConnString(port, "postgres", password, name))
 }
 
 // EnsureAppRoles creates the stable app login role (and postgres if missing) for remote clients.

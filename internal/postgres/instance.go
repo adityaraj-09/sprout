@@ -58,7 +58,7 @@ type Instance struct {
 }
 
 func (i *Instance) ConnString(db string) string {
-	return FormatConnString(i.Port, db, i.Password)
+	return FormatConnString(i.Port, db, i.Password, i.Name)
 }
 
 // Init creates a brand-new cluster in DataDir (only for MAIN, never for branches).

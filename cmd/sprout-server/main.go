@@ -77,7 +77,10 @@ func main() {
 	fmt.Printf("  compute:   %s\n", comp.Name())
 	fmt.Printf("  meta:      %s\n", cfg.MetaPath())
 	fmt.Printf("  token:     %s\n", cfg.Token)
-	fmt.Printf("  pg_host:   %s (listen_addresses=%s)\n", postgres.PublicHost(), postgres.ListenAddresses())
+	fmt.Printf("  pg_host:   %s (listen_addresses=%s subdomain=%v)\n", postgres.PublicHost(), postgres.ListenAddresses(), postgres.BranchSubdomain())
+	if postgres.BranchSubdomain() {
+		fmt.Printf("  dns:       *.%s → this VM (wildcard A/AAAA); URLs keep the branch port\n", postgres.PublicHost())
+	}
 	if postgres.RemoteAccess() {
 		if postgres.TrustRemote() {
 			fmt.Println("  warning:   Postgres accepts remote TCP with trust auth — firewall + SPROUT_SAFE=true; prefer default SCRAM")

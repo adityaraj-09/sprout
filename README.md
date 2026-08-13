@@ -241,6 +241,7 @@ Logical is for hosts that block physical replication (common on managed Postgres
 | `SPROUT_LISTEN` | `127.0.0.1:8080` | API bind (`0.0.0.0:8080` to expose) |
 | `SPROUT_TOKEN` | `dev-token` | Bearer token |
 | `SPROUT_PUBLIC_HOST` | `localhost` | Hostname in branch connection strings |
+| `SPROUT_BRANCH_SUBDOMAIN` | auto | `true`/`false`. Auto-on when public host is a DNS name: URLs become `<branch>.<host>:<port>` |
 | `SPROUT_PG_LISTEN` | auto | Postgres `listen_addresses` (`*` when public host is set) |
 | `SPROUT_SAFE` | unset | Set `true` to keep fsync on (recommended when exposing) |
 | `SPROUT_TRUST_REMOTE` | unset | Set `true` to keep trust auth for remote TCP (lab only). Default remote auth is SCRAM-SHA-256 |
@@ -271,20 +272,28 @@ Branches are regular Postgres instances. On a VPS:
 
 ```bash
 export SPROUT_LISTEN=0.0.0.0:8080
-export SPROUT_PUBLIC_HOST=db.example.com   # or your server IP
+export SPROUT_PUBLIC_HOST=strido.fit       # or a raw IP / db.example.com
 export SPROUT_TOKEN=some-secret
 export SPROUT_SAFE=true                    # keep durable writes when public
 ./bin/sprout-server
 ```
 
+When `SPROUT_PUBLIC_HOST` is a DNS name, branch URLs use a subdomain (port still selects the process — no SNI proxy):
+
+```text
+postgresql://sprout:<pass>@testdb.strido.fit:55440/postgres?application_name=testdb
+```
+
+Point a wildcard record `*.strido.fit` (and `strido.fit`) at the VM. Localhost and raw IPs stay as-is (`localhost:55440`). `/postgres` is the database inside the instance, not the branch name.
+
 Then:
 
 ```bash
-sprout config set api-url http://db.example.com:8080
+sprout config set api-url http://strido.fit:8080
 sprout config set token some-secret
-sprout branch create feat --from=lab
-# connection_string → postgresql://db.example.com:55440/postgres
-psql postgresql://db.example.com:55440/postgres
+sprout branch create testdb --from=lab
+# connection_string → postgresql://sprout:<pass>@testdb.strido.fit:55440/postgres?application_name=testdb
+psql "postgresql://sprout:<pass>@testdb.strido.fit:55440/postgres?application_name=testdb"
 ```
 
 Open firewall ports for the API and each branch port you use (or put a reverse proxy / VPN in front).  

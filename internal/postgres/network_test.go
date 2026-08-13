@@ -78,7 +78,7 @@ func TestApplyNetworkSettingsTrustRemote(t *testing.T) {
 func TestFormatConnStringPasswordEncoding(t *testing.T) {
 	t.Setenv("SPROUT_PUBLIC_HOST", "localhost")
 	t.Setenv("SPROUT_DB_USER", "sprout")
-	got := FormatConnString(55433, "postgres", "p@ss:word/x")
+	got := FormatConnString(55433, "postgres", "p@ss:word/x", "")
 	if !strings.Contains(got, "p%40ss") && !strings.Contains(got, "p%40ss%3Aword") {
 		if !strings.Contains(got, "sprout:") {
 			t.Fatalf("missing userinfo: %s", got)
@@ -86,6 +86,52 @@ func TestFormatConnStringPasswordEncoding(t *testing.T) {
 	}
 	if !strings.Contains(got, "55433") || !strings.Contains(got, "sprout") {
 		t.Fatalf("unexpected url: %s", got)
+	}
+}
+
+func TestFormatConnStringBranchSubdomainAndAppName(t *testing.T) {
+	t.Setenv("SPROUT_DB_USER", "sprout")
+	t.Setenv("SPROUT_PUBLIC_HOST", "localhost")
+	t.Setenv("SPROUT_BRANCH_SUBDOMAIN", "")
+	local := FormatConnString(55440, "postgres", "secret", "testdb")
+	if !strings.Contains(local, "localhost:55440") {
+		t.Fatalf("local host: %s", local)
+	}
+	if strings.Contains(local, "testdb.localhost") {
+		t.Fatalf("localhost should not get a subdomain: %s", local)
+	}
+	if !strings.Contains(local, "application_name=testdb") {
+		t.Fatalf("missing application_name: %s", local)
+	}
+
+	t.Setenv("SPROUT_PUBLIC_HOST", "strido.fit")
+	named := FormatConnString(55440, "postgres", "secret", "testdb")
+	if !strings.Contains(named, "testdb.strido.fit:55440") {
+		t.Fatalf("expected testdb.strido.fit:55440, got %s", named)
+	}
+	if !strings.Contains(named, "/postgres") {
+		t.Fatalf("database path should stay /postgres: %s", named)
+	}
+
+	t.Setenv("SPROUT_PUBLIC_HOST", "20.244.18.205")
+	ip := FormatConnString(55440, "postgres", "secret", "testdb")
+	if strings.Contains(ip, "testdb.20") {
+		t.Fatalf("IP should not get a subdomain: %s", ip)
+	}
+
+	t.Setenv("SPROUT_PUBLIC_HOST", "strido.fit")
+	t.Setenv("SPROUT_BRANCH_SUBDOMAIN", "false")
+	off := FormatConnString(55440, "postgres", "secret", "testdb")
+	if strings.Contains(off, "testdb.strido.fit") {
+		t.Fatalf("subdomain disabled: %s", off)
+	}
+}
+
+func TestAdvertiseHostReplicaPrefix(t *testing.T) {
+	t.Setenv("SPROUT_PUBLIC_HOST", "strido.fit")
+	t.Setenv("SPROUT_BRANCH_SUBDOMAIN", "true")
+	if got := AdvertiseHost("replica-sup"); got != "sup.strido.fit" {
+		t.Fatalf("got %s", got)
 	}
 }
 

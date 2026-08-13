@@ -79,7 +79,12 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 	listen := postgres.ListenAddresses()
 	remote := postgres.RemoteAccess()
 	add(DoctorCheck{Name: "public_host", OK: true, Level: "info",
-		Detail: fmt.Sprintf("SPROUT_PUBLIC_HOST=%s listen_addresses=%s db_user=%s", host, listen, postgres.DBUser())})
+		Detail: fmt.Sprintf("SPROUT_PUBLIC_HOST=%s listen_addresses=%s db_user=%s subdomain=%v", host, listen, postgres.DBUser(), postgres.BranchSubdomain())})
+	if postgres.BranchSubdomain() {
+		add(DoctorCheck{Name: "dns", OK: true, Level: "warn",
+			Detail: fmt.Sprintf("branch URLs use <name>.%s:<port>", host),
+			Hint:   "create a wildcard A/AAAA record for *." + host + " pointing at this VM; port still selects the branch (no SNI proxy)"})
+	}
 	if remote {
 		if postgres.TrustRemote() {
 			if os.Getenv("SPROUT_SAFE") != "true" {

@@ -49,13 +49,16 @@ func RemoteAccess() bool {
 }
 
 // FormatConnString builds a libpq URL for a Sprout-managed instance.
-func FormatConnString(port int, db, password string) string {
+// name is the branch/connector/main id: used as DNS label when subdomains
+// are on, and as application_name (valid libpq param; does not change the DB).
+func FormatConnString(port int, db, password, name string) string {
 	if db == "" {
 		db = "postgres"
 	}
+	label := DNSLabel(name)
 	u := url.URL{
 		Scheme: "postgresql",
-		Host:   net.JoinHostPort(PublicHost(), strconv.Itoa(port)),
+		Host:   net.JoinHostPort(AdvertiseHost(label), strconv.Itoa(port)),
 		Path:   "/" + db,
 	}
 	if password != "" {
@@ -63,7 +66,53 @@ func FormatConnString(port int, db, password string) string {
 	} else {
 		u.User = url.User(DBUser())
 	}
+	if label != "" {
+		q := url.Values{}
+		q.Set("application_name", label)
+		u.RawQuery = q.Encode()
+	}
 	return u.String()
+}
+
+// DNSLabel turns an instance name into a single DNS / application_name label.
+func DNSLabel(name string) string {
+	name = strings.TrimSpace(name)
+	name = strings.TrimPrefix(name, "replica-")
+	name = strings.ToLower(name)
+	if len(name) > 63 {
+		name = name[:63]
+	}
+	return name
+}
+
+// BranchSubdomain reports whether advertised hosts should be <name>.<public host>.
+// Auto-on when SPROUT_PUBLIC_HOST is a DNS name (not localhost / IP).
+// Override with SPROUT_BRANCH_SUBDOMAIN=true|false.
+func BranchSubdomain() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("SPROUT_BRANCH_SUBDOMAIN"))) {
+	case "true", "1", "yes":
+		return true
+	case "false", "0", "no":
+		return false
+	}
+	h := PublicHost()
+	if h == "localhost" || h == "127.0.0.1" || h == "::1" {
+		return false
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return false
+	}
+	return strings.Contains(h, ".")
+}
+
+// AdvertiseHost is the hostname put in connection strings for one instance.
+func AdvertiseHost(name string) string {
+	base := PublicHost()
+	label := DNSLabel(name)
+	if label == "" || !BranchSubdomain() {
+		return base
+	}
+	return label + "." + base
 }
 
 // ApplyNetworkSettings rewrites managed listen/port/auth sections (idempotent).

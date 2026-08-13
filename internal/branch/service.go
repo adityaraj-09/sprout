@@ -127,7 +127,7 @@ func (s *Service) InitMain(ctx context.Context) (meta.Project, error) {
 	})
 
 	fmt.Println("✓ main ready:", main.ConnString("postgres"))
-	fmt.Println("  ", postgres.PsqlOneLiner(MainPort, password))
+	fmt.Println("  ", postgres.PsqlOneLiner(MainPort, password, "main"))
 	return proj, nil
 }
 
@@ -186,7 +186,7 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 	}
 	fmt.Printf("✓ branch %q ready in %s\n", name, time.Since(total).Round(time.Millisecond))
 	fmt.Println("  ", rec.ConnString)
-	fmt.Println("  ", postgres.PsqlOneLiner(rec.Port, rec.Password))
+	fmt.Println("  ", postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name))
 	return rec, nil
 }
 
@@ -456,7 +456,7 @@ func (s *Service) Resume(ctx context.Context, projectID, name string) (meta.Bran
 	rec.Status = meta.StatusActive
 	rec.ErrorMessage = ""
 	rec.LastUsedAt = time.Now().UTC()
-	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres", rec.Password)
+	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres", rec.Password, rec.Name)
 	inst := &postgres.Instance{Name: rec.Name, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(rec.Name), Bins: s.Bins, Password: rec.Password}
 	_ = inst.EnsureAppRoles()
 	_ = s.Store.UpdateBranch(ctx, rec)

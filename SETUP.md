@@ -50,8 +50,12 @@ On Azure/Linux you typically:
 From your laptop you will connect like:
 
 ```bash
-psql "postgresql://sprout@<PUBLIC_IP>:<PORT>/postgres"
+psql "postgresql://sprout:<pass>@testdb.strido.fit:<PORT>/postgres?application_name=testdb"
+# or with a public IP (no subdomain):
+psql "postgresql://sprout:<pass>@<PUBLIC_IP>:<PORT>/postgres"
 ```
+
+Wildcard DNS: `*.strido.fit` A record → VM IP. The **port** still selects the branch.
 
 ---
 
@@ -175,11 +179,12 @@ export SPROUT_DATA=$HOME/sprout-data
 export SPROUT_STORAGE=copy                 # or omit and set SPROUT_ZFS_DATASET=sprout/data
 export SPROUT_COMPUTE=local                # prefer local over Docker
 export SPROUT_LISTEN=0.0.0.0:8080
-export SPROUT_PUBLIC_HOST=20.244.18.205    # your VM public IP
+export SPROUT_PUBLIC_HOST=strido.fit       # or your VM public IP
 export SPROUT_TOKEN='change-me-long-secret'
 export SPROUT_SAFE=true
 export SPROUT_DB_USER=sprout               # login role in connection strings
 # optional:
+# export SPROUT_BRANCH_SUBDOMAIN=false     # keep host as-is (default auto-on for DNS names)
 # export SPROUT_TRUST_REMOTE=true          # lab-only: remote trust instead of SCRAM
 # export SPROUT_AUTO_RESUME=true           # restart crashed connectors/branches
 ```
@@ -340,7 +345,8 @@ pkill -f sprout-server || true
 - [ ] ZFS pool + `sprout/data` mounted at `$HOME/sprout-data`
 - [ ] `chown` so your user can write
 - [ ] Postgres **17** (or matching major) first on `PATH`
-- [ ] `SPROUT_COMPUTE=local`, `SPROUT_PUBLIC_HOST=<ip>`, `SPROUT_SAFE=true`
+- [ ] `SPROUT_COMPUTE=local`, `SPROUT_PUBLIC_HOST=<strido.fit or ip>`, `SPROUT_SAFE=true`
+- [ ] Wildcard DNS `*.strido.fit` → VM if using a domain (optional)
 - [ ] NSG: `8080` + `55432–55500`
 - [ ] `make build` + `sprout-server` running
 - [ ] `sprout doctor` / `sprout health` OK from laptop

@@ -267,8 +267,8 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 	if err != nil {
 		return ConnectResult{}, err
 	}
-	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password))
-	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password))
+	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name))
+	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password, c.Name))
 	return ConnectResult{Connector: &c, Lag: &lag}, nil
 }
 
@@ -341,13 +341,13 @@ func (s *Service) finishConnector(ctx context.Context, projectID string, c meta.
 	_ = s.Store.PutBranch(ctx, meta.BranchRecord{
 		ID: "replica-" + c.ID, ProjectID: projectID, Name: "replica-" + c.Name, Role: "replica",
 		Status: meta.StatusActive, Port: c.Port, DataDir: c.DataDir, Compute: s.Compute.Name(),
-		ConnString: postgres.FormatConnString(c.Port, "postgres", c.Password),
+		ConnString: postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name),
 		SourceConnector: c.Name, SourceConnectorID: c.ID,
 		Password: c.Password,
 	})
 	fmt.Printf("✓ connector %q mode=%s status=replicating port=%d lsn=%s\n", c.Name, c.Mode, c.Port, c.LastLSN)
-	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password))
-	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password))
+	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name))
+	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password, c.Name))
 	return c, lag, nil
 }
 
