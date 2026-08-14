@@ -30,7 +30,7 @@ func TestSQLitePasswordRoundTrip(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	c, err := store.GetConnectorByName(ctx, proj.ID, "sup")
+	c, err := store.GetConnectorByName(ctx, proj.ID, "sup", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,11 +72,11 @@ func TestFindBranchSameNameDifferentConnectors(t *testing.T) {
 	if _, err := store.GetBranch(ctx, proj.ID, "testdb"); err == nil || !strings.Contains(err.Error(), "ambiguous_branch") {
 		t.Fatalf("expected ambiguous_branch, got %v", err)
 	}
-	lab, err := store.FindBranch(ctx, proj.ID, "testdb", "lab")
+	lab, err := store.FindBranch(ctx, proj.ID, "testdb", "lab", "")
 	if err != nil || lab.Port != 55440 {
 		t.Fatalf("from lab: %+v %v", lab, err)
 	}
-	supa, err := store.FindBranch(ctx, proj.ID, "testdb", "supabase")
+	supa, err := store.FindBranch(ctx, proj.ID, "testdb", "supabase", "")
 	if err != nil || supa.Port != 55441 {
 		t.Fatalf("from supabase: %+v %v", supa, err)
 	}
@@ -84,6 +84,94 @@ func TestFindBranchSameNameDifferentConnectors(t *testing.T) {
 		ID: "b3", ProjectID: proj.ID, Name: "testdb", Role: "branch",
 		Status: StatusActive, Port: 55442, SourceConnector: "lab",
 	}); err == nil {
-		t.Fatal("expected unique (project, source, name) to reject duplicate testdb from lab")
+		t.Fatal("expected unique (project, source, name, created_by) to reject duplicate testdb from lab")
+	}
+}
+
+func TestFindBranchOwnerIsolation(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	proj, err := store.EnsureProject(ctx, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutBranch(ctx, BranchRecord{
+		ID: "old", ProjectID: proj.ID, Name: "testdb", Role: "branch",
+		Status: StatusActive, Port: 55440, SourceConnector: "supabase",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutBranch(ctx, BranchRecord{
+		ID: "a", ProjectID: proj.ID, Name: "testdb", Role: "branch",
+		Status: StatusActive, Port: 55441, SourceConnector: "supabase", CreatedBy: "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutBranch(ctx, BranchRecord{
+		ID: "b", ProjectID: proj.ID, Name: "testdb", Role: "branch",
+		Status: StatusActive, Port: 55442, SourceConnector: "supabase", CreatedBy: "bob",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	alice, err := store.FindBranch(ctx, proj.ID, "testdb", "supabase", "alice")
+	if err != nil || alice.ID != "a" {
+		t.Fatalf("alice: %+v %v", alice, err)
+	}
+	if _, err := store.FindBranch(ctx, proj.ID, "testdb", "supabase", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FindBranch(ctx, proj.ID, "testdb", "", "carol"); err == nil {
+		t.Fatal("carol should not see others' branches")
+	}
+	if _, err := store.GetBranch(ctx, proj.ID, "testdb"); err == nil || !strings.Contains(err.Error(), "ambiguous_branch") {
+		t.Fatalf("machine token should see all testdb rows as ambiguous, got %v", err)
+	}
+}
+
+func TestConnectorOwnerIsolation(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	proj, err := store.EnsureProject(ctx, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutConnector(ctx, Connector{
+		ID: "old", ProjectID: proj.ID, Name: "supabase", Status: ConnectorReplicating,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutConnector(ctx, Connector{
+		ID: "a", ProjectID: proj.ID, Name: "supabase", CreatedBy: "alice", Status: ConnectorReplicating,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutConnector(ctx, Connector{
+		ID: "b", ProjectID: proj.ID, Name: "supabase", CreatedBy: "bob", Status: ConnectorReplicating,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	alice, err := store.GetConnectorByName(ctx, proj.ID, "supabase", "alice")
+	if err != nil || alice.ID != "a" {
+		t.Fatalf("alice: %+v %v", alice, err)
+	}
+	unowned, err := store.GetConnectorByName(ctx, proj.ID, "supabase", "")
+	if err != nil || unowned.ID != "old" {
+		t.Fatalf("machine unowned: %+v %v", unowned, err)
+	}
+	if _, err := store.GetConnectorByName(ctx, proj.ID, "supabase", "carol"); err == nil {
+		t.Fatal("carol should not see supabase")
+	}
+	if err := store.PutConnector(ctx, Connector{
+		ID: "a2", ProjectID: proj.ID, Name: "supabase", CreatedBy: "alice", Status: ConnectorReplicating,
+	}); err == nil {
+		t.Fatal("expected unique (project, name, created_by)")
 	}
 }

@@ -8,13 +8,17 @@ func NormalizeSNI(sni string) string {
 }
 
 // MatchesSNI reports whether a TLS server name refers to this instance.
-func MatchesSNI(sni, name, from string) bool {
+func MatchesSNI(sni, name, from string, owner ...string) bool {
 	sni = NormalizeSNI(sni)
 	if sni == "" {
 		return false
 	}
-	if sni == strings.ToLower(AdvertiseHost(name, from)) {
+	own := ""
+	if len(owner) > 0 {
+		own = owner[0]
+	}
+	if sni == strings.ToLower(AdvertiseHost(name, from, own)) {
 		return true
 	}
-	return sni == HostLabel(name, from)
+	return sni == HostLabel(name, from, own)
 }

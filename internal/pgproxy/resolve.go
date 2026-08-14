@@ -34,7 +34,7 @@ func StoreResolver(store meta.Store) Resolver {
 			if b.Role == "branch" {
 				from = b.SourceConnector
 			}
-			if postgres.MatchesSNI(sni, b.Name, from) {
+			if postgres.MatchesSNI(sni, b.Name, from, b.CreatedBy) {
 				return backend, b.Port, nil
 			}
 		}
@@ -46,7 +46,7 @@ func StoreResolver(store meta.Store) Resolver {
 			if c.Port <= 0 {
 				continue
 			}
-			if postgres.MatchesSNI(sni, c.Name, "") {
+			if postgres.MatchesSNI(sni, c.Name, "", c.CreatedBy) {
 				return backend, c.Port, nil
 			}
 		}

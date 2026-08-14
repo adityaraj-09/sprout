@@ -112,7 +112,7 @@ If **one** connector exists, `--from` is optional. With **multiple**, `--from` i
 
 ## Team use (one hosted server)
 
-One VM, one project (`default`). Anyone with a GitHub account can `sprout login`. There are no admin/dev roles yet — every signed-in user can call the same APIs. Isolation is still by **branch name** plus the Postgres URL for that branch.
+One VM, one project (`default`). Anyone with a GitHub account can `sprout login`. GitHub users are isolated: each person only sees **their** connectors and **their** branches. Pre-GitHub / unowned rows stay visible to the machine `SPROUT_TOKEN` only.
 
 **Server (once):** create a GitHub OAuth App, enable **Device Flow**, then:
 
@@ -124,28 +124,24 @@ export SPROUT_GITHUB_CLIENT_ID=Iv1.xxxxxxxx
 # keep a strong SPROUT_TOKEN as a machine/break-glass token
 ```
 
-**Do this:**
-
-1. One person (or a shared runbook) connects prod **once**:
-   `sprout connect --name=supabase --mode=logical 'postgresql://…'`
-   Do **not** have each developer run `connect` — that copies the whole database again.
-2. Each person on their laptop:
+**Each person:**
 
 ```bash
 sprout config set api-url http://strido.fit:8080
 sprout login          # opens GitHub in the browser; saves ~/.sprout/config.json
 sprout whoami
-sprout branch create ar-login --from=supabase
+sprout connect --name=supabase --mode=logical 'postgresql://…'   # your replica
+sprout branch create testdb --from=supabase
 ```
 
-3. Use **your** branch URL for app/`psql` testing:
-   `postgresql://sprout:<pass>@ar-login-supabase.strido.fit:5432/postgres`
+Use **your** URLs (GitHub login is in the hostname so alice and bob can both have `testdb` / `supabase`):
 
-Name branches with initials or ticket (`ar-login`, `priya-42`) so they do not collide. The same name from the same connector is rejected; `ar-login` and `priya-login` can both exist.
+- connector: `postgresql://sprout:<pass>@supabase-alice.strido.fit:5432/postgres`
+- branch: `postgresql://sprout:<pass>@testdb-alice-supabase.strido.fit:5432/postgres`
 
-**Do not** point a second `sprout connect` at another person’s branch unless you intend to copy that branch into a new replica. For day-to-day work, the branch URL is an app database, not a connector source.
+`sprout connector list` / `sprout branch list` only show your rows. `sprout logout` drops the GitHub token and does **not** fall back to the shared machine token. Shared `main` (`sprout init`) is machine-token only.
 
-`sprout login` stores a GitHub token (mode `0600`). `sprout logout` deletes it. Any signed-in GitHub user can still delete any branch until you add ownership later. Keep `SPROUT_TOKEN` for scripts.
+Keep `SPROUT_TOKEN` for scripts and ops (sees everything, including leftover unowned connectors).
 
 ---
 
@@ -339,7 +335,7 @@ Logical is for hosts that block physical replication (common on managed Postgres
 | `SPROUT_GITHUB_HOST` | `https://github.com` | GitHub or GitHub Enterprise |
 | `SPROUT_GITHUB_API` | `https://api.github.com` | GitHub API base |
 | `SPROUT_PUBLIC_HOST` | `localhost` | Hostname in branch connection strings |
-| `SPROUT_BRANCH_SUBDOMAIN` | auto | `true`/`false`. Auto-on when public host is a DNS name: URLs become `<name>-<connector>.<host>:5432` |
+| `SPROUT_BRANCH_SUBDOMAIN` | auto | `true`/`false`. Auto-on when public host is a DNS name: URLs become `<name>-<owner>-<connector>.<host>:5432` |
 | `SPROUT_PG_PROXY` | auto | SNI proxy on `:5432` when subdomains are on. `false` advertises unique ports instead |
 | `SPROUT_PG_PROXY_PORT` | `5432` | Public Postgres port for the SNI proxy |
 | `SPROUT_TLS_CERT` / `SPROUT_TLS_KEY` | auto | TLS cert for the proxy; otherwise a self-signed wildcard is written to `$SPROUT_DATA/tls` |
@@ -384,7 +380,7 @@ When `SPROUT_PUBLIC_HOST` is a DNS name, Sprout runs a TLS SNI proxy on **5432**
 
 ```text
 postgresql://sprout:<pass>@testdb-lab.strido.fit:5432/postgres
-postgresql://sprout:<pass>@testdb-supabase.strido.fit:5432/postgres
+postgresql://sprout:<pass>@testdb-alice-supabase.strido.fit:5432/postgres
 ```
 
 Point a wildcard record `*.strido.fit` (and `strido.fit`) at the VM. Open firewall **5432** (and 8080 for the API). Localhost and raw IPs stay as-is (`localhost:55440`) with no proxy. `/postgres` is the database inside the instance, not the branch name.

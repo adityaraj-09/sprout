@@ -39,6 +39,7 @@ export type Connector = {
   error_message?: string;
   last_lsn?: string;
   last_lag_bytes: number;
+  created_by?: string;
   created_at: string;
   updated_at: string;
 };
@@ -101,7 +102,7 @@ export type SproutClientOptions = {
   baseUrl?: string;
   /** Preferred name for the control-plane URL (same as `baseUrl`). */
   apiUrl?: string;
-  /** Bearer token (default opts → env → config → "dev-token") */
+  /** Bearer token (opts → env → config; loopback defaults to "dev-token", remote does not) */
   token?: string;
   /** Default project path segment (default "default") */
   project?: string;

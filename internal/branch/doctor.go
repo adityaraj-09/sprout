@@ -84,11 +84,11 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 	if postgres.BranchSubdomain() {
 		if postgres.ProxyEnabled() {
 			add(DoctorCheck{Name: "dns", OK: true, Level: "warn",
-				Detail: fmt.Sprintf("URLs use <name>-<connector>.%s:5432 (SNI proxy)", host),
+				Detail: fmt.Sprintf("URLs use <name>-<owner>-<connector>.%s:5432 (SNI proxy)", host),
 				Hint:   "wildcard A/AAAA for *." + host + " → this VM; open NSG 5432; setcap cap_net_bind_service=+ep if bind fails"})
 		} else {
 			add(DoctorCheck{Name: "dns", OK: true, Level: "warn",
-				Detail: fmt.Sprintf("branch URLs use <name>-<connector>.%s:<port>", host),
+				Detail: fmt.Sprintf("branch URLs use <name>-<owner>-<connector>.%s:<port>", host),
 				Hint:   "create a wildcard A/AAAA record for *." + host + " pointing at this VM; SPROUT_PG_PROXY=false keeps unique ports"})
 		}
 	}
@@ -132,7 +132,7 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 	}
 
 	// Connectors summary
-	if list, err := s.Store.ListConnectors(ctx); err == nil {
+	if list, err := s.ListConnectors(ctx); err == nil {
 		add(DoctorCheck{Name: "connectors", OK: true, Level: "info",
 			Detail: fmt.Sprintf("%d configured", len(list))})
 	}

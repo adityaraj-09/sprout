@@ -254,7 +254,7 @@ sprout health
 sprout doctor
 ```
 
-Every teammate uses the **same** API URL and **GitHub login** (`sprout login`). Connect prod **once** on the server (`--name=supabase`). Each person then `sprout branch create <initials>-<work> --from=supabase` and uses that branch’s `:5432` URL. See README “Team use” and [`SKILL.md`](SKILL.md) for the CLI agent skill.
+Every teammate uses the **same** API URL and **GitHub login** (`sprout login`). Each person runs `sprout connect --name=supabase` for **their own** replica, then `sprout branch create testdb --from=supabase`. Lists and URLs are per GitHub user (`testdb-alice-supabase.strido.fit`). Shared `main` is machine-token only. See README “Team use” and [`SKILL.md`](SKILL.md) for the CLI agent skill.
 
 Create a GitHub OAuth App (any callback URL is fine), enable **Device Flow**, and put the client ID in `SPROUT_GITHUB_CLIENT_ID`. Any GitHub user can then `sprout login`. Optionally set `SPROUT_GITHUB_USERS` or `SPROUT_GITHUB_ORGS` to restrict.
 

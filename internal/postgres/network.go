@@ -67,13 +67,17 @@ func RemoteAccess() bool {
 // name is the branch/connector/main id; from is the source connector (if any).
 // When subdomains are on, branches become <name>-<from>.<public host> so the
 // same branch label from two connectors cannot share a hostname.
-func FormatConnString(port int, db, password, name, from string) string {
+func FormatConnString(port int, db, password, name, from string, owner ...string) string {
 	if db == "" {
 		db = "postgres"
 	}
+	own := ""
+	if len(owner) > 0 {
+		own = owner[0]
+	}
 	u := url.URL{
 		Scheme: "postgresql",
-		Host:   net.JoinHostPort(AdvertiseHost(name, from), strconv.Itoa(AdvertisePort(port))),
+		Host:   net.JoinHostPort(AdvertiseHost(name, from, own), strconv.Itoa(AdvertisePort(port))),
 		Path:   "/" + db,
 	}
 	if password != "" {
@@ -97,26 +101,56 @@ func DNSLabel(name string) string {
 
 // HostLabel is the DNS label for one instance.
 // Connectors/main (from empty): "lab" / "main".
-// Branches: always "<name>-<connector>" so testdb from lab and testdb from
-// supabase advertise testdb-lab vs testdb-supabase, and a branch named "lab"
-// does not collide with connector host "lab".
-func HostLabel(name, from string) string {
+// Branches: "<name>-<connector>". With a GitHub owner: "<name>-<owner>-<connector>"
+// so alice/testdb and bob/testdb do not share a hostname or data dir.
+func HostLabel(name, from string, owner ...string) string {
 	n, f := DNSLabel(name), DNSLabel(from)
-	if n == "" {
-		return f
+	o := ""
+	if len(owner) > 0 {
+		o = DNSLabel(owner[0])
 	}
-	if f == "" || f == "main" {
-		return n
+	if f == "main" {
+		f = ""
 	}
-	joined := n + "-" + f
-	if len(joined) <= 63 {
+	parts := make([]string, 0, 3)
+	if n != "" {
+		parts = append(parts, n)
+	}
+	if o != "" {
+		parts = append(parts, o)
+	}
+	if f != "" {
+		parts = append(parts, f)
+	}
+	return joinDNSParts(parts)
+}
+
+// ReplicaComputeName is the compute handle for a connector replica.
+func ReplicaComputeName(name, owner string) string {
+	return "replica-" + HostLabel(name, "", owner)
+}
+
+func joinDNSParts(parts []string) string {
+	joined := strings.Join(parts, "-")
+	if len(joined) <= 63 || len(parts) <= 1 {
+		if len(joined) > 63 {
+			return joined[:63]
+		}
 		return joined
 	}
-	keep := 63 - 1 - len(f)
+	suffix := strings.Join(parts[1:], "-")
+	keep := 63 - 1 - len(suffix)
 	if keep < 1 {
-		return joined[:63]
+		if len(joined) > 63 {
+			return joined[:63]
+		}
+		return joined
 	}
-	return n[:keep] + "-" + f
+	head := parts[0]
+	if keep > len(head) {
+		keep = len(head)
+	}
+	return head[:keep] + "-" + suffix
 }
 
 // BranchSubdomain reports whether advertised hosts should be <label>.<public host>.
@@ -140,9 +174,13 @@ func BranchSubdomain() bool {
 }
 
 // AdvertiseHost is the hostname put in connection strings for one instance.
-func AdvertiseHost(name, from string) string {
+func AdvertiseHost(name, from string, owner ...string) string {
 	base := PublicHost()
-	label := HostLabel(name, from)
+	own := ""
+	if len(owner) > 0 {
+		own = owner[0]
+	}
+	label := HostLabel(name, from, own)
 	if label == "" || !BranchSubdomain() {
 		return base
 	}

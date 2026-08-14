@@ -27,7 +27,7 @@ export class SproutClient {
       /\/$/,
       "",
     );
-    this.token = opts.token ?? process.env.SPROUT_TOKEN ?? file.token ?? "dev-token";
+    this.token = resolveToken(opts.token ?? process.env.SPROUT_TOKEN ?? file.token, this.baseUrl);
     this.project = opts.project ?? process.env.SPROUT_PROJECT ?? file.project ?? "default";
     this.timeoutMs = opts.timeoutMs ?? 60 * 60 * 1000;
     this.fetchImpl = opts.fetch ?? fetch;
@@ -217,4 +217,19 @@ export class SproutClient {
       clearTimeout(timer);
     }
   }
+}
+
+function isLoopbackUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.hostname === "127.0.0.1" || u.hostname === "localhost" || u.hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function resolveToken(token: string | undefined, baseUrl: string): string {
+  const t = (token ?? "").trim();
+  if (t) return t;
+  return isLoopbackUrl(baseUrl) ? "dev-token" : "";
 }

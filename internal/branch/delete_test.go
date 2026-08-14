@@ -66,7 +66,7 @@ func TestDeleteConnectorBlockedByBranches(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "connector_has_branches") {
 		t.Fatalf("expected connector_has_branches, got %v", err)
 	}
-	if _, err := svc.Store.GetConnectorByName(ctx, proj.ID, "sup"); err != nil {
+	if _, err := svc.Store.GetConnectorByName(ctx, proj.ID, "sup", ""); err != nil {
 		t.Fatalf("connector should still exist: %v", err)
 	}
 	if _, err := svc.Store.GetBranch(ctx, proj.ID, "feat-a"); err != nil {
@@ -99,7 +99,7 @@ func TestDeleteConnectorForceRemovesBranches(t *testing.T) {
 	if err := svc.DeleteConnector(ctx, proj.ID, "sup", true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Store.GetConnectorByName(ctx, proj.ID, "sup"); err == nil {
+	if _, err := svc.Store.GetConnectorByName(ctx, proj.ID, "sup", ""); err == nil {
 		t.Fatal("connector should be gone")
 	}
 	if _, err := svc.Store.GetBranch(ctx, proj.ID, "feat-a"); err == nil {

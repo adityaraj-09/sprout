@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/adityaraj/sprout/internal/auth"
 	"github.com/adityaraj/sprout/internal/compute"
 	"github.com/adityaraj/sprout/internal/meta"
 	"github.com/adityaraj/sprout/internal/postgres"
@@ -66,7 +67,7 @@ func (s *Service) Connect(ctx context.Context, projectID string, opts ConnectOpt
 }
 
 func (s *Service) connectPhysical(ctx context.Context, projectID, name, primaryURL string, wipe bool) (meta.Connector, replica.Lag, error) {
-	unlock := s.lockBranch("connector:" + name)
+	unlock := s.lockBranch(s.connectorLockKey(name, auth.OwnerFrom(ctx)))
 	defer unlock()
 
 	conn, err := replica.ParseURL(primaryURL)
@@ -121,13 +122,13 @@ func (s *Service) connectPhysical(ctx context.Context, projectID, name, primaryU
 	}
 
 	if _, err := s.Compute.Start(ctx, compute.Spec{
-		Name: replicaComputeName(c.Name), DataDir: c.DataDir, Port: c.Port, LogFile: s.logPath(replicaComputeName(c.Name)),
+		Name: postgres.ReplicaComputeName(c.Name, c.CreatedBy), DataDir: c.DataDir, Port: c.Port, LogFile: s.logPath(postgres.ReplicaComputeName(c.Name, c.CreatedBy)),
 	}); err != nil {
 		return s.failConnector(ctx, c, err)
 	}
 	inst := &postgres.Instance{
-		Name: replicaComputeName(c.Name), DataDir: c.DataDir, Port: c.Port,
-		LogFile: s.logPath(replicaComputeName(c.Name)), Bins: s.Bins, Password: c.Password,
+		Name: c.Name, Owner: c.CreatedBy, DataDir: c.DataDir, Port: c.Port,
+		LogFile: s.logPath(postgres.ReplicaComputeName(c.Name, c.CreatedBy)), Bins: s.Bins, Password: c.Password,
 	}
 	_ = inst.EnsureAppRoles()
 
@@ -139,7 +140,7 @@ func (s *Service) connectPhysical(ctx context.Context, projectID, name, primaryU
 }
 
 func (s *Service) connectLogical(ctx context.Context, projectID string, opts ConnectOpts) (ConnectResult, error) {
-	unlock := s.lockBranch("connector:" + opts.Name)
+	unlock := s.lockBranch(s.connectorLockKey(opts.Name, auth.OwnerFrom(ctx)))
 	defer unlock()
 
 	conn, err := replica.ParseURL(opts.URL)
@@ -170,8 +171,8 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 		return ConnectResult{}, err
 	}
 
-	pub := pubName(c.Name)
-	sub := subName(c.Name)
+	pub := pubName(c)
+	sub := subName(c)
 
 	fmt.Println("=== connect logical ===")
 	fmt.Printf("  name=%s port=%d dir=%s pub=%s wipe=%v\n", c.Name, c.Port, c.DataDir, pub, opts.Wipe)
@@ -211,8 +212,8 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 			return ConnectResult{}, e
 		}
 		inst := &postgres.Instance{
-			Name: replicaComputeName(c.Name), DataDir: c.DataDir, Port: c.Port,
-			LogFile: s.logPath(replicaComputeName(c.Name)), Bins: s.Bins, Password: c.Password,
+			Name: c.Name, Owner: c.CreatedBy, DataDir: c.DataDir, Port: c.Port,
+			LogFile: s.logPath(postgres.ReplicaComputeName(c.Name, c.CreatedBy)), Bins: s.Bins, Password: c.Password,
 		}
 		fmt.Println("→ initdb local replica (subscriber)")
 		if err := inst.Init(); err != nil {
@@ -220,8 +221,8 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 			return ConnectResult{}, e
 		}
 		if _, err := s.Compute.Start(ctx, compute.Spec{
-			Name: replicaComputeName(c.Name), DataDir: c.DataDir, Port: c.Port,
-			LogFile: s.logPath(replicaComputeName(c.Name)),
+			Name: postgres.ReplicaComputeName(c.Name, c.CreatedBy), DataDir: c.DataDir, Port: c.Port,
+			LogFile: s.logPath(postgres.ReplicaComputeName(c.Name, c.CreatedBy)),
 		}); err != nil {
 			_, _, e := s.failConnector(ctx, c, err)
 			return ConnectResult{}, e
@@ -245,8 +246,8 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 		running, _ := s.Compute.IsRunning(ctx, h)
 		if !running {
 			if _, err := s.Compute.Start(ctx, compute.Spec{
-				Name: replicaComputeName(c.Name), DataDir: c.DataDir, Port: c.Port,
-				LogFile: s.logPath(replicaComputeName(c.Name)),
+				Name: postgres.ReplicaComputeName(c.Name, c.CreatedBy), DataDir: c.DataDir, Port: c.Port,
+				LogFile: s.logPath(postgres.ReplicaComputeName(c.Name, c.CreatedBy)),
 			}); err != nil {
 				_, _, e := s.failConnector(ctx, c, err)
 				return ConnectResult{}, e
@@ -267,19 +268,21 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 	if err != nil {
 		return ConnectResult{}, err
 	}
-	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, ""))
-	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password, c.Name, ""))
+	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, "", c.CreatedBy))
+	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password, c.Name, "", c.CreatedBy))
 	return ConnectResult{Connector: &c, Lag: &lag}, nil
 }
 
 func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, primaryURL, mode string) (meta.Connector, error) {
-	dataDir := s.ReplicaDir(name)
-	if existing, err := s.Store.GetConnectorByName(ctx, projectID, name); err == nil {
+	owner := auth.OwnerFrom(ctx)
+	dataDir := s.ReplicaDir(name, owner)
+	if existing, err := s.Store.GetConnectorByName(ctx, projectID, name, owner); err == nil {
 		existing.PrimaryURL = primaryURL
 		existing.Mode = mode
 		existing.Status = meta.ConnectorBootstrapping
 		existing.ErrorMessage = ""
 		existing.DataDir = dataDir
+		existing.CreatedBy = owner
 		if existing.Port == 0 {
 			port, err := s.Store.AllocPort(ctx)
 			if err != nil {
@@ -310,6 +313,7 @@ func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, p
 		ID: uuid.NewString(), ProjectID: projectID, Name: name, PrimaryURL: primaryURL, Mode: mode,
 		Status: meta.ConnectorBootstrapping, DataDir: dataDir, Port: port,
 		Password:  postgres.GeneratePassword(),
+		CreatedBy: owner,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := s.Store.PutConnector(ctx, c); err != nil {
@@ -319,7 +323,7 @@ func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, p
 }
 
 func (s *Service) connectorHandle(c meta.Connector) compute.Handle {
-	return compute.Handle{Provider: s.Compute.Name(), Name: replicaComputeName(c.Name), Port: c.Port, DataDir: c.DataDir}
+	return compute.Handle{Provider: s.Compute.Name(), Name: postgres.ReplicaComputeName(c.Name, c.CreatedBy), Port: c.Port, DataDir: c.DataDir}
 }
 
 func (s *Service) failConnector(ctx context.Context, c meta.Connector, err error) (meta.Connector, replica.Lag, error) {
@@ -341,13 +345,13 @@ func (s *Service) finishConnector(ctx context.Context, projectID string, c meta.
 	_ = s.Store.PutBranch(ctx, meta.BranchRecord{
 		ID: "replica-" + c.ID, ProjectID: projectID, Name: "replica-" + c.Name, Role: "replica",
 		Status: meta.StatusActive, Port: c.Port, DataDir: c.DataDir, Compute: s.Compute.Name(),
-		ConnString:      postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, ""),
+		ConnString:      postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, "", c.CreatedBy),
 		SourceConnector: c.Name, SourceConnectorID: c.ID,
-		Password: c.Password,
+		Password: c.Password, CreatedBy: c.CreatedBy,
 	})
 	fmt.Printf("✓ connector %q mode=%s status=replicating port=%d lsn=%s\n", c.Name, c.Mode, c.Port, c.LastLSN)
-	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, ""))
-	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password, c.Name, ""))
+	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, "", c.CreatedBy))
+	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password, c.Name, "", c.CreatedBy))
 	return c, lag, nil
 }
 
@@ -358,7 +362,7 @@ func (s *Service) ReplicationStatus(ctx context.Context, projectID, name string)
 	}
 	rm := &replica.Manager{Bins: s.Bins}
 	if c.Mode == ModeLogical {
-		st, err := rm.LogicalSyncStatus(ctx, "127.0.0.1", c.Port, subName(c.Name))
+		st, err := rm.LogicalSyncStatus(ctx, "127.0.0.1", c.Port, subName(c))
 		if err != nil {
 			return c, replica.Lag{}, err
 		}
@@ -386,15 +390,15 @@ func (s *Service) ReplicationStatus(ctx context.Context, projectID, name string)
 // DeleteConnector stops the local replica, drops logical pub/sub when possible, and removes metadata.
 // Child branches block the delete unless force is set (then they are destroyed first).
 func (s *Service) DeleteConnector(ctx context.Context, projectID, name string, force bool) error {
-	unlock := s.lockBranch("connector:" + name)
+	unlock := s.lockBranch(s.connectorLockKey(name, auth.OwnerFrom(ctx)))
 	defer unlock()
 
-	c, err := s.Store.GetConnectorByName(ctx, projectID, name)
+	c, err := s.lookupConnector(ctx, projectID, name)
 	if err != nil {
-		return fmt.Errorf("connector_not_found: %s", name)
+		return err
 	}
 
-	children, err := s.branchesFromConnector(ctx, projectID, c.Name)
+	children, err := s.branchesFromConnector(ctx, projectID, c)
 	if err != nil {
 		return err
 	}
@@ -418,14 +422,14 @@ func (s *Service) DeleteConnector(ctx context.Context, projectID, name string, f
 	if c.Mode == ModeLogical {
 		running, _ := s.Compute.IsRunning(ctx, h)
 		if running {
-			_ = rm.DropSubscriptionLocal(ctx, "127.0.0.1", c.Port, subName(c.Name))
+			_ = rm.DropSubscriptionLocal(ctx, "127.0.0.1", c.Port, subName(c))
 		}
 		if conn, err := replica.ParseURL(c.PrimaryURL); err == nil {
 			if err := replica.EnsurePrimaryReachable(conn.Host, conn.Port, 5*time.Second); err == nil {
 				if err := rm.Ping(ctx, conn); err == nil {
-					_ = rm.DropPublication(ctx, conn, pubName(c.Name))
-					_ = rm.DropReplicationSlot(ctx, conn, subName(c.Name))
-					fmt.Printf("→ dropped publication %s + slot on primary\n", pubName(c.Name))
+					_ = rm.DropPublication(ctx, conn, pubName(c))
+					_ = rm.DropReplicationSlot(ctx, conn, subName(c))
+					fmt.Printf("→ dropped publication %s + slot on primary\n", pubName(c))
 				} else {
 					fmt.Printf("! could not drop publication on primary: %v\n", err)
 				}
@@ -439,7 +443,7 @@ func (s *Service) DeleteConnector(ctx context.Context, projectID, name string, f
 	_ = s.Storage.Destroy(c.DataDir)
 
 	// Remove synthetic replica-* branch row if present.
-	if br, err := s.Store.GetBranch(ctx, projectID, "replica-"+c.Name); err == nil {
+	if br, err := lookupReplicaRow(ctx, s.Store, projectID, c); err == nil {
 		_ = s.Store.DeleteBranch(ctx, br.ID)
 	}
 	if err := s.Store.DeleteConnector(ctx, c.ID); err != nil {
@@ -451,9 +455,9 @@ func (s *Service) DeleteConnector(ctx context.Context, projectID, name string, f
 
 func (s *Service) resolveConnector(ctx context.Context, projectID, name string) (meta.Connector, error) {
 	if name != "" {
-		return s.Store.GetConnectorByName(ctx, projectID, name)
+		return s.lookupConnector(ctx, projectID, name)
 	}
-	list, err := s.Store.ListConnectorsByProject(ctx, projectID)
+	list, err := s.visibleConnectors(ctx, projectID)
 	if err != nil {
 		return meta.Connector{}, err
 	}
@@ -477,10 +481,24 @@ func (s *Service) maxLagBytes() int64 {
 	return 16 * 1024 * 1024
 }
 
-func replicaComputeName(connectorName string) string { return "replica-" + connectorName }
-func pubName(connectorName string) string {
-	return "sprout_pub_" + strings.ReplaceAll(connectorName, "-", "_")
+func lookupReplicaRow(ctx context.Context, store meta.Store, projectID string, c meta.Connector) (meta.BranchRecord, error) {
+	if br, err := store.GetBranchByID(ctx, "replica-"+c.ID); err == nil {
+		return br, nil
+	}
+	return store.FindBranch(ctx, projectID, "replica-"+c.Name, "", c.CreatedBy)
 }
-func subName(connectorName string) string {
-	return "sprout_sub_" + strings.ReplaceAll(connectorName, "-", "_")
+
+func replicaSlotSuffix(c meta.Connector) string {
+	n := c.Name
+	if c.CreatedBy != "" {
+		n = c.Name + "_" + c.CreatedBy
+	}
+	return strings.ReplaceAll(n, "-", "_")
+}
+
+func pubName(c meta.Connector) string {
+	return "sprout_pub_" + replicaSlotSuffix(c)
+}
+func subName(c meta.Connector) string {
+	return "sprout_sub_" + replicaSlotSuffix(c)
 }

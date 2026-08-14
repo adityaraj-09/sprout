@@ -131,7 +131,7 @@ func TestReconcileConnectorDown(t *testing.T) {
 	comp := &fakeCompute{running: map[string]bool{dir: false}}
 	r := &Reconciler{Store: store, Compute: comp, Storage: storage.NewCopy(t.TempDir()), Root: t.TempDir()}
 	r.RunOnce(ctx)
-	c, _ := store.GetConnectorByName(ctx, proj.ID, "sup")
+	c, _ := store.GetConnectorByName(ctx, proj.ID, "sup", "")
 	if c.Status != meta.ConnectorCrashed {
 		t.Fatalf("connector status=%s want crashed", c.Status)
 	}

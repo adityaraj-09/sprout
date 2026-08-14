@@ -59,7 +59,7 @@ type Project struct {
 type Connector struct {
 	ID           string    `json:"id"`
 	ProjectID    string    `json:"project_id"`
-	Name         string    `json:"name"` // unique per project (e.g. supabase, staging)
+	Name         string    `json:"name"` // unique per project+owner (e.g. supabase)
 	PrimaryURL   string    `json:"primary_url"`
 	Mode         string    `json:"mode"` // physical | logical
 	Status       string    `json:"status"`
@@ -69,6 +69,7 @@ type Connector struct {
 	LastLSN      string    `json:"last_lsn,omitempty"`
 	LastLagBytes int64     `json:"last_lag_bytes"`
 	Password     string    `json:"-"`
+	CreatedBy    string    `json:"created_by,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -83,7 +84,7 @@ type Store interface {
 
 	PutBranch(ctx context.Context, b BranchRecord) error
 	GetBranch(ctx context.Context, projectID, name string) (BranchRecord, error)
-	FindBranch(ctx context.Context, projectID, name, from string) (BranchRecord, error)
+	FindBranch(ctx context.Context, projectID, name, from, owner string) (BranchRecord, error)
 	GetBranchByID(ctx context.Context, id string) (BranchRecord, error)
 	ListBranches(ctx context.Context, projectID string) ([]BranchRecord, error)
 	ListAllBranches(ctx context.Context) ([]BranchRecord, error)
@@ -92,7 +93,7 @@ type Store interface {
 
 	PutConnector(ctx context.Context, c Connector) error
 	GetConnectorByID(ctx context.Context, id string) (Connector, error)
-	GetConnectorByName(ctx context.Context, projectID, name string) (Connector, error)
+	GetConnectorByName(ctx context.Context, projectID, name, owner string) (Connector, error)
 	ListConnectors(ctx context.Context) ([]Connector, error)
 	ListConnectorsByProject(ctx context.Context, projectID string) ([]Connector, error)
 	UpdateConnector(ctx context.Context, c Connector) error

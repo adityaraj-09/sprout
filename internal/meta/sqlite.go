@@ -77,10 +77,12 @@ CREATE TABLE IF NOT EXISTS branches (
   source_lsn           TEXT NOT NULL DEFAULT '',
   source_connector     TEXT NOT NULL DEFAULT '',
   source_connector_id  TEXT NOT NULL DEFAULT '',
+  password             TEXT NOT NULL DEFAULT '',
+  created_by           TEXT NOT NULL DEFAULT '',
   created_at           TEXT NOT NULL,
   updated_at           TEXT NOT NULL,
   last_used_at         TEXT NOT NULL,
-  UNIQUE(project_id, source_connector, name)
+  UNIQUE(project_id, source_connector, name, created_by)
 );
 CREATE TABLE IF NOT EXISTS connectors (
   id              TEXT PRIMARY KEY,
@@ -94,9 +96,11 @@ CREATE TABLE IF NOT EXISTS connectors (
   error_message   TEXT NOT NULL DEFAULT '',
   last_lsn        TEXT NOT NULL DEFAULT '',
   last_lag_bytes  INTEGER NOT NULL DEFAULT 0,
+  password        TEXT NOT NULL DEFAULT '',
+  created_by      TEXT NOT NULL DEFAULT '',
   created_at      TEXT NOT NULL,
   updated_at      TEXT NOT NULL,
-  UNIQUE(project_id, name)
+  UNIQUE(project_id, name, created_by)
 );
 `)
 	if err != nil {
@@ -108,10 +112,13 @@ CREATE TABLE IF NOT EXISTS connectors (
 	if err := s.ensureColumn("connectors", "password", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	if err := s.ensureBranchNameUniquePerSource(); err != nil {
+	if err := s.ensureColumn("branches", "created_by", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	if err := s.ensureColumn("branches", "created_by", "TEXT NOT NULL DEFAULT ''"); err != nil {
+	if err := s.ensureColumn("connectors", "created_by", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureOwnedUniques(); err != nil {
 		return err
 	}
 	var n int
@@ -151,23 +158,9 @@ func (s *SQLiteStore) ensureColumn(table, column, decl string) error {
 	return err
 }
 
-// ensureBranchNameUniquePerSource rebuilds DBs created with UNIQUE(project_id, name)
-// so the same branch label can exist on two connectors (testdb from lab vs supabase).
-func (s *SQLiteStore) ensureBranchNameUniquePerSource() error {
-	var ddl string
-	err := s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='branches'`).Scan(&ddl)
-	if err != nil {
-		return err
-	}
-	if strings.Contains(ddl, "UNIQUE(project_id, source_connector, name)") {
-		return nil
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(`
+// ensureOwnedUniques rebuilds older DBs so two GitHub users can share a label.
+func (s *SQLiteStore) ensureOwnedUniques() error {
+	if err := s.rebuildTableIfUniqueMissing("branches", "UNIQUE(project_id, source_connector, name, created_by)", `
 CREATE TABLE branches_new (
   id                   TEXT PRIMARY KEY,
   project_id           TEXT NOT NULL,
@@ -185,30 +178,75 @@ CREATE TABLE branches_new (
   source_connector     TEXT NOT NULL DEFAULT '',
   source_connector_id  TEXT NOT NULL DEFAULT '',
   password             TEXT NOT NULL DEFAULT '',
+  created_by           TEXT NOT NULL DEFAULT '',
   created_at           TEXT NOT NULL,
   updated_at           TEXT NOT NULL,
   last_used_at         TEXT NOT NULL,
-  UNIQUE(project_id, source_connector, name)
-)`); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`
-INSERT INTO branches_new(
+  UNIQUE(project_id, source_connector, name, created_by)
+)`, `INSERT INTO branches_new(
   id, project_id, name, role, status, port, data_dir, snapshot_ref, container_id, compute,
   conn_string, error_message, source_lsn, source_connector, source_connector_id, password,
-  created_at, updated_at, last_used_at
+  created_by, created_at, updated_at, last_used_at
 )
 SELECT
   id, project_id, name, role, status, port, data_dir, snapshot_ref, container_id, compute,
   conn_string, error_message, source_lsn, source_connector, source_connector_id, password,
-  created_at, updated_at, last_used_at
+  created_by, created_at, updated_at, last_used_at
 FROM branches`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DROP TABLE branches`); err != nil {
+	return s.rebuildTableIfUniqueMissing("connectors", "UNIQUE(project_id, name, created_by)", `
+CREATE TABLE connectors_new (
+  id              TEXT PRIMARY KEY,
+  project_id      TEXT NOT NULL,
+  name            TEXT NOT NULL,
+  primary_url     TEXT NOT NULL DEFAULT '',
+  mode            TEXT NOT NULL DEFAULT 'physical',
+  status          TEXT NOT NULL,
+  data_dir        TEXT NOT NULL DEFAULT '',
+  port            INTEGER NOT NULL DEFAULT 0,
+  error_message   TEXT NOT NULL DEFAULT '',
+  last_lsn        TEXT NOT NULL DEFAULT '',
+  last_lag_bytes  INTEGER NOT NULL DEFAULT 0,
+  password        TEXT NOT NULL DEFAULT '',
+  created_by      TEXT NOT NULL DEFAULT '',
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  UNIQUE(project_id, name, created_by)
+)`, `INSERT INTO connectors_new(
+  id, project_id, name, primary_url, mode, status, data_dir, port, error_message,
+  last_lsn, last_lag_bytes, password, created_by, created_at, updated_at
+)
+SELECT
+  id, project_id, name, primary_url, mode, status, data_dir, port, error_message,
+  last_lsn, last_lag_bytes, password, created_by, created_at, updated_at
+FROM connectors`)
+}
+
+func (s *SQLiteStore) rebuildTableIfUniqueMissing(table, uniqueNeedle, createSQL, copySQL string) error {
+	var ddl string
+	err := s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&ddl)
+	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`ALTER TABLE branches_new RENAME TO branches`); err != nil {
+	if strings.Contains(ddl, uniqueNeedle) {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(createSQL); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(copySQL); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DROP TABLE ` + table); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`ALTER TABLE ` + table + `_new RENAME TO ` + table); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -493,15 +531,15 @@ func scanBranch(scanner interface {
 }
 
 func (s *SQLiteStore) GetBranch(ctx context.Context, projectID, name string) (BranchRecord, error) {
-	return s.FindBranch(ctx, projectID, name, "")
+	return s.FindBranch(ctx, projectID, name, "", "")
 }
 
-func (s *SQLiteStore) FindBranch(ctx context.Context, projectID, name, from string) (BranchRecord, error) {
+func (s *SQLiteStore) FindBranch(ctx context.Context, projectID, name, from, owner string) (BranchRecord, error) {
 	list, err := s.listBranchesQuery(ctx, `SELECT `+branchCols+` FROM branches WHERE project_id = ? AND name = ? ORDER BY source_connector`, projectID, name)
 	if err != nil {
 		return BranchRecord{}, err
 	}
-	return ResolveBranch(name, from, list)
+	return ResolveBranch(name, from, FilterBranchesByOwner(owner, list))
 }
 
 func (s *SQLiteStore) GetBranchByID(ctx context.Context, id string) (BranchRecord, error) {
@@ -554,14 +592,15 @@ func putConnectorTx(tx *sql.Tx, c Connector) error {
 	c.UpdatedAt = now
 	_, err := tx.Exec(`
 INSERT INTO connectors(
-  id, project_id, name, primary_url, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, password, created_at, updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  id, project_id, name, primary_url, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, password, created_by, created_at, updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   project_id=excluded.project_id, name=excluded.name, primary_url=excluded.primary_url, mode=excluded.mode,
   status=excluded.status, data_dir=excluded.data_dir, port=excluded.port, error_message=excluded.error_message,
-  last_lsn=excluded.last_lsn, last_lag_bytes=excluded.last_lag_bytes, password=excluded.password, updated_at=excluded.updated_at
+  last_lsn=excluded.last_lsn, last_lag_bytes=excluded.last_lag_bytes, password=excluded.password,
+  created_by=excluded.created_by, updated_at=excluded.updated_at
 `, c.ID, c.ProjectID, c.Name, c.PrimaryURL, c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes, c.Password,
-		formatTime(c.CreatedAt), formatTime(c.UpdatedAt))
+		c.CreatedBy, formatTime(c.CreatedAt), formatTime(c.UpdatedAt))
 	return err
 }
 
@@ -577,7 +616,8 @@ func (s *SQLiteStore) PutConnector(ctx context.Context, c Connector) error {
 
 	var existingID string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id FROM connectors WHERE project_id = ? AND name = ? AND id != ?`, c.ProjectID, c.Name, c.ID).
+		`SELECT id FROM connectors WHERE project_id = ? AND name = ? AND created_by = ? AND id != ?`,
+		c.ProjectID, c.Name, c.CreatedBy, c.ID).
 		Scan(&existingID)
 	if err == nil {
 		return fmt.Errorf("connector_exists: %q", c.Name)
@@ -588,18 +628,19 @@ func (s *SQLiteStore) PutConnector(ctx context.Context, c Connector) error {
 
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO connectors(
-  id, project_id, name, primary_url, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, password, created_at, updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  id, project_id, name, primary_url, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, password, created_by, created_at, updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   project_id=excluded.project_id, name=excluded.name, primary_url=excluded.primary_url, mode=excluded.mode,
   status=excluded.status, data_dir=excluded.data_dir, port=excluded.port, error_message=excluded.error_message,
-  last_lsn=excluded.last_lsn, last_lag_bytes=excluded.last_lag_bytes, password=excluded.password, updated_at=excluded.updated_at
+  last_lsn=excluded.last_lsn, last_lag_bytes=excluded.last_lag_bytes, password=excluded.password,
+  created_by=excluded.created_by, updated_at=excluded.updated_at
 `, c.ID, c.ProjectID, c.Name, c.PrimaryURL, c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes, c.Password,
-		formatTime(c.CreatedAt), formatTime(c.UpdatedAt))
+		c.CreatedBy, formatTime(c.CreatedAt), formatTime(c.UpdatedAt))
 	return err
 }
 
-const connectorCols = `id, project_id, name, primary_url, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, password, created_at, updated_at`
+const connectorCols = `id, project_id, name, primary_url, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, password, created_by, created_at, updated_at`
 
 func scanConnector(scanner interface {
 	Scan(dest ...any) error
@@ -608,7 +649,7 @@ func scanConnector(scanner interface {
 	var created, updated string
 	err := scanner.Scan(
 		&c.ID, &c.ProjectID, &c.Name, &c.PrimaryURL, &c.Mode, &c.Status, &c.DataDir, &c.Port,
-		&c.ErrorMessage, &c.LastLSN, &c.LastLagBytes, &c.Password, &created, &updated,
+		&c.ErrorMessage, &c.LastLSN, &c.LastLagBytes, &c.Password, &c.CreatedBy, &created, &updated,
 	)
 	if err != nil {
 		return Connector{}, err
@@ -627,13 +668,12 @@ func (s *SQLiteStore) GetConnectorByID(ctx context.Context, id string) (Connecto
 	return c, err
 }
 
-func (s *SQLiteStore) GetConnectorByName(ctx context.Context, projectID, name string) (Connector, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+connectorCols+` FROM connectors WHERE project_id = ? AND name = ?`, projectID, name)
-	c, err := scanConnector(row)
-	if err == sql.ErrNoRows {
-		return Connector{}, fmt.Errorf("connector not found: %s", name)
+func (s *SQLiteStore) GetConnectorByName(ctx context.Context, projectID, name, owner string) (Connector, error) {
+	list, err := s.listConnectorsQuery(ctx, `SELECT `+connectorCols+` FROM connectors WHERE project_id = ? AND name = ? ORDER BY created_by`, projectID, name)
+	if err != nil {
+		return Connector{}, err
 	}
-	return c, err
+	return resolveConnector(name, owner, list)
 }
 
 func (s *SQLiteStore) listConnectorsQuery(ctx context.Context, query string, args ...any) ([]Connector, error) {
@@ -665,10 +705,10 @@ func (s *SQLiteStore) UpdateConnector(ctx context.Context, c Connector) error {
 	c.UpdatedAt = time.Now().UTC()
 	res, err := s.db.ExecContext(ctx, `
 UPDATE connectors SET
-  project_id=?, name=?, primary_url=?, mode=?, status=?, data_dir=?, port=?, error_message=?, last_lsn=?, last_lag_bytes=?, password=?, updated_at=?
+  project_id=?, name=?, primary_url=?, mode=?, status=?, data_dir=?, port=?, error_message=?, last_lsn=?, last_lag_bytes=?, password=?, created_by=?, updated_at=?
 WHERE id=?`,
 		c.ProjectID, c.Name, c.PrimaryURL, c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes, c.Password,
-		formatTime(c.UpdatedAt), c.ID)
+		c.CreatedBy, formatTime(c.UpdatedAt), c.ID)
 	if err != nil {
 		return err
 	}
