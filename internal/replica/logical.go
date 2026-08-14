@@ -173,14 +173,8 @@ func (m *Manager) CreateSubscription(ctx context.Context, c Conn, localHost stri
 	conninfo := strings.Join(parts, " ")
 	conninfoSQL := strings.ReplaceAll(conninfo, "'", "''")
 
-	// DROP/CREATE must NOT share a transaction — create_slot cannot run in one.
 	drop := fmt.Sprintf(`DROP SUBSCRIPTION IF EXISTS %s;`, quoteIdent(subName))
-	create := fmt.Sprintf(`
-CREATE SUBSCRIPTION %s
-  CONNECTION '%s'
-  PUBLICATION %s
-  WITH (copy_data = true, create_slot = true, enabled = true);
-`, quoteIdent(subName), conninfoSQL, quoteIdent(pubName))
+	create := createSubscriptionSQL(subName, pubName, conninfoSQL)
 
 	run := func(sql string) error {
 		cmd := exec.CommandContext(ctx, m.Bins.Psql,
@@ -198,10 +192,28 @@ CREATE SUBSCRIPTION %s
 	_ = run(drop) // ignore if missing
 	// Wipe may have destroyed the subscriber without DROP SUBSCRIPTION → slot remains on primary.
 	_ = m.DropReplicationSlot(ctx, c, subName)
+
+	// Create the slot outside CREATE SUBSCRIPTION. PostgreSQL can otherwise wait
+	// indefinitely inside CREATE SUBSCRIPTION while establishing a consistent
+	// point, leaving the CLI unable to poll pg_subscription_rel.
+	fmt.Fprintf(os.Stderr, "→ creating publisher slot %s separately\n", subName)
+	if err := m.CreateReplicationSlot(ctx, c, subName); err != nil {
+		return fmt.Errorf("create publisher slot: %w", err)
+	}
 	if err := run(create); err != nil {
+		_ = m.DropReplicationSlot(ctx, c, subName)
 		return fmt.Errorf("create subscription: %w", err)
 	}
 	return nil
+}
+
+func createSubscriptionSQL(subName, pubName, conninfoSQL string) string {
+	return fmt.Sprintf(`
+CREATE SUBSCRIPTION %s
+  CONNECTION '%s'
+  PUBLICATION %s
+  WITH (copy_data = true, create_slot = false, slot_name = %s, enabled = true);
+`, quoteIdent(subName), conninfoSQL, quoteIdent(pubName), quoteLiteral(subName))
 }
 
 func (m *Manager) LogicalSyncStatus(ctx context.Context, localHost string, localPort int, subName string) (LogicalStatus, error) {

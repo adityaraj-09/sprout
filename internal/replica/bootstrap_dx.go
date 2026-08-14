@@ -114,6 +114,21 @@ func (m *Manager) DropPublication(ctx context.Context, c Conn, pubName string) e
 	return err
 }
 
+// CreateReplicationSlot creates the publisher slot before CREATE SUBSCRIPTION.
+// Keeping this in a separate publisher transaction avoids CREATE SUBSCRIPTION
+// blocking while it creates its own slot.
+func (m *Manager) CreateReplicationSlot(ctx context.Context, c Conn, slotName string) error {
+	sql := fmt.Sprintf(`
+SELECT slot_name, lsn
+FROM pg_create_logical_replication_slot(%s, 'pgoutput');
+`, quoteLiteral(slotName))
+	if _, err := m.psqlPrimary(ctx, c, sql); err != nil {
+		return fmt.Errorf("create replication slot %s: %w", slotName, err)
+	}
+	fmt.Fprintf(os.Stderr, "  created replication slot %s on publisher\n", slotName)
+	return nil
+}
+
 // DropReplicationSlot removes a logical slot on the primary left behind after a wiped subscriber.
 func (m *Manager) DropReplicationSlot(ctx context.Context, c Conn, slotName string) error {
 	sql := fmt.Sprintf(`
