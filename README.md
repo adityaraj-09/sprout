@@ -5,7 +5,8 @@ Open-source **Postgres CoW branching**: near-instant database branches plus prod
 Spin up independent Postgres instances that start as near-instant clones of a parent dataset (local demo or a replica of production), then diverge freely.
 
 **VM / Azure from scratch:** see [`SETUP.md`](SETUP.md) (ZFS disk, Postgres 17 tools, firewall, connect + branch).  
-**System diagrams:** [`ARCHITECTURE.md`](ARCHITECTURE.md).
+**System diagrams:** [`ARCHITECTURE.md`](ARCHITECTURE.md).  
+**LLM / agent skill:** [`SKILL.md`](SKILL.md) — how to drive the Sprout CLI against a hosted server.
 
 ---
 
@@ -106,6 +107,34 @@ psql postgresql://localhost:<port>/postgres -c 'SELECT count(*) FROM products;'
 ```
 
 If **one** connector exists, `--from` is optional. With **multiple**, `--from` is required.
+
+---
+
+## Team use (one hosted server)
+
+Sprout is a **shared lab**, not per-user accounts. One VM, one `SPROUT_TOKEN`, one project (`default`). Anyone with the token can create and delete any branch.
+
+**Do this:**
+
+1. One person (or a shared runbook) connects prod **once**:
+   `sprout connect --name=supabase --mode=logical 'postgresql://…'`
+   Do **not** have each developer run `connect` — that copies the whole database again.
+2. Each person on their laptop:
+
+```bash
+sprout config set api-url http://strido.fit:8080
+sprout config set token <the shared SPROUT_TOKEN>
+sprout branch create ar-login --from=supabase
+```
+
+3. Use **your** branch URL for app/`psql` testing:
+   `postgresql://sprout:<pass>@ar-login-supabase.strido.fit:5432/postgres`
+
+Name branches with initials or ticket (`ar-login`, `priya-42`) so they do not collide. The same name from the same connector is rejected; `ar-login` and `priya-login` can both exist.
+
+**Do not** point a second `sprout connect` at another person’s branch unless you intend to copy that branch into a new replica. For day-to-day work, the branch URL is an app database, not a connector source.
+
+Shared token = shared admin. Rotate `SPROUT_TOKEN` and restart `sprout-server` if someone leaves. Disk and ports are shared on the VM; delete unused branches.
 
 ---
 

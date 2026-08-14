@@ -243,11 +243,13 @@ sudo systemctl status sprout
 # Go CLI (after make build) or npm:
 npm install -g sproutdb-cli
 
-sprout config set api-url http://YOUR_PUBLIC_IP:8080
+sprout config set api-url http://strido.fit:8080   # or YOUR_PUBLIC_IP:8080
 sprout config set token change-me-long-secret
 sprout health
 sprout doctor
 ```
+
+Every teammate uses the **same** API URL + token. Connect prod **once** on the server (`--name=supabase`). Each person then `sprout branch create <initials>-<work> --from=supabase` and uses that branch’s `:5432` URL. See README “Team use” and [`SKILL.md`](SKILL.md) for the CLI agent skill.
 
 ---
 

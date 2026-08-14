@@ -5,7 +5,8 @@ Node.js **CLI + SDK** for [Sprout](https://github.com/adityaraj-09/sprout) — t
 Installs the **`sprout`** binary on your PATH.
 
 **Repo:** [https://github.com/adityaraj-09/sprout](https://github.com/adityaraj-09/sprout)  
-**npm:** [https://www.npmjs.com/package/sproutdb-cli](https://www.npmjs.com/package/sproutdb-cli)
+**npm:** [https://www.npmjs.com/package/sproutdb-cli](https://www.npmjs.com/package/sproutdb-cli)  
+**Agent skill:** [`SKILL.md`](../SKILL.md) in the Sprout repo (commands, hosted URLs, `--from=`).
 
 ## Requirements
 
@@ -59,8 +60,9 @@ sprout branch create my-feature --from=prod
 #   psql "postgresql://sprout@host:PORT/postgres"
 
 sprout branch list
-sprout branch diff my-feature
-sprout branch delete my-feature
+sprout branch get my-feature --from=prod
+sprout branch diff my-feature --from=prod
+sprout branch delete my-feature --from=prod
 
 sprout connector list
 sprout connector delete prod
@@ -104,7 +106,7 @@ await sprout.doctor();
 const branch = await sprout.createBranch("preview", "prod");
 console.log(branch.connection_string, branch.psql);
 
-const diff = await sprout.diffBranch("preview");
+const diff = await sprout.diffBranch("preview", "prod");
 console.log(diff.summary);
 ```
 
@@ -125,7 +127,8 @@ sprout status [name]
 sprout connector list | delete [--force] | suspend | resume <name>
 sprout health
 sprout branch create <name> [--from=<connector|main>]
-sprout branch list | get | diff | reset | delete | suspend | resume <name>
+sprout branch list
+sprout branch get|diff|reset|delete|suspend|resume <name> [--from=<connector>]
 sprout config set|get|unset|path ...
 ```
 

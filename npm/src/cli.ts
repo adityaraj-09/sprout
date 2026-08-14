@@ -25,7 +25,7 @@ Commands:
   sprout health
   sprout branch create <name> [--from=<connector|main>]
   sprout branch list
-  sprout branch get|diff|reset|delete|suspend|resume <name>
+  sprout branch get|diff|reset|delete|suspend|resume <name> [--from=<connector>]
 
 Config (persisted in ~/.sprout/config.json):
   sprout config set api-url <url>
@@ -108,6 +108,10 @@ function takeGlobals(argv: string[]): {
 
 function positional(args: string[]): string[] {
   return args.filter((a) => !a.startsWith("-"));
+}
+
+function parseNameFrom(args: string[]): { name?: string; from?: string } {
+  return { name: positional(args)[0], from: flag(args, "from") };
 }
 
 function handleConfig(argv: string[]): void {
@@ -333,44 +337,56 @@ async function main(): Promise<void> {
             break;
           }
           case "get": {
-            const name = argv[2];
-            if (!name) usage();
-            console.log(JSON.stringify(await client.getBranch(name), null, 2));
+            const { name, from } = parseNameFrom(argv.slice(2));
+            if (!name) {
+              fatal(new Error("usage: sprout branch get <name> [--from=<connector>]"));
+            }
+            console.log(JSON.stringify(await client.getBranch(name, from), null, 2));
             break;
           }
           case "diff": {
-            const name = argv[2];
-            if (!name) usage();
-            const diff = await client.diffBranch(name);
+            const { name, from } = parseNameFrom(argv.slice(2));
+            if (!name) {
+              fatal(new Error("usage: sprout branch diff <name> [--from=<connector>]"));
+            }
+            const diff = await client.diffBranch(name, from);
             console.log(diff.summary);
             console.log(JSON.stringify(diff, null, 2));
             break;
           }
           case "reset": {
-            const name = argv[2];
-            if (!name) usage();
-            const rec = await client.resetBranch(name);
+            const { name, from } = parseNameFrom(argv.slice(2));
+            if (!name) {
+              fatal(new Error("usage: sprout branch reset <name> [--from=<connector>]"));
+            }
+            const rec = await client.resetBranch(name, from);
             console.log(`✓ reset ${rec.name}\n  ${rec.connection_string}`);
             break;
           }
           case "delete": {
-            const name = argv[2];
-            if (!name) usage();
-            await client.deleteBranch(name);
+            const { name, from } = parseNameFrom(argv.slice(2));
+            if (!name) {
+              fatal(new Error("usage: sprout branch delete <name> [--from=<connector>]"));
+            }
+            await client.deleteBranch(name, from);
             console.log(`✓ deleted ${name}`);
             break;
           }
           case "suspend": {
-            const name = argv[2];
-            if (!name) usage();
-            const rec = await client.suspendBranch(name);
+            const { name, from } = parseNameFrom(argv.slice(2));
+            if (!name) {
+              fatal(new Error("usage: sprout branch suspend <name> [--from=<connector>]"));
+            }
+            const rec = await client.suspendBranch(name, from);
             console.log(`✓ suspended ${rec.name} (status=${rec.status})`);
             break;
           }
           case "resume": {
-            const name = argv[2];
-            if (!name) usage();
-            const rec = await client.resumeBranch(name);
+            const { name, from } = parseNameFrom(argv.slice(2));
+            if (!name) {
+              fatal(new Error("usage: sprout branch resume <name> [--from=<connector>]"));
+            }
+            const rec = await client.resumeBranch(name, from);
             console.log(`✓ resumed ${rec.name}\n  ${rec.connection_string}`);
             break;
           }
