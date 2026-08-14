@@ -249,7 +249,7 @@ sprout health
 sprout doctor
 ```
 
-Every teammate uses the **same** API URL + token. Connect prod **once** on the server (`--name=supabase`). Each person then `sprout branch create <initials>-<work> --from=supabase` and uses that branch’s `:5432` URL. See README “Team use”.
+Every teammate uses the **same** API URL + token. Connect prod **once** on the server (`--name=supabase`). Each person then `sprout branch create <initials>-<work> --from=supabase` and uses that branch’s `:5432` URL. See README “Team use” and [`SKILL.md`](SKILL.md) for the CLI agent skill.
 
 ---
 

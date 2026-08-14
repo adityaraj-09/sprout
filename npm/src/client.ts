@@ -116,50 +116,38 @@ export class SproutClient {
     return this.request("POST", `/v1/projects/${this.project}/branches`, body);
   }
 
-  async diffBranch(name: string): Promise<BranchDiff> {
-    return this.request(
-      "GET",
-      `/v1/projects/${this.project}/branches/${encodeURIComponent(name)}/diff`,
-    );
+  async diffBranch(name: string, from?: string): Promise<BranchDiff> {
+    return this.request("GET", this.branchPath(name, "/diff", from));
   }
 
   async listBranches(): Promise<BranchRecord[]> {
     return this.request("GET", `/v1/projects/${this.project}/branches`);
   }
 
-  async getBranch(name: string): Promise<BranchRecord> {
-    return this.request(
-      "GET",
-      `/v1/projects/${this.project}/branches/${encodeURIComponent(name)}`,
-    );
+  async getBranch(name: string, from?: string): Promise<BranchRecord> {
+    return this.request("GET", this.branchPath(name, "", from));
   }
 
-  async deleteBranch(name: string): Promise<void> {
-    await this.request(
-      "DELETE",
-      `/v1/projects/${this.project}/branches/${encodeURIComponent(name)}`,
-    );
+  async deleteBranch(name: string, from?: string): Promise<void> {
+    await this.request("DELETE", this.branchPath(name, "", from));
   }
 
-  async resetBranch(name: string): Promise<BranchRecord> {
-    return this.request(
-      "POST",
-      `/v1/projects/${this.project}/branches/${encodeURIComponent(name)}/reset`,
-    );
+  async resetBranch(name: string, from?: string): Promise<BranchRecord> {
+    return this.request("POST", this.branchPath(name, "/reset", from));
   }
 
-  async suspendBranch(name: string): Promise<BranchRecord> {
-    return this.request(
-      "POST",
-      `/v1/projects/${this.project}/branches/${encodeURIComponent(name)}/suspend`,
-    );
+  async suspendBranch(name: string, from?: string): Promise<BranchRecord> {
+    return this.request("POST", this.branchPath(name, "/suspend", from));
   }
 
-  async resumeBranch(name: string): Promise<BranchRecord> {
-    return this.request(
-      "POST",
-      `/v1/projects/${this.project}/branches/${encodeURIComponent(name)}/resume`,
-    );
+  async resumeBranch(name: string, from?: string): Promise<BranchRecord> {
+    return this.request("POST", this.branchPath(name, "/resume", from));
+  }
+
+  private branchPath(name: string, extra = "", from?: string): string {
+    let path = `/v1/projects/${this.project}/branches/${encodeURIComponent(name)}${extra}`;
+    if (from) path += `?from=${encodeURIComponent(from)}`;
+    return path;
   }
 
   private async request<T = unknown>(

@@ -5,7 +5,8 @@ Open-source **Postgres CoW branching**: near-instant database branches plus prod
 Spin up independent Postgres instances that start as near-instant clones of a parent dataset (local demo or a replica of production), then diverge freely.
 
 **VM / Azure from scratch:** see [`SETUP.md`](SETUP.md) (ZFS disk, Postgres 17 tools, firewall, connect + branch).  
-**System diagrams:** [`ARCHITECTURE.md`](ARCHITECTURE.md).
+**System diagrams:** [`ARCHITECTURE.md`](ARCHITECTURE.md).  
+**LLM / agent skill:** [`SKILL.md`](SKILL.md) — how to drive the Sprout CLI against a hosted server.
 
 ---
 
