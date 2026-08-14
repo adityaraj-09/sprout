@@ -232,27 +232,7 @@ CREATE SUBSCRIPTION %s
 }
 
 func (m *Manager) LogicalSyncStatus(ctx context.Context, localHost string, localPort int, subName string) (LogicalStatus, error) {
-	sql := fmt.Sprintf(`
-SELECT
-  (SELECT count(*) FROM pg_subscription_rel sr
-     JOIN pg_subscription s ON s.oid = sr.srsubid
-    WHERE s.subname = %s),
-  (SELECT count(*) FROM pg_subscription_rel sr
-     JOIN pg_subscription s ON s.oid = sr.srsubid
-    WHERE s.subname = %s AND sr.srsubstate = 'r'),
-  COALESCE((SELECT received_lsn::text FROM pg_stat_subscription WHERE subname = %s LIMIT 1), ''),
-  COALESCE((SELECT subenabled::text FROM pg_subscription WHERE subname = %s), 'f'),
-  COALESCE((
-    SELECT string_agg(srsubstate || ':' || cnt, ';')
-    FROM (
-      SELECT sr.srsubstate, count(*)::text AS cnt
-      FROM pg_subscription_rel sr
-      JOIN pg_subscription s ON s.oid = sr.srsubid
-      WHERE s.subname = %s
-      GROUP BY sr.srsubstate
-    ) x
-  ), '');
-`, quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName))
+	sql := logicalSyncStatusSQL(subName)
 
 	cmd := exec.CommandContext(ctx, m.Bins.Psql,
 		"-h", localHost, "-p", strconv.Itoa(localPort), "-d", "postgres",
@@ -282,6 +262,30 @@ SELECT
 	}, nil
 }
 
+func logicalSyncStatusSQL(subName string) string {
+	return fmt.Sprintf(`
+SELECT
+  (SELECT count(*) FROM pg_subscription_rel sr
+     JOIN pg_subscription s ON s.oid = sr.srsubid
+    WHERE s.subname = %s),
+  (SELECT count(*) FROM pg_subscription_rel sr
+     JOIN pg_subscription s ON s.oid = sr.srsubid
+    WHERE s.subname = %s AND sr.srsubstate = 'r'),
+  COALESCE((SELECT received_lsn::text FROM pg_stat_subscription WHERE subname = %s LIMIT 1), ''),
+  COALESCE((SELECT subenabled::text FROM pg_subscription WHERE subname = %s), 'f'),
+  COALESCE((
+    SELECT string_agg(srsubstate::text || ':' || cnt, ';')
+    FROM (
+      SELECT sr.srsubstate, count(*)::text AS cnt
+      FROM pg_subscription_rel sr
+      JOIN pg_subscription s ON s.oid = sr.srsubid
+      WHERE s.subname = %s
+      GROUP BY sr.srsubstate
+    ) x
+  ), '');
+`, quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName))
+}
+
 func pgBool(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "t", "true", "on", "1", "yes":
@@ -294,6 +298,8 @@ func (m *Manager) WaitLogicalSync(ctx context.Context, localHost string, localPo
 	deadline := time.Now().Add(timeout)
 	started := time.Now()
 	var last LogicalStatus
+	var lastErr error
+	consecutiveErrors := 0
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
@@ -302,6 +308,8 @@ func (m *Manager) WaitLogicalSync(ctx context.Context, localHost string, localPo
 		}
 		st, err := m.LogicalSyncStatus(ctx, localHost, localPort, subName)
 		if err == nil {
+			lastErr = nil
+			consecutiveErrors = 0
 			last = st
 			pct := 0
 			eta := "?"
@@ -334,8 +342,17 @@ func (m *Manager) WaitLogicalSync(ctx context.Context, localHost string, localPo
 					}
 				}
 			}
+		} else {
+			lastErr = err
+			consecutiveErrors++
+			if consecutiveErrors >= 5 {
+				return last, fmt.Errorf("logical sync status failed repeatedly: %w", lastErr)
+			}
 		}
 		time.Sleep(500 * time.Millisecond)
+	}
+	if lastErr != nil {
+		return last, fmt.Errorf("logical sync status: %w", lastErr)
 	}
 	return last, fmt.Errorf("logical sync not ready within %s (ready=%d/%d states=%s)", timeout, last.TableReady, last.TableTotal, last.RelStates)
 }

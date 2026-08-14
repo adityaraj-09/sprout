@@ -53,3 +53,10 @@ func TestCreateSubscriptionUsesPrecreatedSlot(t *testing.T) {
 		}
 	}
 }
+
+func TestLogicalStatusCastsInternalCharState(t *testing.T) {
+	sql := logicalSyncStatusSQL("sprout_sub_alice")
+	if !strings.Contains(sql, "srsubstate::text || ':' || cnt") {
+		t.Fatalf("internal char state must be cast before concatenation:\n%s", sql)
+	}
+}
