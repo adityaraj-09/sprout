@@ -13,7 +13,10 @@ import (
 	"github.com/adityaraj/sprout/internal/storage"
 )
 
-const stuckAfter = 2 * time.Minute
+const (
+	defaultStuckAfter          = 2 * time.Minute
+	defaultBootstrapStuckAfter = 20 * time.Minute
+)
 
 // Reconciler aligns metadata with real compute/storage after crashes.
 type Reconciler struct {
@@ -22,6 +25,23 @@ type Reconciler struct {
 	Storage    storage.Provider
 	Root       string
 	AutoResume bool
+
+	StuckAfter          time.Duration // branches / dead bootstrap; 0 = 2m
+	BootstrapStuckAfter time.Duration // live logical copy; 0 = 20m
+}
+
+func (r *Reconciler) stuckAfter() time.Duration {
+	if r.StuckAfter > 0 {
+		return r.StuckAfter
+	}
+	return defaultStuckAfter
+}
+
+func (r *Reconciler) bootstrapStuckAfter() time.Duration {
+	if r.BootstrapStuckAfter > 0 {
+		return r.BootstrapStuckAfter
+	}
+	return defaultBootstrapStuckAfter
 }
 
 func (r *Reconciler) logPath(name string) string {
@@ -69,7 +89,7 @@ func (r *Reconciler) fixBranch(ctx context.Context, b meta.BranchRecord) {
 
 	switch b.Status {
 	case meta.StatusCreating, meta.StatusResetting, meta.StatusDeleting:
-		if age > stuckAfter {
+		if age > r.stuckAfter() {
 			fmt.Fprintf(os.Stderr, "reconcile: %s stuck in %s — marking error + cleanup\n", b.Name, b.Status)
 			_ = r.Compute.Stop(ctx, h)
 			if b.DataDir != "" && b.Role == "branch" {
@@ -161,7 +181,13 @@ func (r *Reconciler) fixConnector(ctx context.Context, c meta.Connector) {
 
 	switch c.Status {
 	case meta.ConnectorBootstrapping:
-		if age > stuckAfter {
+		// Logical copy_data often runs longer than 2m. Never kill a live subscriber
+		// until well past WaitLogicalSync (10m).
+		limit := r.stuckAfter()
+		if running {
+			limit = r.bootstrapStuckAfter()
+		}
+		if age > limit {
 			fmt.Fprintf(os.Stderr, "reconcile: connector %s stuck bootstrapping — marking error\n", c.Name)
 			_ = r.Compute.Stop(ctx, h)
 			r.markConnector(ctx, c, meta.ConnectorError, "reconcile: bootstrap timed out")

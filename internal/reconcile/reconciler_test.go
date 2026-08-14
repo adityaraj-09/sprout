@@ -162,3 +162,58 @@ func TestReconcileSkipsReplicaRoleInBranchLoop(t *testing.T) {
 		t.Fatalf("replica role should be ignored by branch reconciler, got %s", br.Status)
 	}
 }
+
+func TestReconcileSkipsLiveLogicalBootstrap(t *testing.T) {
+	ctx := context.Background()
+	store, err := meta.OpenFile(filepath.Join(t.TempDir(), "control.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	proj, _ := store.EnsureProject(ctx, "default")
+	dir := t.TempDir()
+	_ = store.PutConnector(ctx, meta.Connector{
+		ID: "c1", ProjectID: proj.ID, Name: "check", Mode: "logical",
+		Status: meta.ConnectorBootstrapping, Port: 55449, DataDir: dir,
+	})
+	comp := &fakeCompute{running: map[string]bool{dir: true}}
+	r := &Reconciler{
+		Store: store, Compute: comp, Storage: storage.NewCopy(t.TempDir()), Root: t.TempDir(),
+		StuckAfter: time.Nanosecond,
+	}
+	time.Sleep(2 * time.Millisecond)
+	r.RunOnce(ctx)
+	c, _ := store.GetConnectorByName(ctx, proj.ID, "check", "")
+	if c.Status != meta.ConnectorBootstrapping {
+		t.Fatalf("live bootstrap should keep going, got %s", c.Status)
+	}
+	if !comp.running[dir] {
+		t.Fatal("must not stop postgres during logical copy")
+	}
+}
+
+func TestReconcileDeadBootstrapBecomesError(t *testing.T) {
+	ctx := context.Background()
+	store, err := meta.OpenFile(filepath.Join(t.TempDir(), "control.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	proj, _ := store.EnsureProject(ctx, "default")
+	dir := t.TempDir()
+	_ = store.PutConnector(ctx, meta.Connector{
+		ID: "c1", ProjectID: proj.ID, Name: "check", Mode: "logical",
+		Status: meta.ConnectorBootstrapping, Port: 55449, DataDir: dir,
+	})
+	comp := &fakeCompute{running: map[string]bool{dir: false}}
+	r := &Reconciler{
+		Store: store, Compute: comp, Storage: storage.NewCopy(t.TempDir()), Root: t.TempDir(),
+		StuckAfter: time.Nanosecond,
+	}
+	time.Sleep(2 * time.Millisecond)
+	r.RunOnce(ctx)
+	c, _ := store.GetConnectorByName(ctx, proj.ID, "check", "")
+	if c.Status != meta.ConnectorError {
+		t.Fatalf("dead bootstrap want error, got %s", c.Status)
+	}
+}
