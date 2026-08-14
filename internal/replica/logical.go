@@ -207,17 +207,17 @@ func (m *Manager) CreateSubscription(ctx context.Context, c Conn, localHost stri
 		_ = m.DropReplicationSlot(ctx, c, subName)
 		return fmt.Errorf("create subscription: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "→ refreshing publication tables\n")
-	if err := run(refresh); err != nil {
-		_ = m.DropSubscriptionLocal(ctx, localHost, localPort, subName)
-		_ = m.DropReplicationSlot(ctx, c, subName)
-		return fmt.Errorf("refresh subscription: %w", err)
-	}
 	fmt.Fprintf(os.Stderr, "→ enabling subscription\n")
 	if err := run(enable); err != nil {
 		_ = m.DropSubscriptionLocal(ctx, localHost, localPort, subName)
 		_ = m.DropReplicationSlot(ctx, c, subName)
 		return fmt.Errorf("enable subscription: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "→ refreshing publication tables\n")
+	if err := run(refresh); err != nil {
+		_ = m.DropSubscriptionLocal(ctx, localHost, localPort, subName)
+		_ = m.DropReplicationSlot(ctx, c, subName)
+		return fmt.Errorf("refresh subscription: %w", err)
 	}
 	return nil
 }
