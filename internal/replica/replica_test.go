@@ -40,15 +40,16 @@ func TestCreateSubscriptionUsesPrecreatedSlot(t *testing.T) {
 	for _, want := range []string{
 		`CREATE SUBSCRIPTION "sprout_sub_alice"`,
 		`PUBLICATION "sprout_pub_alice"`,
-		`create_slot = false`,
+		`connect = false`,
 		`slot_name = 'sprout_sub_alice'`,
-		`copy_data = true`,
 	} {
 		if !strings.Contains(sql, want) {
 			t.Fatalf("SQL missing %q:\n%s", want, sql)
 		}
 	}
-	if strings.Contains(sql, "create_slot = true") {
-		t.Fatalf("subscription must not create its own slot:\n%s", sql)
+	for _, forbidden := range []string{"create_slot = true", "enabled = true", "copy_data = true"} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("offline subscription contains %q:\n%s", forbidden, sql)
+		}
 	}
 }

@@ -175,6 +175,8 @@ func (m *Manager) CreateSubscription(ctx context.Context, c Conn, localHost stri
 
 	drop := fmt.Sprintf(`DROP SUBSCRIPTION IF EXISTS %s;`, quoteIdent(subName))
 	create := createSubscriptionSQL(subName, pubName, conninfoSQL)
+	refresh := fmt.Sprintf(`ALTER SUBSCRIPTION %s REFRESH PUBLICATION WITH (copy_data = true);`, quoteIdent(subName))
+	enable := fmt.Sprintf(`ALTER SUBSCRIPTION %s ENABLE;`, quoteIdent(subName))
 
 	run := func(sql string) error {
 		cmd := exec.CommandContext(ctx, m.Bins.Psql,
@@ -188,7 +190,7 @@ func (m *Manager) CreateSubscription(ctx context.Context, c Conn, localHost stri
 		return nil
 	}
 
-	fmt.Fprintf(os.Stderr, "→ CREATE SUBSCRIPTION %s (initial copy_data; can take a while)\n", subName)
+	fmt.Fprintf(os.Stderr, "→ prepare subscription %s (initial copy_data; can take a while)\n", subName)
 	_ = run(drop) // ignore if missing
 	// Wipe may have destroyed the subscriber without DROP SUBSCRIPTION → slot remains on primary.
 	_ = m.DropReplicationSlot(ctx, c, subName)
@@ -200,9 +202,22 @@ func (m *Manager) CreateSubscription(ctx context.Context, c Conn, localHost stri
 	if err := m.CreateReplicationSlot(ctx, c, subName); err != nil {
 		return fmt.Errorf("create publisher slot: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, "→ creating local subscription catalog (offline)\n")
 	if err := run(create); err != nil {
 		_ = m.DropReplicationSlot(ctx, c, subName)
 		return fmt.Errorf("create subscription: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "→ refreshing publication tables\n")
+	if err := run(refresh); err != nil {
+		_ = m.DropSubscriptionLocal(ctx, localHost, localPort, subName)
+		_ = m.DropReplicationSlot(ctx, c, subName)
+		return fmt.Errorf("refresh subscription: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "→ enabling subscription\n")
+	if err := run(enable); err != nil {
+		_ = m.DropSubscriptionLocal(ctx, localHost, localPort, subName)
+		_ = m.DropReplicationSlot(ctx, c, subName)
+		return fmt.Errorf("enable subscription: %w", err)
 	}
 	return nil
 }
@@ -212,7 +227,7 @@ func createSubscriptionSQL(subName, pubName, conninfoSQL string) string {
 CREATE SUBSCRIPTION %s
   CONNECTION '%s'
   PUBLICATION %s
-  WITH (copy_data = true, create_slot = false, slot_name = %s, enabled = true);
+  WITH (connect = false, slot_name = %s);
 `, quoteIdent(subName), conninfoSQL, quoteIdent(pubName), quoteLiteral(subName))
 }
 
