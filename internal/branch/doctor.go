@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/adityaraj/sprout/internal/auth"
 	"github.com/adityaraj/sprout/internal/postgres"
 )
 
@@ -134,6 +135,23 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 	if list, err := s.Store.ListConnectors(ctx); err == nil {
 		add(DoctorCheck{Name: "connectors", OK: true, Level: "info",
 			Detail: fmt.Sprintf("%d configured", len(list))})
+	}
+
+	// GitHub device-flow login
+	gh := auth.FromEnv()
+	switch {
+	case !gh.Enabled():
+		add(DoctorCheck{Name: "github_auth", OK: true, Level: "info",
+			Detail: "off (shared SPROUT_TOKEN only)",
+			Hint:   "set SPROUT_GITHUB_CLIENT_ID plus SPROUT_GITHUB_USERS or SPROUT_GITHUB_ORGS for per-user login"})
+	case !gh.Ready():
+		add(DoctorCheck{Name: "github_auth", OK: false, Level: "error",
+			Detail: "SPROUT_GITHUB_CLIENT_ID is set but no allowlist",
+			Hint:   "set SPROUT_GITHUB_USERS=alice,bob and/or SPROUT_GITHUB_ORGS=my-org — a client id alone lets any GitHub user in"})
+	default:
+		add(DoctorCheck{Name: "github_auth", OK: true, Level: "info",
+			Detail: fmt.Sprintf("device flow client_id set; users=%d orgs=%d host=%s", len(gh.Users), len(gh.Orgs), gh.HostURL()),
+			Hint:   "Enable Device Flow on the GitHub OAuth App; teammates run sprout login"})
 	}
 
 	// OS hint

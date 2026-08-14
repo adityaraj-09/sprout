@@ -10,6 +10,7 @@ import {
   SproutError,
 } from "./types.js";
 import { loadConfig } from "./config.js";
+import type { GitHubAuthMeta } from "./github.js";
 
 export class SproutClient {
   readonly baseUrl: string;
@@ -38,6 +39,14 @@ export class SproutClient {
 
   async doctor(): Promise<DoctorReport> {
     return this.request("GET", "/v1/doctor");
+  }
+
+  async githubAuth(): Promise<GitHubAuthMeta> {
+    return this.request("GET", "/v1/auth/github");
+  }
+
+  async whoami(): Promise<{ kind: string; login: string; id?: number }> {
+    return this.request("GET", "/v1/whoami");
   }
 
   async init(): Promise<Project> {

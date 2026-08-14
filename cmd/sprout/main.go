@@ -25,6 +25,18 @@ func main() {
 	c := &client{base: strings.TrimRight(cfg.ServerURL, "/"), token: cfg.Token, http: &http.Client{Timeout: 60 * time.Minute}}
 
 	switch os.Args[1] {
+	case "login":
+		if err := runLogin(c.base); err != nil {
+			fatal(err)
+		}
+	case "logout":
+		if err := runLogout(); err != nil {
+			fatal(err)
+		}
+	case "whoami":
+		if err := runWhoAmI(c); err != nil {
+			fatal(err)
+		}
 	case "init":
 		var proj meta.Project
 		if err := c.do("POST", "/v1/init", nil, &proj); err != nil {
@@ -440,6 +452,9 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `sprout — Phase 2/3 CLI (talks to sprout-server)
 
 Usage:
+  sprout login              GitHub device flow (opens a browser)
+  sprout logout
+  sprout whoami
   sprout doctor
   sprout init
   sprout connect [--name=<id>] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
@@ -469,9 +484,17 @@ Usage:
   when the name is ambiguous.
 
 Env:
-  SPROUT_SERVER  default http://127.0.0.1:8080
-  SPROUT_TOKEN   default dev-token
+  SPROUT_SERVER  default http://127.0.0.1:8080 (or apiUrl in ~/.sprout/config.json)
+  SPROUT_TOKEN   overrides the token saved by sprout login
+  SPROUT_CONFIG  path to config.json (default ~/.sprout/config.json)
   SPROUT_DB_USER default sprout (advertised in connection strings)
+
+GitHub login (server):
+  SPROUT_GITHUB_CLIENT_ID   OAuth App client ID (enable Device Flow on the app)
+  SPROUT_GITHUB_USERS       comma-separated GitHub logins
+  SPROUT_GITHUB_ORGS        comma-separated orgs (any membership is enough)
+  SPROUT_GITHUB_HOST        default https://github.com
+  SPROUT_GITHUB_API         default https://api.github.com
 `)
 }
 

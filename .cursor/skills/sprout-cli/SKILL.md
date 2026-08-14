@@ -15,33 +15,32 @@ Two clients exist:
 
 | Client | Config | Notes |
 |--------|--------|--------|
-| Go `./bin/sprout` (this repo) | `SPROUT_SERVER`, `SPROUT_TOKEN` | No `sprout config` command |
-| npm `sproutdb-cli` | `sprout config set` → `~/.sprout/config.json` | Same commands + `config` |
+| Go `./bin/sprout` (this repo) | `~/.sprout/config.json` + `SPROUT_SERVER` / `SPROUT_TOKEN` | `sprout login` writes the same file as npm |
+| npm `sproutdb-cli` | `sprout config set` / `sprout login` → `~/.sprout/config.json` | Same commands + `config` |
 
 Prefer whichever `sprout` is on PATH. For a hosted VM, point the CLI at that server; do not start a second server.
 
 ## Point the CLI at the server
 
-npm (persists):
-
 ```bash
 sprout config set api-url http://strido.fit:8080
-sprout config set token <SPROUT_TOKEN>
+sprout login          # GitHub device flow (opens a browser)
+sprout whoami
 sprout health
 sprout doctor
 ```
 
-Go binary / env:
+Go binary without login file:
 
 ```bash
 export SPROUT_SERVER=http://strido.fit:8080
-export SPROUT_TOKEN=<SPROUT_TOKEN>
+export SPROUT_TOKEN=<machine token>
 sprout health
 ```
 
 One-shot (npm): `sprout --api-url=http://strido.fit:8080 --token=secret health`
 
-Auth is `Authorization: Bearer <token>`. One shared token for the whole server (no per-user accounts). `/healthz` is unauthenticated.
+Auth is `Authorization: Bearer <token>`. Humans use a **GitHub user token** from `sprout login`. `/healthz` and `GET /v1/auth/github` are unauthenticated. The shared `SPROUT_TOKEN` still works for scripts. Server must set `SPROUT_GITHUB_CLIENT_ID` plus `SPROUT_GITHUB_USERS` or `SPROUT_GITHUB_ORGS`.
 
 ## What to do (typical)
 
@@ -105,6 +104,9 @@ sprout branch create alice --from=main
 ```text
 sprout doctor
 sprout health
+sprout login
+sprout logout
+sprout whoami
 sprout init
 sprout connect [--name=<id>] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <postgresql-url>
 sprout status [connector-name]
@@ -144,7 +146,8 @@ Writes on a branch stay on that branch. `branch reset` re-clones from the snapsh
 
 | Symptom | Do |
 |---------|-----|
-| `unauthorized` | Token mismatch with server `SPROUT_TOKEN` |
+| `unauthorized` | Token mismatch — run `sprout login` or check `SPROUT_TOKEN` |
+| `forbidden` / `github_user_not_allowed` | GitHub user is not on `SPROUT_GITHUB_USERS` / orgs |
 | `ambiguous_branch` | Pass `--from=<connector>` |
 | `branch_exists` | Pick another name |
 | `connector_has_branches` | Delete/suspend children or `--force` |
@@ -160,6 +163,8 @@ Never commit connection strings or tokens. Never dump `~/.sprout/config.json` in
 Base: `SPROUT_SERVER`. Header: `Authorization: Bearer <token>`. Project path is `default`.
 
 - `GET /healthz`
+- `GET /v1/auth/github` (public; client_id + host for device flow)
+- `GET /v1/whoami`
 - `GET /v1/doctor`
 - `POST /v1/init`
 - `GET /v1/connectors`

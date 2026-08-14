@@ -43,6 +43,7 @@ type BranchRecord struct {
 	SourceConnector   string    `json:"source_connector,omitempty"` // connector name used as parent
 	SourceConnectorID string    `json:"source_connector_id,omitempty"`
 	Password          string    `json:"-"`
+	CreatedBy         string    `json:"created_by,omitempty"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 	LastUsedAt        time.Time `json:"last_used_at"`

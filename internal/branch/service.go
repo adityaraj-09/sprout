@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/adityaraj/sprout/internal/auth"
 	"github.com/adityaraj/sprout/internal/compute"
 	"github.com/adityaraj/sprout/internal/meta"
 	"github.com/adityaraj/sprout/internal/postgres"
@@ -182,6 +183,9 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 		Compute:         s.Compute.Name(),
 		SourceConnector: srcName, SourceConnectorID: srcID,
 		Password: postgres.GeneratePassword(),
+	}
+	if a := auth.ActorFrom(ctx); a.Kind == auth.KindGitHub && a.Login != "" {
+		rec.CreatedBy = a.Login
 	}
 	if err := s.Store.PutBranch(ctx, rec); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
