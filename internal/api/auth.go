@@ -75,12 +75,13 @@ func secureEqual(a, b string) bool {
 func (s *Server) handleAuthGitHub(w http.ResponseWriter, r *http.Request) {
 	gh := s.GitHub
 	if !gh.Enabled() {
-		writeErr(w, http.StatusNotFound, "github_auth_disabled", "set SPROUT_GITHUB_CLIENT_ID (and SPROUT_GITHUB_USERS or SPROUT_GITHUB_ORGS) on the server")
+		writeErr(w, http.StatusNotFound, "github_auth_disabled", "set SPROUT_GITHUB_CLIENT_ID on the server")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":   true,
-		"ready":     gh.Ready(),
+		"ready":     true,
+		"public":    !gh.Restricted(),
 		"client_id": gh.ClientID,
 		"host":      gh.HostURL(),
 		"api":       gh.APIURL(),

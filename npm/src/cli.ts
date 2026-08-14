@@ -445,9 +445,6 @@ async function runLogin(apiUrl?: string): Promise<void> {
   if (!meta.enabled) {
     throw new Error(`github login is not enabled on ${probe.baseUrl}`);
   }
-  if (!meta.ready) {
-    throw new Error("github login is not ready on the server — set SPROUT_GITHUB_USERS or SPROUT_GITHUB_ORGS");
-  }
 
   const dc = await requestDeviceCode(meta);
   const page = browserURL(dc);

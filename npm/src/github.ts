@@ -1,6 +1,7 @@
 export type GitHubAuthMeta = {
   enabled: boolean;
-  ready: boolean;
+  ready?: boolean;
+  public?: boolean;
   client_id: string;
   host: string;
   api: string;

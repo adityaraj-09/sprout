@@ -491,8 +491,8 @@ Env:
 
 GitHub login (server):
   SPROUT_GITHUB_CLIENT_ID   OAuth App client ID (enable Device Flow on the app)
-  SPROUT_GITHUB_USERS       comma-separated GitHub logins
-  SPROUT_GITHUB_ORGS        comma-separated orgs (any membership is enough)
+  SPROUT_GITHUB_USERS       optional comma-separated GitHub logins (omit = anyone)
+  SPROUT_GITHUB_ORGS        optional orgs (omit = anyone)
   SPROUT_GITHUB_HOST        default https://github.com
   SPROUT_GITHUB_API         default https://api.github.com
 `)

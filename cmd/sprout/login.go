@@ -34,9 +34,6 @@ func runLogin(serverURL string) error {
 	if !meta.Enabled {
 		return fmt.Errorf("github login is not enabled on %s — set SPROUT_GITHUB_CLIENT_ID on the server", serverURL)
 	}
-	if !meta.Ready {
-		return fmt.Errorf("github login is not ready on the server — set SPROUT_GITHUB_USERS or SPROUT_GITHUB_ORGS")
-	}
 
 	dcClient := &auth.DeviceClient{Settings: auth.Settings{
 		ClientID:       meta.ClientID,

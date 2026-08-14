@@ -106,11 +106,12 @@ func main() {
 		fmt.Println("  token:     set")
 	}
 	gh := auth.FromEnv()
-	switch {
-	case gh.Ready():
-		fmt.Printf("  github:    device flow %s (allow %d users / %d orgs)\n", gh.HostURL(), len(gh.Users), len(gh.Orgs))
-	case gh.Enabled():
-		fmt.Println("  warning:   SPROUT_GITHUB_CLIENT_ID set without SPROUT_GITHUB_USERS or SPROUT_GITHUB_ORGS")
+	if gh.Enabled() {
+		mode := "public (any GitHub user)"
+		if gh.Restricted() {
+			mode = fmt.Sprintf("allowlist %d users / %d orgs", len(gh.Users), len(gh.Orgs))
+		}
+		fmt.Printf("  github:    device flow %s — %s\n", gh.HostURL(), mode)
 	}
 	fmt.Printf("  pg_host:   %s (listen_addresses=%s subdomain=%v)\n", postgres.PublicHost(), postgres.ListenAddresses(), postgres.BranchSubdomain())
 	if postgres.BranchSubdomain() {

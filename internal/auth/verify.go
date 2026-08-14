@@ -20,7 +20,7 @@ var (
 	ErrNotReady     = errors.New("github_auth_not_ready")
 )
 
-// User is a GitHub account that passed verification + allowlist.
+// User is a GitHub account that passed token verification (and optional allowlist).
 type User struct {
 	Login string `json:"login"`
 	ID    int64  `json:"id"`
@@ -61,7 +61,7 @@ func (v *Verifier) now() time.Time {
 }
 
 func (v *Verifier) Lookup(ctx context.Context, token string) (User, error) {
-	if !v.Settings.Ready() {
+	if !v.Settings.Enabled() {
 		return User{}, ErrNotReady
 	}
 	token = trimSlash(token) // trim space; slash-safe no-op for tokens
@@ -90,6 +90,9 @@ func (v *Verifier) lookupUncached(ctx context.Context, token string) (User, erro
 	u, err := v.fetchUser(ctx, token)
 	if err != nil {
 		return User{}, err
+	}
+	if !v.Settings.Restricted() {
+		return u, nil
 	}
 	if containsFold(v.Settings.Users, u.Login) {
 		return u, nil

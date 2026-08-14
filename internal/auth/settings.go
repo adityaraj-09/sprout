@@ -44,10 +44,15 @@ func (s Settings) Enabled() bool {
 	return s.ClientID != ""
 }
 
-// Ready is true when GitHub login is configured AND an allowlist exists.
-// A public API with only a client id would let any GitHub user in.
+// Ready means device-flow login can be used (OAuth App client id is set).
+// Any GitHub user may sign in unless Users/Orgs restrict it.
 func (s Settings) Ready() bool {
-	return s.Enabled() && (len(s.Users) > 0 || len(s.Orgs) > 0)
+	return s.Enabled()
+}
+
+// Restricted is true when an optional allowlist is set.
+func (s Settings) Restricted() bool {
+	return len(s.Users) > 0 || len(s.Orgs) > 0
 }
 
 func (s Settings) Scope() string {

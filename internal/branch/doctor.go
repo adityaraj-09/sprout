@@ -143,15 +143,15 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 	case !gh.Enabled():
 		add(DoctorCheck{Name: "github_auth", OK: true, Level: "info",
 			Detail: "off (shared SPROUT_TOKEN only)",
-			Hint:   "set SPROUT_GITHUB_CLIENT_ID plus SPROUT_GITHUB_USERS or SPROUT_GITHUB_ORGS for per-user login"})
-	case !gh.Ready():
-		add(DoctorCheck{Name: "github_auth", OK: false, Level: "error",
-			Detail: "SPROUT_GITHUB_CLIENT_ID is set but no allowlist",
-			Hint:   "set SPROUT_GITHUB_USERS=alice,bob and/or SPROUT_GITHUB_ORGS=my-org — a client id alone lets any GitHub user in"})
+			Hint:   "set SPROUT_GITHUB_CLIENT_ID so anyone with GitHub can sprout login"})
+	case gh.Restricted():
+		add(DoctorCheck{Name: "github_auth", OK: true, Level: "info",
+			Detail: fmt.Sprintf("device flow (allowlist users=%d orgs=%d) host=%s", len(gh.Users), len(gh.Orgs), gh.HostURL()),
+			Hint:   "unset SPROUT_GITHUB_USERS / SPROUT_GITHUB_ORGS to allow any GitHub user"})
 	default:
 		add(DoctorCheck{Name: "github_auth", OK: true, Level: "info",
-			Detail: fmt.Sprintf("device flow client_id set; users=%d orgs=%d host=%s", len(gh.Users), len(gh.Orgs), gh.HostURL()),
-			Hint:   "Enable Device Flow on the GitHub OAuth App; teammates run sprout login"})
+			Detail: fmt.Sprintf("device flow public (any GitHub user) host=%s", gh.HostURL()),
+			Hint:   "Enable Device Flow on the GitHub OAuth App; optional SPROUT_GITHUB_USERS / SPROUT_GITHUB_ORGS to restrict"})
 	}
 
 	// OS hint

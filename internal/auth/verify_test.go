@@ -87,11 +87,13 @@ func TestLookupInvalidToken(t *testing.T) {
 	}
 }
 
-func TestLookupNotReadyWithoutAllowlist(t *testing.T) {
-	v := NewVerifier(Settings{ClientID: "iv1"})
-	_, err := v.Lookup(context.Background(), "gho")
-	if !errors.Is(err, ErrNotReady) {
-		t.Fatalf("err=%v", err)
+func TestLookupPublicAnyGitHubUser(t *testing.T) {
+	srv := githubAPI(t, `{"login":"anyone","id":42}`, `[]`, 200)
+	t.Cleanup(srv.Close)
+	v := NewVerifier(Settings{ClientID: "iv1", API: srv.URL, HTTP: srv.Client()})
+	u, err := v.Lookup(context.Background(), "gho")
+	if err != nil || u.Login != "anyone" {
+		t.Fatalf("u=%+v err=%v", u, err)
 	}
 }
 
@@ -106,11 +108,17 @@ func TestHashTokenDoesNotLeak(t *testing.T) {
 }
 
 func TestSettingsReady(t *testing.T) {
-	if (Settings{ClientID: "x"}).Ready() {
-		t.Fatal("client id alone is not ready")
+	if (Settings{}).Ready() {
+		t.Fatal("empty settings should not be ready")
 	}
-	if !(Settings{ClientID: "x", Users: []string{"a"}}).Ready() {
-		t.Fatal("users should be ready")
+	if !(Settings{ClientID: "x"}).Ready() {
+		t.Fatal("client id alone should be public/ready")
+	}
+	if (Settings{ClientID: "x"}).Restricted() {
+		t.Fatal("no allowlist is public")
+	}
+	if !(Settings{ClientID: "x", Users: []string{"a"}}).Restricted() {
+		t.Fatal("users should restrict")
 	}
 }
 

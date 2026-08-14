@@ -112,13 +112,15 @@ If **one** connector exists, `--from` is optional. With **multiple**, `--from` i
 
 ## Team use (one hosted server)
 
-One VM, one project (`default`). People log in with **GitHub** (device flow). There are no admin/dev roles yet — every allowed GitHub user can call the same APIs. Isolation is still by **branch name** plus the Postgres URL for that branch.
+One VM, one project (`default`). Anyone with a GitHub account can `sprout login`. There are no admin/dev roles yet — every signed-in user can call the same APIs. Isolation is still by **branch name** plus the Postgres URL for that branch.
 
 **Server (once):** create a GitHub OAuth App, enable **Device Flow**, then:
 
 ```bash
 export SPROUT_GITHUB_CLIENT_ID=Iv1.xxxxxxxx
-export SPROUT_GITHUB_USERS=alice,bob          # and/or SPROUT_GITHUB_ORGS=my-org
+# optional lock-down later:
+# export SPROUT_GITHUB_USERS=alice,bob
+# export SPROUT_GITHUB_ORGS=my-org
 # keep a strong SPROUT_TOKEN as a machine/break-glass token
 ```
 
@@ -143,7 +145,7 @@ Name branches with initials or ticket (`ar-login`, `priya-42`) so they do not co
 
 **Do not** point a second `sprout connect` at another person’s branch unless you intend to copy that branch into a new replica. For day-to-day work, the branch URL is an app database, not a connector source.
 
-`sprout login` stores a GitHub token (mode `0600`). `sprout logout` deletes it. Anyone on `SPROUT_GITHUB_USERS` / org membership can still delete any branch until you add ownership later. Keep `SPROUT_TOKEN` for scripts; do not share it with humans if GitHub login is on.
+`sprout login` stores a GitHub token (mode `0600`). `sprout logout` deletes it. Any signed-in GitHub user can still delete any branch until you add ownership later. Keep `SPROUT_TOKEN` for scripts.
 
 ---
 
@@ -332,8 +334,8 @@ Logical is for hosts that block physical replication (common on managed Postgres
 | `SPROUT_LISTEN` | `127.0.0.1:8080` | API bind (`0.0.0.0:8080` to expose) |
 | `SPROUT_TOKEN` | `dev-token` | Bearer token (machine / break-glass; humans should `sprout login`) |
 | `SPROUT_GITHUB_CLIENT_ID` | unset | GitHub OAuth App client ID (enable Device Flow on the app) |
-| `SPROUT_GITHUB_USERS` | unset | Comma-separated GitHub logins allowed to use the API |
-| `SPROUT_GITHUB_ORGS` | unset | Comma-separated orgs; membership in any is enough |
+| `SPROUT_GITHUB_USERS` | unset | Optional GitHub logins; omit to allow **any** GitHub user |
+| `SPROUT_GITHUB_ORGS` | unset | Optional orgs; omit to allow **any** GitHub user |
 | `SPROUT_GITHUB_HOST` | `https://github.com` | GitHub or GitHub Enterprise |
 | `SPROUT_GITHUB_API` | `https://api.github.com` | GitHub API base |
 | `SPROUT_PUBLIC_HOST` | `localhost` | Hostname in branch connection strings |

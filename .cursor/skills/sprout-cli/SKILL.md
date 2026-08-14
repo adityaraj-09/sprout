@@ -40,7 +40,7 @@ sprout health
 
 One-shot (npm): `sprout --api-url=http://strido.fit:8080 --token=secret health`
 
-Auth is `Authorization: Bearer <token>`. Humans use a **GitHub user token** from `sprout login`. `/healthz` and `GET /v1/auth/github` are unauthenticated. The shared `SPROUT_TOKEN` still works for scripts. Server must set `SPROUT_GITHUB_CLIENT_ID` plus `SPROUT_GITHUB_USERS` or `SPROUT_GITHUB_ORGS`.
+Auth is `Authorization: Bearer <token>`. Humans use a **GitHub user token** from `sprout login`. `/healthz` and `GET /v1/auth/github` are unauthenticated. The shared `SPROUT_TOKEN` still works for scripts. Server must set `SPROUT_GITHUB_CLIENT_ID`. Any GitHub user can sign in unless `SPROUT_GITHUB_USERS` / `SPROUT_GITHUB_ORGS` is set.
 
 ## What to do (typical)
 
@@ -147,7 +147,7 @@ Writes on a branch stay on that branch. `branch reset` re-clones from the snapsh
 | Symptom | Do |
 |---------|-----|
 | `unauthorized` | Token mismatch — run `sprout login` or check `SPROUT_TOKEN` |
-| `forbidden` / `github_user_not_allowed` | GitHub user is not on `SPROUT_GITHUB_USERS` / orgs |
+| `forbidden` / `github_user_not_allowed` | Allowlist is on and this GitHub user is not listed |
 | `ambiguous_branch` | Pass `--from=<connector>` |
 | `branch_exists` | Pick another name |
 | `connector_has_branches` | Delete/suspend children or `--force` |

@@ -24,7 +24,7 @@ type Server struct {
 func New(svc *branch.Service, token string) *Server {
 	gh := auth.FromEnv()
 	s := &Server{Service: svc, Token: token, GitHub: gh, Mux: http.NewServeMux()}
-	if gh.Ready() {
+	if gh.Enabled() {
 		s.Verifier = auth.NewVerifier(gh)
 	}
 	s.routes()
