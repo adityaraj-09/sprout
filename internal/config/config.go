@@ -3,6 +3,9 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/adityaraj/sprout/internal/cliconfig"
 )
 
 type Config struct {
@@ -43,9 +46,24 @@ func (c Config) MetaPath() string {
 }
 
 func CLIDefaults() Config {
+	file := cliconfig.Load()
+	server := strings.TrimSpace(os.Getenv("SPROUT_SERVER"))
+	if server == "" {
+		server = file.APIUrl
+	}
+	if server == "" {
+		server = "http://127.0.0.1:8080"
+	}
+	token := strings.TrimSpace(os.Getenv("SPROUT_TOKEN"))
+	if token == "" {
+		token = file.Token
+	}
+	if token == "" {
+		token = "dev-token"
+	}
 	return Config{
-		ServerURL: envOr("SPROUT_SERVER", "http://127.0.0.1:8080"),
-		Token:     envOr("SPROUT_TOKEN", "dev-token"),
+		ServerURL: strings.TrimRight(server, "/"),
+		Token:     token,
 	}
 }
 

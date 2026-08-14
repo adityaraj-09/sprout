@@ -111,6 +111,9 @@ CREATE TABLE IF NOT EXISTS connectors (
 	if err := s.ensureBranchNameUniquePerSource(); err != nil {
 		return err
 	}
+	if err := s.ensureColumn("branches", "created_by", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	var n int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM meta WHERE key = 'next_port'`).Scan(&n); err != nil {
 		return err
@@ -397,19 +400,19 @@ func putBranchTx(tx *sql.Tx, b BranchRecord) error {
 INSERT INTO branches(
   id, project_id, name, role, status, port, data_dir, snapshot_ref, container_id, compute,
   conn_string, error_message, source_lsn, source_connector, source_connector_id, password,
-  created_at, updated_at, last_used_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  created_by, created_at, updated_at, last_used_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   project_id=excluded.project_id, name=excluded.name, role=excluded.role, status=excluded.status,
   port=excluded.port, data_dir=excluded.data_dir, snapshot_ref=excluded.snapshot_ref,
   container_id=excluded.container_id, compute=excluded.compute, conn_string=excluded.conn_string,
   error_message=excluded.error_message, source_lsn=excluded.source_lsn,
   source_connector=excluded.source_connector, source_connector_id=excluded.source_connector_id,
-  password=excluded.password,
+  password=excluded.password, created_by=excluded.created_by,
   updated_at=excluded.updated_at, last_used_at=excluded.last_used_at
 `, b.ID, b.ProjectID, b.Name, b.Role, b.Status, b.Port, b.DataDir, b.SnapshotRef, b.ContainerID, b.Compute,
 		b.ConnString, b.ErrorMessage, b.SourceLSN, b.SourceConnector, b.SourceConnectorID, b.Password,
-		formatTime(b.CreatedAt), formatTime(b.UpdatedAt), formatTime(b.LastUsedAt))
+		b.CreatedBy, formatTime(b.CreatedAt), formatTime(b.UpdatedAt), formatTime(b.LastUsedAt))
 	return err
 }
 
@@ -429,19 +432,19 @@ func (s *SQLiteStore) PutBranch(ctx context.Context, b BranchRecord) error {
 INSERT INTO branches(
   id, project_id, name, role, status, port, data_dir, snapshot_ref, container_id, compute,
   conn_string, error_message, source_lsn, source_connector, source_connector_id, password,
-  created_at, updated_at, last_used_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  created_by, created_at, updated_at, last_used_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   project_id=excluded.project_id, name=excluded.name, role=excluded.role, status=excluded.status,
   port=excluded.port, data_dir=excluded.data_dir, snapshot_ref=excluded.snapshot_ref,
   container_id=excluded.container_id, compute=excluded.compute, conn_string=excluded.conn_string,
   error_message=excluded.error_message, source_lsn=excluded.source_lsn,
   source_connector=excluded.source_connector, source_connector_id=excluded.source_connector_id,
-  password=excluded.password,
+  password=excluded.password, created_by=excluded.created_by,
   updated_at=excluded.updated_at, last_used_at=excluded.last_used_at
 `, b.ID, b.ProjectID, b.Name, b.Role, b.Status, b.Port, b.DataDir, b.SnapshotRef, b.ContainerID, b.Compute,
 		b.ConnString, b.ErrorMessage, b.SourceLSN, b.SourceConnector, b.SourceConnectorID, b.Password,
-		formatTime(b.CreatedAt), formatTime(b.UpdatedAt), formatTime(b.LastUsedAt))
+		b.CreatedBy, formatTime(b.CreatedAt), formatTime(b.UpdatedAt), formatTime(b.LastUsedAt))
 	return err
 }
 
@@ -451,11 +454,11 @@ func (s *SQLiteStore) UpdateBranch(ctx context.Context, b BranchRecord) error {
 UPDATE branches SET
   project_id=?, name=?, role=?, status=?, port=?, data_dir=?, snapshot_ref=?, container_id=?, compute=?,
   conn_string=?, error_message=?, source_lsn=?, source_connector=?, source_connector_id=?, password=?,
-  updated_at=?, last_used_at=?
+  created_by=?, updated_at=?, last_used_at=?
 WHERE id=?`,
 		b.ProjectID, b.Name, b.Role, b.Status, b.Port, b.DataDir, b.SnapshotRef, b.ContainerID, b.Compute,
 		b.ConnString, b.ErrorMessage, b.SourceLSN, b.SourceConnector, b.SourceConnectorID, b.Password,
-		formatTime(b.UpdatedAt), formatTime(b.LastUsedAt), b.ID)
+		b.CreatedBy, formatTime(b.UpdatedAt), formatTime(b.LastUsedAt), b.ID)
 	if err != nil {
 		return err
 	}
@@ -467,7 +470,7 @@ WHERE id=?`,
 }
 
 const branchCols = `id, project_id, name, role, status, port, data_dir, snapshot_ref, container_id, compute,
-  conn_string, error_message, source_lsn, source_connector, source_connector_id, password,
+  conn_string, error_message, source_lsn, source_connector, source_connector_id, password, created_by,
   created_at, updated_at, last_used_at`
 
 func scanBranch(scanner interface {
@@ -477,7 +480,7 @@ func scanBranch(scanner interface {
 	var created, updated, lastUsed string
 	err := scanner.Scan(
 		&b.ID, &b.ProjectID, &b.Name, &b.Role, &b.Status, &b.Port, &b.DataDir, &b.SnapshotRef, &b.ContainerID, &b.Compute,
-		&b.ConnString, &b.ErrorMessage, &b.SourceLSN, &b.SourceConnector, &b.SourceConnectorID, &b.Password,
+		&b.ConnString, &b.ErrorMessage, &b.SourceLSN, &b.SourceConnector, &b.SourceConnectorID, &b.Password, &b.CreatedBy,
 		&created, &updated, &lastUsed,
 	)
 	if err != nil {

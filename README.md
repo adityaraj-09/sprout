@@ -112,7 +112,17 @@ If **one** connector exists, `--from` is optional. With **multiple**, `--from` i
 
 ## Team use (one hosted server)
 
-Sprout is a **shared lab**, not per-user accounts. One VM, one `SPROUT_TOKEN`, one project (`default`). Anyone with the token can create and delete any branch.
+One VM, one project (`default`). Anyone with a GitHub account can `sprout login`. There are no admin/dev roles yet — every signed-in user can call the same APIs. Isolation is still by **branch name** plus the Postgres URL for that branch.
+
+**Server (once):** create a GitHub OAuth App, enable **Device Flow**, then:
+
+```bash
+export SPROUT_GITHUB_CLIENT_ID=Iv1.xxxxxxxx
+# optional lock-down later:
+# export SPROUT_GITHUB_USERS=alice,bob
+# export SPROUT_GITHUB_ORGS=my-org
+# keep a strong SPROUT_TOKEN as a machine/break-glass token
+```
 
 **Do this:**
 
@@ -123,7 +133,8 @@ Sprout is a **shared lab**, not per-user accounts. One VM, one `SPROUT_TOKEN`, o
 
 ```bash
 sprout config set api-url http://strido.fit:8080
-sprout config set token <the shared SPROUT_TOKEN>
+sprout login          # opens GitHub in the browser; saves ~/.sprout/config.json
+sprout whoami
 sprout branch create ar-login --from=supabase
 ```
 
@@ -134,7 +145,7 @@ Name branches with initials or ticket (`ar-login`, `priya-42`) so they do not co
 
 **Do not** point a second `sprout connect` at another person’s branch unless you intend to copy that branch into a new replica. For day-to-day work, the branch URL is an app database, not a connector source.
 
-Shared token = shared admin. Rotate `SPROUT_TOKEN` and restart `sprout-server` if someone leaves. Disk and ports are shared on the VM; delete unused branches.
+`sprout login` stores a GitHub token (mode `0600`). `sprout logout` deletes it. Any signed-in GitHub user can still delete any branch until you add ownership later. Keep `SPROUT_TOKEN` for scripts.
 
 ---
 
@@ -248,6 +259,9 @@ Connectors and branches each get an allocated port.
 | `sprout connector list` | List connectors (password redacted) |
 | `sprout connector delete <name> [--force]` | Drop local replica + remote pub; `--force` also deletes child branches |
 | `sprout health` | `GET /healthz` |
+| `sprout login` | GitHub device flow; saves token to `~/.sprout/config.json` |
+| `sprout logout` | Drop the saved GitHub token |
+| `sprout whoami` | Identity the server accepted |
 | `sprout branch create <name> [--from=<connector\|main>]` | CoW branch |
 | `sprout branch list` | Branches + replicas + main |
 | `sprout branch get <name> [--from]` | JSON record |
@@ -268,11 +282,13 @@ Defaults:
 ## HTTP API
 
 Base URL: `http://127.0.0.1:8080`  
-Auth: `Authorization: Bearer <token>` (default `dev-token`; `/healthz` is open)
+Auth: `Authorization: Bearer <token>` (GitHub user token from `sprout login`, or `SPROUT_TOKEN`). `/healthz` and `/v1/auth/github` are open.
 
 | Method | Path | Body / notes |
 |--------|------|----------------|
 | `GET` | `/healthz` | `{ "status": "ok" }` |
+| `GET` | `/v1/auth/github` | public: `{client_id, host, scope, ready}` for device flow |
+| `GET` | `/v1/whoami` | `{kind, login, id}` |
 | `POST` | `/v1/init` | create/start local main |
 | `GET` | `/v1/projects` | list projects |
 | `GET` | `/v1/connectors` | all connectors (URL passwords redacted) |
@@ -316,7 +332,12 @@ Logical is for hosts that block physical replication (common on managed Postgres
 |----------|---------|---------|
 | `SPROUT_DATA` | `./data` | Data root |
 | `SPROUT_LISTEN` | `127.0.0.1:8080` | API bind (`0.0.0.0:8080` to expose) |
-| `SPROUT_TOKEN` | `dev-token` | Bearer token |
+| `SPROUT_TOKEN` | `dev-token` | Bearer token (machine / break-glass; humans should `sprout login`) |
+| `SPROUT_GITHUB_CLIENT_ID` | unset | GitHub OAuth App client ID (enable Device Flow on the app) |
+| `SPROUT_GITHUB_USERS` | unset | Optional GitHub logins; omit to allow **any** GitHub user |
+| `SPROUT_GITHUB_ORGS` | unset | Optional orgs; omit to allow **any** GitHub user |
+| `SPROUT_GITHUB_HOST` | `https://github.com` | GitHub or GitHub Enterprise |
+| `SPROUT_GITHUB_API` | `https://api.github.com` | GitHub API base |
 | `SPROUT_PUBLIC_HOST` | `localhost` | Hostname in branch connection strings |
 | `SPROUT_BRANCH_SUBDOMAIN` | auto | `true`/`false`. Auto-on when public host is a DNS name: URLs become `<name>-<connector>.<host>:5432` |
 | `SPROUT_PG_PROXY` | auto | SNI proxy on `:5432` when subdomains are on. `false` advertises unique ports instead |
@@ -334,8 +355,9 @@ Logical is for hosts that block physical replication (common on managed Postgres
 
 | Variable | Default |
 |----------|---------|
-| `SPROUT_SERVER` | `http://127.0.0.1:8080` |
-| `SPROUT_TOKEN` | `dev-token` |
+| `SPROUT_SERVER` | `http://127.0.0.1:8080` (or `apiUrl` in `~/.sprout/config.json`) |
+| `SPROUT_TOKEN` | overrides the token saved by `sprout login` |
+| `SPROUT_CONFIG` | path to `config.json` |
 
 ### Lab
 

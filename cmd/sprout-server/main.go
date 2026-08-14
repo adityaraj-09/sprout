@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/adityaraj/sprout/internal/api"
+	"github.com/adityaraj/sprout/internal/auth"
 	"github.com/adityaraj/sprout/internal/branch"
 	"github.com/adityaraj/sprout/internal/compute"
 	"github.com/adityaraj/sprout/internal/config"
@@ -99,7 +100,19 @@ func main() {
 	fmt.Printf("  storage:   %s\n", stor.Name())
 	fmt.Printf("  compute:   %s\n", comp.Name())
 	fmt.Printf("  meta:      %s\n", cfg.MetaPath())
-	fmt.Printf("  token:     %s\n", cfg.Token)
+	if cfg.Token == "dev-token" {
+		fmt.Println("  token:     dev-token (change SPROUT_TOKEN if the API is public)")
+	} else if cfg.Token != "" {
+		fmt.Println("  token:     set")
+	}
+	gh := auth.FromEnv()
+	if gh.Enabled() {
+		mode := "public (any GitHub user)"
+		if gh.Restricted() {
+			mode = fmt.Sprintf("allowlist %d users / %d orgs", len(gh.Users), len(gh.Orgs))
+		}
+		fmt.Printf("  github:    device flow %s — %s\n", gh.HostURL(), mode)
+	}
 	fmt.Printf("  pg_host:   %s (listen_addresses=%s subdomain=%v)\n", postgres.PublicHost(), postgres.ListenAddresses(), postgres.BranchSubdomain())
 	if postgres.BranchSubdomain() {
 		if postgres.ProxyEnabled() {

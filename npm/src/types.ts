@@ -21,6 +21,7 @@ export type BranchRecord = {
   source_lsn?: string;
   source_connector?: string;
   source_connector_id?: string;
+  created_by?: string;
   created_at: string;
   updated_at: string;
   last_used_at: string;

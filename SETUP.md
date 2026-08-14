@@ -180,7 +180,9 @@ export SPROUT_STORAGE=copy                 # or omit and set SPROUT_ZFS_DATASET=
 export SPROUT_COMPUTE=local                # prefer local over Docker
 export SPROUT_LISTEN=0.0.0.0:8080
 export SPROUT_PUBLIC_HOST=strido.fit       # or your VM public IP
-export SPROUT_TOKEN='change-me-long-secret'
+export SPROUT_TOKEN='change-me-long-secret'   # machine/break-glass; humans use sprout login
+export SPROUT_GITHUB_CLIENT_ID=Iv1.xxxxxxxx   # GitHub OAuth App; enable Device Flow
+# optional: export SPROUT_GITHUB_USERS=alice,bob   # omit = any GitHub user can login
 export SPROUT_SAFE=true
 export SPROUT_DB_USER=sprout               # login role in connection strings
 # optional:
@@ -222,6 +224,8 @@ Environment=SPROUT_COMPUTE=local
 Environment=SPROUT_LISTEN=0.0.0.0:8080
 Environment=SPROUT_PUBLIC_HOST=YOUR_PUBLIC_IP
 Environment=SPROUT_TOKEN=change-me-long-secret
+Environment=SPROUT_GITHUB_CLIENT_ID=Iv1.xxxxxxxx
+# Environment=SPROUT_GITHUB_USERS=alice,bob   # omit for public GitHub login
 Environment=SPROUT_SAFE=true
 ExecStart=/home/YOUR_USER/sprout/bin/sprout-server
 Restart=on-failure
@@ -244,12 +248,15 @@ sudo systemctl status sprout
 npm install -g sproutdb-cli
 
 sprout config set api-url http://strido.fit:8080   # or YOUR_PUBLIC_IP:8080
-sprout config set token change-me-long-secret
+sprout login     # GitHub device flow; opens a browser
+sprout whoami
 sprout health
 sprout doctor
 ```
 
-Every teammate uses the **same** API URL + token. Connect prod **once** on the server (`--name=supabase`). Each person then `sprout branch create <initials>-<work> --from=supabase` and uses that branch’s `:5432` URL. See README “Team use” and [`SKILL.md`](SKILL.md) for the CLI agent skill.
+Every teammate uses the **same** API URL and **GitHub login** (`sprout login`). Connect prod **once** on the server (`--name=supabase`). Each person then `sprout branch create <initials>-<work> --from=supabase` and uses that branch’s `:5432` URL. See README “Team use” and [`SKILL.md`](SKILL.md) for the CLI agent skill.
+
+Create a GitHub OAuth App (any callback URL is fine), enable **Device Flow**, and put the client ID in `SPROUT_GITHUB_CLIENT_ID`. Any GitHub user can then `sprout login`. Optionally set `SPROUT_GITHUB_USERS` or `SPROUT_GITHUB_ORGS` to restrict.
 
 ---
 

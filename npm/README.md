@@ -38,8 +38,10 @@ Point the CLI at your server once (saved to `~/.sprout/config.json`, mode `0600`
 
 ```bash
 sprout config set api-url http://127.0.0.1:8080
-sprout config set token dev-token          # match SPROUT_TOKEN on the server
-sprout config get                         # show saved + effective config
+sprout login                              # GitHub device flow (hosted servers)
+# or a machine token:
+sprout config set token dev-token         # match SPROUT_TOKEN on a local server
+sprout config get                         # token values are redacted
 ```
 
 Then:
@@ -126,6 +128,9 @@ sprout connect [--name=...] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-
 sprout status [name]
 sprout connector list | delete [--force] | suspend | resume <name>
 sprout health
+sprout login
+sprout logout
+sprout whoami
 sprout branch create <name> [--from=<connector|main>]
 sprout branch list
 sprout branch get|diff|reset|delete|suspend|resume <name> [--from=<connector>]

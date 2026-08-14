@@ -7,19 +7,26 @@ import (
 	"strings"
 	"time"
 
+	"github.com/adityaraj/sprout/internal/auth"
 	"github.com/adityaraj/sprout/internal/branch"
 	"github.com/adityaraj/sprout/internal/meta"
 	"github.com/adityaraj/sprout/internal/postgres"
 )
 
 type Server struct {
-	Service *branch.Service
-	Token   string
-	Mux     *http.ServeMux
+	Service  *branch.Service
+	Token    string
+	GitHub   auth.Settings
+	Verifier *auth.Verifier
+	Mux      *http.ServeMux
 }
 
 func New(svc *branch.Service, token string) *Server {
-	s := &Server{Service: svc, Token: token, Mux: http.NewServeMux()}
+	gh := auth.FromEnv()
+	s := &Server{Service: svc, Token: token, GitHub: gh, Mux: http.NewServeMux()}
+	if gh.Enabled() {
+		s.Verifier = auth.NewVerifier(gh)
+	}
 	s.routes()
 	return s
 }
@@ -30,6 +37,8 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes() {
 	s.Mux.HandleFunc("GET /healthz", s.handleHealth)
+	s.Mux.HandleFunc("GET /v1/auth/github", s.handleAuthGitHub)
+	s.Mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
 	s.Mux.HandleFunc("GET /v1/doctor", s.handleDoctor)
 	s.Mux.HandleFunc("POST /v1/init", s.handleInit)
 	s.Mux.HandleFunc("GET /v1/connectors", s.handleListConnectors)
@@ -48,21 +57,6 @@ func (s *Server) routes() {
 	s.Mux.HandleFunc("POST /v1/projects/{project}/branches/{name}/reset", s.handleResetBranch)
 	s.Mux.HandleFunc("POST /v1/projects/{project}/branches/{name}/suspend", s.handleSuspendBranch)
 	s.Mux.HandleFunc("POST /v1/projects/{project}/branches/{name}/resume", s.handleResumeBranch)
-}
-
-func (s *Server) auth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		h := r.Header.Get("Authorization")
-		if s.Token != "" && h != "Bearer "+s.Token {
-			writeErr(w, http.StatusUnauthorized, "unauthorized", "missing or bad token")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -296,6 +290,7 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		"source_lsn":          rec.SourceLSN,
 		"source_connector":    rec.SourceConnector,
 		"source_connector_id": rec.SourceConnectorID,
+		"created_by":          rec.CreatedBy,
 		"created_at":          rec.CreatedAt,
 		"updated_at":          rec.UpdatedAt,
 		"last_used_at":        rec.LastUsedAt,

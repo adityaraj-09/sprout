@@ -7,6 +7,7 @@ import {
   unsetConfig,
 } from "./index.js";
 import type { SproutConfigFile } from "./config.js";
+import { browserURL, openBrowser, requestDeviceCode, waitForToken } from "./github.js";
 
 function usage(): never {
   console.error(`sprout — CLI (talks to sprout-server)
@@ -15,6 +16,9 @@ Usage:
   sprout [--api-url=<url>] [--token=<token>] <command> ...
 
 Commands:
+  sprout login
+  sprout logout
+  sprout whoami
   sprout doctor
   sprout init
   sprout connect [--name=<id>] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
@@ -124,15 +128,18 @@ function handleConfig(argv: string[]): void {
     case "get": {
       const cfg = loadConfig();
       const client = new SproutClient();
+      const saved = { ...cfg };
+      if (saved.token) saved.token = "***";
       console.log(
         JSON.stringify(
           {
             file: configPath(),
-            saved: cfg,
+            saved,
             effective: {
               apiUrl: client.baseUrl,
               token: client.token === "dev-token" ? "dev-token" : "***",
               project: client.project,
+              githubLogin: cfg.githubLogin,
             },
           },
           null,
@@ -159,7 +166,9 @@ function handleConfig(argv: string[]): void {
       }
       const saved = saveConfig(patch);
       console.log(`✓ saved ${configPath()}`);
-      console.log(JSON.stringify(saved, null, 2));
+      const printed = { ...saved };
+      if (printed.token) printed.token = "***";
+      console.log(JSON.stringify(printed, null, 2));
       return;
     }
     case "unset": {
@@ -193,6 +202,20 @@ async function main(): Promise<void> {
 
   if (argv[0] === "config") {
     handleConfig(argv);
+    return;
+  }
+
+  if (argv[0] === "login") {
+    try {
+      await runLogin(apiUrl);
+    } catch (err) {
+      fatal(err);
+    }
+    return;
+  }
+  if (argv[0] === "logout") {
+    unsetConfig("token", "githubLogin");
+    console.log(`✓ logged out (${configPath()})`);
     return;
   }
 
@@ -303,6 +326,11 @@ async function main(): Promise<void> {
         console.log(out.status);
         break;
       }
+      case "whoami": {
+        const who = await client.whoami();
+        console.log(`${who.kind} ${who.login}`);
+        break;
+      }
       case "branch": {
         const sub = argv[1];
         if (!sub) usage();
@@ -401,6 +429,43 @@ async function main(): Promise<void> {
   } catch (err) {
     fatal(err);
   }
+}
+
+async function runLogin(apiUrl?: string): Promise<void> {
+  const probe = new SproutClient({ apiUrl, ignoreConfigFile: false });
+  let meta;
+  try {
+    meta = await probe.githubAuth();
+  } catch (err) {
+    if (err instanceof SproutError && err.status === 404) {
+      throw new Error(`github login is not enabled on ${probe.baseUrl} — set SPROUT_GITHUB_CLIENT_ID on the server`);
+    }
+    throw err;
+  }
+  if (!meta.enabled) {
+    throw new Error(`github login is not enabled on ${probe.baseUrl}`);
+  }
+
+  const dc = await requestDeviceCode(meta);
+  const page = browserURL(dc);
+  console.log("GitHub device login\n");
+  console.log(`  1. Open  ${page}`);
+  console.log(`  2. Enter code  ${dc.user_code}\n`);
+  try {
+    await openBrowser(page);
+  } catch (err) {
+    console.error(`  (could not open a browser: ${err instanceof Error ? err.message : err})`);
+  }
+  console.log("Waiting for GitHub…");
+  const token = await waitForToken(meta, dc);
+  const identified = new SproutClient({ apiUrl: probe.baseUrl, token, ignoreConfigFile: true });
+  const who = await identified.whoami();
+  saveConfig({
+    apiUrl: probe.baseUrl,
+    token,
+    githubLogin: who.login || who.kind,
+  });
+  console.log(`✓ logged in as ${who.login || who.kind} (${configPath()})`);
 }
 
 main();
