@@ -2,6 +2,8 @@ package branch
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -105,5 +107,34 @@ func TestBranchesFromConnectorStayOnOwner(t *testing.T) {
 	got, err := svc.branchesFromConnector(ctx, proj.ID, aliceC)
 	if err != nil || len(got) != 1 || got[0].ID != "a" {
 		t.Fatalf("alice children=%+v %v", got, err)
+	}
+}
+
+func TestFindSeedReplicaSamePrimary(t *testing.T) {
+	svc, proj := testService(t)
+	ctx := context.Background()
+	seedDir := filepath.Join(svc.Root, "replicas", "supabase-alice")
+	if err := os.MkdirAll(seedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(seedDir, "PG_VERSION"), []byte("17\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = svc.Store.PutConnector(ctx, meta.Connector{
+		ID: "c-a", ProjectID: proj.ID, Name: "supabase", CreatedBy: "alice",
+		Status: meta.ConnectorReplicating, DataDir: seedDir, Port: 55434,
+		PrimaryURL: "postgresql://postgres:old@db.example.supabase.co:5432/postgres",
+	})
+	_ = svc.Store.PutConnector(ctx, meta.Connector{
+		ID: "c-self", ProjectID: proj.ID, Name: "testing", CreatedBy: "bob",
+		Status:     meta.ConnectorBootstrapping,
+		PrimaryURL: "postgresql://postgres:new@db.example.supabase.co:5432/postgres",
+	})
+	seed, ok := svc.findSeedReplica(ctx, proj.ID, "postgresql://postgres:new@db.example.supabase.co:5432/postgres", "c-self")
+	if !ok || seed.ID != "c-a" {
+		t.Fatalf("expected alice seed, got ok=%v %+v", ok, seed)
+	}
+	if _, ok := svc.findSeedReplica(ctx, proj.ID, "postgresql://postgres:x@other.example:5432/postgres", "c-self"); ok {
+		t.Fatal("other host must not match")
 	}
 }
