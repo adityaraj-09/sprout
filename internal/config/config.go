@@ -58,13 +58,24 @@ func CLIDefaults() Config {
 	if token == "" {
 		token = file.Token
 	}
-	if token == "" {
+	if token == "" && isLoopbackAPI(server) {
 		token = "dev-token"
 	}
 	return Config{
 		ServerURL: strings.TrimRight(server, "/"),
 		Token:     token,
 	}
+}
+
+func isLoopbackAPI(server string) bool {
+	s := strings.ToLower(strings.TrimSpace(server))
+	s = strings.TrimPrefix(s, "http://")
+	s = strings.TrimPrefix(s, "https://")
+	host := s
+	if i := strings.IndexAny(host, "/:"); i >= 0 {
+		host = host[:i]
+	}
+	return host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "[::1]"
 }
 
 func envOr(k, def string) string {

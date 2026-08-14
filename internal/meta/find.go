@@ -40,3 +40,61 @@ func ResolveBranch(name, from string, matches []BranchRecord) (BranchRecord, err
 		return BranchRecord{}, fmt.Errorf("ambiguous_branch: %q exists from %s — pass --from=<connector>", name, strings.Join(srcs, ", "))
 	}
 }
+
+// FilterBranchesByOwner returns branches visible to owner.
+// Empty owner (machine token) matches everything, including unowned pre-GitHub rows.
+func FilterBranchesByOwner(owner string, list []BranchRecord) []BranchRecord {
+	if owner == "" {
+		return list
+	}
+	out := make([]BranchRecord, 0, len(list))
+	for _, b := range list {
+		if b.CreatedBy == owner {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// FilterConnectorsByOwner returns connectors visible to owner.
+func FilterConnectorsByOwner(owner string, list []Connector) []Connector {
+	if owner == "" {
+		return list
+	}
+	out := make([]Connector, 0, len(list))
+	for _, c := range list {
+		if c.CreatedBy == owner {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func resolveConnector(name, owner string, list []Connector) (Connector, error) {
+	if owner != "" {
+		list = FilterConnectorsByOwner(owner, list)
+		if len(list) == 0 {
+			return Connector{}, fmt.Errorf("connector not found: %s", name)
+		}
+		if len(list) == 1 {
+			return list[0], nil
+		}
+		return Connector{}, fmt.Errorf("ambiguous_connector: %q", name)
+	}
+	if len(list) == 0 {
+		return Connector{}, fmt.Errorf("connector not found: %s", name)
+	}
+	unowned := make([]Connector, 0)
+	for _, c := range list {
+		if c.CreatedBy == "" {
+			unowned = append(unowned, c)
+		}
+	}
+	if len(unowned) == 1 {
+		return unowned[0], nil
+	}
+	if len(list) == 1 {
+		return list[0], nil
+	}
+	return Connector{}, fmt.Errorf("ambiguous_connector: %q exists for multiple users — use a GitHub login", name)
+}

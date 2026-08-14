@@ -69,7 +69,7 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListConnectors(w http.ResponseWriter, r *http.Request) {
-	list, err := s.Service.Store.ListConnectors(r.Context())
+	list, err := s.Service.ListConnectors(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "list_failed", err.Error())
 		return
@@ -97,6 +97,10 @@ func redactURL(raw string) string {
 }
 
 func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
+	if auth.IsUser(r.Context()) {
+		writeErr(w, http.StatusForbidden, "forbidden", "sprout init is machine-token only; connect your own replica with sprout connect")
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 	proj, err := s.Service.InitMain(ctx)
@@ -158,8 +162,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		"project":   proj,
 	}
 	if res.Connector != nil {
-		out["connection_string"] = postgres.FormatConnString(res.Connector.Port, "postgres", res.Connector.Password, res.Connector.Name, "")
-		out["psql"] = postgres.PsqlOneLiner(res.Connector.Port, res.Connector.Password, res.Connector.Name, "")
+		out["connection_string"] = postgres.FormatConnString(res.Connector.Port, "postgres", res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
+		out["psql"] = postgres.PsqlOneLiner(res.Connector.Port, res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -285,7 +289,7 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		"container_id":        rec.ContainerID,
 		"compute":             rec.Compute,
 		"connection_string":   rec.ConnString,
-		"psql":                postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector),
+		"psql":                postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy),
 		"error_message":       rec.ErrorMessage,
 		"source_lsn":          rec.SourceLSN,
 		"source_connector":    rec.SourceConnector,
@@ -395,6 +399,10 @@ func (s *Server) mutateBranch(w http.ResponseWriter, r *http.Request, fn branchM
 func mapErr(err error) (code string, status int) {
 	msg := err.Error()
 	switch {
+	case strings.HasPrefix(msg, "forbidden"):
+		return "forbidden", http.StatusForbidden
+	case strings.HasPrefix(msg, "ambiguous_connector"):
+		return "ambiguous_connector", http.StatusConflict
 	case strings.HasPrefix(msg, "branch_exists"):
 		return "branch_exists", http.StatusConflict
 	case strings.HasPrefix(msg, "ambiguous_branch"):

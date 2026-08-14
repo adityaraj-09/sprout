@@ -24,3 +24,17 @@ func ActorFrom(ctx context.Context) Actor {
 	a, _ := ctx.Value(ctxKey{}).(Actor)
 	return a
 }
+
+// OwnerFrom is the GitHub login for user-scoped rows. Empty for the machine token.
+func OwnerFrom(ctx context.Context) string {
+	a := ActorFrom(ctx)
+	if a.Kind == KindGitHub {
+		return a.Login
+	}
+	return ""
+}
+
+// IsUser is true when the caller signed in with GitHub (not SPROUT_TOKEN).
+func IsUser(ctx context.Context) bool {
+	return ActorFrom(ctx).Kind == KindGitHub
+}

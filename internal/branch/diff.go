@@ -52,7 +52,7 @@ func (s *Service) DiffBranch(ctx context.Context, projectID, name, from string) 
 		if rec.SourceConnector == "" {
 			return BranchDiff{}, err
 		}
-		c, cerr := s.Store.GetConnectorByName(ctx, projectID, rec.SourceConnector)
+		c, cerr := s.Store.GetConnectorByName(ctx, projectID, rec.SourceConnector, rec.CreatedBy)
 		if cerr != nil {
 			return BranchDiff{}, err
 		}

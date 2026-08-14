@@ -41,12 +41,12 @@ func (s *Service) MainDir() string {
 	return filepath.Join(s.Root, "main")
 }
 
-func (s *Service) ReplicaDir(connectorName string) string {
-	return filepath.Join(s.Root, "replicas", connectorName)
+func (s *Service) ReplicaDir(name, owner string) string {
+	return filepath.Join(s.Root, "replicas", postgres.HostLabel(name, "", owner))
 }
 
-func (s *Service) BranchDir(name, from string) string {
-	return filepath.Join(s.Root, "branches", postgres.HostLabel(name, from))
+func (s *Service) BranchDir(name, from, owner string) string {
+	return filepath.Join(s.Root, "branches", postgres.HostLabel(name, from, owner))
 }
 
 func (s *Service) logPath(name string) string {
@@ -54,14 +54,14 @@ func (s *Service) logPath(name string) string {
 }
 
 func (s *Service) instKey(rec meta.BranchRecord) string {
-	if k := postgres.HostLabel(rec.Name, rec.SourceConnector); k != "" {
+	if k := postgres.HostLabel(rec.Name, rec.SourceConnector, rec.CreatedBy); k != "" {
 		return k
 	}
 	return rec.Name
 }
 
 func (s *Service) lookupBranch(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error) {
-	rec, err := s.Store.FindBranch(ctx, projectID, name, from)
+	rec, err := s.Store.FindBranch(ctx, projectID, name, from, auth.OwnerFrom(ctx))
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "ambiguous_branch") {
 			return meta.BranchRecord{}, err
@@ -69,6 +69,21 @@ func (s *Service) lookupBranch(ctx context.Context, projectID, name, from string
 		return meta.BranchRecord{}, fmt.Errorf("branch_not_found")
 	}
 	return rec, nil
+}
+
+func (s *Service) lookupConnector(ctx context.Context, projectID, name string) (meta.Connector, error) {
+	c, err := s.Store.GetConnectorByName(ctx, projectID, name, auth.OwnerFrom(ctx))
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "ambiguous_connector") {
+			return meta.Connector{}, err
+		}
+		return meta.Connector{}, fmt.Errorf("connector_not_found: %s", name)
+	}
+	return c, nil
+}
+
+func (s *Service) connectorLockKey(name, owner string) string {
+	return "connector:" + postgres.HostLabel(name, "", owner)
 }
 
 func (s *Service) lockBranch(name string) func() {
@@ -160,10 +175,12 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 		return meta.BranchRecord{}, err
 	}
 
-	unlock := s.lockBranch(postgres.HostLabel(name, srcName))
+	owner := auth.OwnerFrom(ctx)
+
+	unlock := s.lockBranch(postgres.HostLabel(name, srcName, owner))
 	defer unlock()
 
-	if _, err := s.Store.FindBranch(ctx, projectID, name, srcName); err == nil {
+	if _, err := s.Store.FindBranch(ctx, projectID, name, srcName, owner); err == nil {
 		return meta.BranchRecord{}, fmt.Errorf("branch_exists: %q already exists from %s", name, srcName)
 	}
 
@@ -179,13 +196,10 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 
 	rec := meta.BranchRecord{
 		ID: uuid.NewString(), ProjectID: projectID, Name: name, Role: "branch",
-		Status: meta.StatusCreating, Port: port, DataDir: s.BranchDir(name, srcName),
+		Status: meta.StatusCreating, Port: port, DataDir: s.BranchDir(name, srcName, owner),
 		Compute:         s.Compute.Name(),
 		SourceConnector: srcName, SourceConnectorID: srcID,
-		Password: postgres.GeneratePassword(),
-	}
-	if a := auth.ActorFrom(ctx); a.Kind == auth.KindGitHub && a.Login != "" {
-		rec.CreatedBy = a.Login
+		Password: postgres.GeneratePassword(), CreatedBy: owner,
 	}
 	if err := s.Store.PutBranch(ctx, rec); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -212,7 +226,7 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 	}
 	fmt.Printf("✓ branch %q ready in %s\n", name, time.Since(total).Round(time.Millisecond))
 	fmt.Println("  ", rec.ConnString)
-	fmt.Println("  ", postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector))
+	fmt.Println("  ", postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy))
 	return rec, nil
 }
 
@@ -220,17 +234,20 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 // fromConnector empty → sole connector, else local "main" if running, else error.
 func (s *Service) resolveBranchSource(ctx context.Context, projectID, fromConnector string) (dataDir string, port int, name, id string, err error) {
 	if fromConnector == "main" {
+		if auth.IsUser(ctx) {
+			return "", 0, "", "", fmt.Errorf("forbidden: GitHub users cannot use shared main — run sprout connect for your own replica")
+		}
 		return s.MainDir(), MainPort, "main", "", nil
 	}
 	if fromConnector != "" {
-		c, err := s.Store.GetConnectorByName(ctx, projectID, fromConnector)
+		c, err := s.lookupConnector(ctx, projectID, fromConnector)
 		if err != nil {
-			return "", 0, "", "", fmt.Errorf("connector_not_found: %s", fromConnector)
+			return "", 0, "", "", err
 		}
 		return s.connectorSource(c)
 	}
 
-	list, err := s.Store.ListConnectorsByProject(ctx, projectID)
+	list, err := s.visibleConnectors(ctx, projectID)
 	if err != nil {
 		return "", 0, "", "", err
 	}
@@ -245,11 +262,31 @@ func (s *Service) resolveBranchSource(ctx context.Context, projectID, fromConnec
 		return "", 0, "", "", fmt.Errorf("multiple connectors — pass --from (%s)", strings.Join(names, ", "))
 	}
 
-	// No connectors: fall back to local init main if present.
+	if auth.IsUser(ctx) {
+		return "", 0, "", "", fmt.Errorf("no source — run sprout connect --name <n> <url>")
+	}
+
+	// No connectors: fall back to local init main if present (machine token only).
 	if _, err := os.Stat(filepath.Join(s.MainDir(), "PG_VERSION")); err == nil {
 		return s.MainDir(), MainPort, "main", "", nil
 	}
 	return "", 0, "", "", fmt.Errorf("no source — run sprout connect --name <n> <url> or sprout init")
+}
+
+func (s *Service) visibleConnectors(ctx context.Context, projectID string) ([]meta.Connector, error) {
+	list, err := s.Store.ListConnectorsByProject(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return meta.FilterConnectorsByOwner(auth.OwnerFrom(ctx), list), nil
+}
+
+func (s *Service) ListConnectors(ctx context.Context) ([]meta.Connector, error) {
+	list, err := s.Store.ListConnectors(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return meta.FilterConnectorsByOwner(auth.OwnerFrom(ctx), list), nil
 }
 
 // connectorSource maps a connector to its local PGDATA (legacy connectors used data/main).
@@ -274,9 +311,12 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	srcHandle := compute.Handle{
 		Provider: s.Compute.Name(), Name: srcName, Port: srcPort, DataDir: srcDir,
 	}
-	// Logical replicas use compute name replica-<connector>
-	if srcName != "main" && !strings.HasPrefix(srcName, "replica-") {
-		srcHandle.Name = replicaComputeName(srcName)
+	if rec.SourceConnectorID != "" {
+		if c, err := s.Store.GetConnectorByID(ctx, rec.SourceConnectorID); err == nil {
+			srcHandle.Name = postgres.ReplicaComputeName(c.Name, c.CreatedBy)
+		}
+	} else if srcName != "main" && !strings.HasPrefix(srcName, "replica-") {
+		srcHandle.Name = postgres.ReplicaComputeName(srcName, rec.CreatedBy)
 	}
 
 	unlock := s.lockBranch("snap:" + srcName)
@@ -347,7 +387,7 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	}
 
 	inst := &postgres.Instance{
-		Name: rec.Name, Source: rec.SourceConnector, DataDir: rec.DataDir, Port: rec.Port,
+		Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port,
 		LogFile: s.logPath(s.instKey(*rec)), Bins: s.Bins, Password: rec.Password,
 	}
 	fmt.Println("→ Step 4: PrepareClone (promote branch to independent primary)")
@@ -404,7 +444,7 @@ func (s *Service) Reset(ctx context.Context, projectID, name, from string) (meta
 		_ = s.Store.UpdateBranch(ctx, rec)
 		return meta.BranchRecord{}, err
 	}
-	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
+	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
 	if err := inst.PrepareClone(); err != nil {
 		return meta.BranchRecord{}, err
 	}
@@ -500,15 +540,30 @@ func (s *Service) Resume(ctx context.Context, projectID, name, from string) (met
 	rec.Status = meta.StatusActive
 	rec.ErrorMessage = ""
 	rec.LastUsedAt = time.Now().UTC()
-	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres", rec.Password, rec.Name, rec.SourceConnector)
-	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
+	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres", rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
+	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
 	_ = inst.EnsureAppRoles()
 	_ = s.Store.UpdateBranch(ctx, rec)
 	return rec, nil
 }
 
 func (s *Service) List(ctx context.Context, projectID string) ([]meta.BranchRecord, error) {
-	return s.Store.ListBranches(ctx, projectID)
+	list, err := s.Store.ListBranches(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	owner := auth.OwnerFrom(ctx)
+	if owner == "" {
+		return list, nil
+	}
+	out := make([]meta.BranchRecord, 0, len(list))
+	for _, b := range list {
+		if b.CreatedBy != owner {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out, nil
 }
 
 func (s *Service) Get(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error) {

@@ -29,10 +29,14 @@ func (r *Reconciler) logPath(name string) string {
 }
 
 func instKey(b meta.BranchRecord) string {
-	if k := postgres.HostLabel(b.Name, b.SourceConnector); k != "" {
+	if k := postgres.HostLabel(b.Name, b.SourceConnector, b.CreatedBy); k != "" {
 		return k
 	}
 	return b.Name
+}
+
+func replicaName(c meta.Connector) string {
+	return postgres.ReplicaComputeName(c.Name, c.CreatedBy)
 }
 
 func (r *Reconciler) RunOnce(ctx context.Context) {
@@ -149,7 +153,7 @@ func (r *Reconciler) reconcileConnectors(ctx context.Context) {
 
 func (r *Reconciler) fixConnector(ctx context.Context, c meta.Connector) {
 	h := compute.Handle{
-		Provider: r.Compute.Name(), Name: "replica-" + c.Name,
+		Provider: r.Compute.Name(), Name: replicaName(c),
 		Port: c.Port, DataDir: c.DataDir,
 	}
 	running, _ := r.Compute.IsRunning(ctx, h)
@@ -193,8 +197,8 @@ func (r *Reconciler) fixConnector(ctx context.Context, c meta.Connector) {
 
 func (r *Reconciler) startConnector(ctx context.Context, c meta.Connector) error {
 	_, err := r.Compute.Start(ctx, compute.Spec{
-		Name: "replica-" + c.Name, DataDir: c.DataDir, Port: c.Port,
-		LogFile: r.logPath("replica-" + c.Name),
+		Name: replicaName(c), DataDir: c.DataDir, Port: c.Port,
+		LogFile: r.logPath(replicaName(c)),
 	})
 	if err != nil {
 		return err
@@ -216,7 +220,10 @@ func (r *Reconciler) markConnector(ctx context.Context, c meta.Connector, status
 }
 
 func (r *Reconciler) syncReplicaRow(ctx context.Context, c meta.Connector) {
-	br, err := r.Store.GetBranch(ctx, c.ProjectID, "replica-"+c.Name)
+	br, err := r.Store.GetBranchByID(ctx, "replica-"+c.ID)
+	if err != nil {
+		br, err = r.Store.FindBranch(ctx, c.ProjectID, "replica-"+c.Name, "", c.CreatedBy)
+	}
 	if err != nil {
 		return
 	}

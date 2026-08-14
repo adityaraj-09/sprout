@@ -170,7 +170,7 @@ func (s *FileStore) PutBranch(ctx context.Context, b BranchRecord) error {
 		if existing.ID == b.ID {
 			continue
 		}
-		if existing.ProjectID == b.ProjectID && existing.Name == b.Name && existing.SourceConnector == b.SourceConnector {
+		if existing.ProjectID == b.ProjectID && existing.Name == b.Name && existing.SourceConnector == b.SourceConnector && existing.CreatedBy == b.CreatedBy {
 			return fmt.Errorf("branch_exists: %q from %s", b.Name, b.SourceConnector)
 		}
 	}
@@ -191,10 +191,10 @@ func (s *FileStore) UpdateBranch(ctx context.Context, b BranchRecord) error {
 }
 
 func (s *FileStore) GetBranch(ctx context.Context, projectID, name string) (BranchRecord, error) {
-	return s.FindBranch(ctx, projectID, name, "")
+	return s.FindBranch(ctx, projectID, name, "", "")
 }
 
-func (s *FileStore) FindBranch(ctx context.Context, projectID, name, from string) (BranchRecord, error) {
+func (s *FileStore) FindBranch(ctx context.Context, projectID, name, from, owner string) (BranchRecord, error) {
 	_ = ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -204,7 +204,7 @@ func (s *FileStore) FindBranch(ctx context.Context, projectID, name, from string
 			matches = append(matches, b)
 		}
 	}
-	return ResolveBranch(name, from, matches)
+	return ResolveBranch(name, from, FilterBranchesByOwner(owner, matches))
 }
 
 func (s *FileStore) GetBranchByID(ctx context.Context, id string) (BranchRecord, error) {
@@ -265,9 +265,9 @@ func (s *FileStore) PutConnector(ctx context.Context, c Connector) error {
 	if s.data.Connectors == nil {
 		s.data.Connectors = map[string]Connector{}
 	}
-	// Enforce unique (project_id, name)
+	// Enforce unique (project_id, name, created_by)
 	for id, existing := range s.data.Connectors {
-		if existing.ProjectID == c.ProjectID && existing.Name == c.Name && id != c.ID {
+		if existing.ProjectID == c.ProjectID && existing.Name == c.Name && existing.CreatedBy == c.CreatedBy && id != c.ID {
 			return fmt.Errorf("connector_exists: %q", c.Name)
 		}
 	}
@@ -286,16 +286,17 @@ func (s *FileStore) GetConnectorByID(ctx context.Context, id string) (Connector,
 	return c, nil
 }
 
-func (s *FileStore) GetConnectorByName(ctx context.Context, projectID, name string) (Connector, error) {
+func (s *FileStore) GetConnectorByName(ctx context.Context, projectID, name, owner string) (Connector, error) {
 	_ = ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var matches []Connector
 	for _, c := range s.data.Connectors {
 		if c.ProjectID == projectID && c.Name == name {
-			return c, nil
+			matches = append(matches, c)
 		}
 	}
-	return Connector{}, fmt.Errorf("connector not found: %s", name)
+	return resolveConnector(name, owner, matches)
 }
 
 func (s *FileStore) ListConnectors(ctx context.Context) ([]Connector, error) {

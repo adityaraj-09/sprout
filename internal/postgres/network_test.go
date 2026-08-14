@@ -102,6 +102,10 @@ func TestFormatConnStringBranchSubdomain(t *testing.T) {
 	if !strings.Contains(fromLab, "testdb-lab.strido.fit:5432") {
 		t.Fatalf("expected testdb-lab.strido.fit:5432, got %s", fromLab)
 	}
+	owned := FormatConnString(55440, "postgres", "secret", "testdb", "supabase", "alice")
+	if !strings.Contains(owned, "testdb-alice-supabase.strido.fit:5432") {
+		t.Fatalf("owned branch host: %s", owned)
+	}
 	fromSupa := FormatConnString(55441, "postgres", "secret", "testdb", "supabase")
 	if !strings.Contains(fromSupa, "testdb-supabase.strido.fit:5432") {
 		t.Fatalf("same branch name from another connector: %s", fromSupa)
@@ -154,6 +158,15 @@ func TestAdvertiseHostReplicaPrefix(t *testing.T) {
 	}
 	if got := HostLabel("testdb", "main"); got != "testdb" {
 		t.Fatalf("main-sourced branch stays unsuffixed: %s", got)
+	}
+	if got := HostLabel("testdb", "supabase", "alice"); got != "testdb-alice-supabase" {
+		t.Fatalf("owned branch: %s", got)
+	}
+	if got := HostLabel("supabase", "", "alice"); got != "supabase-alice" {
+		t.Fatalf("owned connector: %s", got)
+	}
+	if got := ReplicaComputeName("supabase", "alice"); got != "replica-supabase-alice" {
+		t.Fatalf("replica compute: %s", got)
 	}
 }
 

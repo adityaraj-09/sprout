@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/adityaraj/sprout/internal/auth"
 	"github.com/adityaraj/sprout/internal/compute"
 	"github.com/adityaraj/sprout/internal/meta"
 	"github.com/adityaraj/sprout/internal/postgres"
@@ -19,15 +20,15 @@ type ConnectorLifecycleResult struct {
 // SuspendConnector stops the connector replica compute and all branches from it.
 // Data directories are kept (same idea as branch suspend).
 func (s *Service) SuspendConnector(ctx context.Context, projectID, name string) (ConnectorLifecycleResult, error) {
-	unlock := s.lockBranch("connector:" + name)
+	unlock := s.lockBranch(s.connectorLockKey(name, auth.OwnerFrom(ctx)))
 	defer unlock()
 
-	c, err := s.Store.GetConnectorByName(ctx, projectID, name)
+	c, err := s.lookupConnector(ctx, projectID, name)
 	if err != nil {
-		return ConnectorLifecycleResult{}, fmt.Errorf("connector_not_found: %s", name)
+		return ConnectorLifecycleResult{}, err
 	}
 
-	branches, err := s.branchesFromConnector(ctx, projectID, c.Name)
+	branches, err := s.branchesFromConnector(ctx, projectID, c)
 	if err != nil {
 		return ConnectorLifecycleResult{}, err
 	}
@@ -47,7 +48,7 @@ func (s *Service) SuspendConnector(ctx context.Context, projectID, name string) 
 	c.ErrorMessage = ""
 	_ = s.Store.UpdateConnector(ctx, c)
 
-	if br, err := s.Store.GetBranch(ctx, projectID, "replica-"+c.Name); err == nil {
+	if br, err := lookupReplicaRow(ctx, s.Store, projectID, c); err == nil {
 		br.Status = meta.StatusIdle
 		_ = s.Store.UpdateBranch(ctx, br)
 	}
@@ -62,12 +63,12 @@ func (s *Service) SuspendConnector(ctx context.Context, projectID, name string) 
 
 // ResumeConnector starts the connector replica and all idle branches from it.
 func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (ConnectorLifecycleResult, error) {
-	unlock := s.lockBranch("connector:" + name)
+	unlock := s.lockBranch(s.connectorLockKey(name, auth.OwnerFrom(ctx)))
 	defer unlock()
 
-	c, err := s.Store.GetConnectorByName(ctx, projectID, name)
+	c, err := s.lookupConnector(ctx, projectID, name)
 	if err != nil {
-		return ConnectorLifecycleResult{}, fmt.Errorf("connector_not_found: %s", name)
+		return ConnectorLifecycleResult{}, err
 	}
 
 	h := s.connectorHandle(c)
@@ -78,7 +79,7 @@ func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (
 		return ConnectorLifecycleResult{}, fmt.Errorf("compute_failed: start connector: %w", err)
 	}
 	inst := &postgres.Instance{
-		Name: h.Name, DataDir: h.DataDir, Port: h.Port,
+		Name: h.Name, Owner: c.CreatedBy, DataDir: h.DataDir, Port: h.Port,
 		LogFile: s.logPath(h.Name), Bins: s.Bins, Password: c.Password,
 	}
 	_ = inst.EnsureAppRoles()
@@ -86,14 +87,14 @@ func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (
 	c.ErrorMessage = ""
 	_ = s.Store.UpdateConnector(ctx, c)
 
-	if br, err := s.Store.GetBranch(ctx, projectID, "replica-"+c.Name); err == nil {
+	if br, err := lookupReplicaRow(ctx, s.Store, projectID, c); err == nil {
 		br.Status = meta.StatusActive
 		br.ErrorMessage = ""
-		br.ConnString = postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, "")
+		br.ConnString = postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, "", c.CreatedBy)
 		_ = s.Store.UpdateBranch(ctx, br)
 	}
 
-	branches, err := s.branchesFromConnector(ctx, projectID, c.Name)
+	branches, err := s.branchesFromConnector(ctx, projectID, c)
 	if err != nil {
 		return ConnectorLifecycleResult{}, err
 	}
@@ -107,8 +108,8 @@ func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (
 	}
 
 	fmt.Printf("✓ connector %q resumed (%d branches)\n", c.Name, len(out))
-	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, ""))
-	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password, c.Name, ""))
+	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, "", c.CreatedBy))
+	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password, c.Name, "", c.CreatedBy))
 	return ConnectorLifecycleResult{
 		Connector: c,
 		Branches:  out,
@@ -116,7 +117,7 @@ func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (
 	}, nil
 }
 
-func (s *Service) branchesFromConnector(ctx context.Context, projectID, connectorName string) ([]meta.BranchRecord, error) {
+func (s *Service) branchesFromConnector(ctx context.Context, projectID string, c meta.Connector) ([]meta.BranchRecord, error) {
 	list, err := s.Store.ListBranches(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -126,7 +127,11 @@ func (s *Service) branchesFromConnector(ctx context.Context, projectID, connecto
 		if b.Role != "branch" {
 			continue
 		}
-		if b.SourceConnector == connectorName {
+		if c.ID != "" && b.SourceConnectorID == c.ID {
+			out = append(out, b)
+			continue
+		}
+		if b.SourceConnectorID == "" && b.SourceConnector == c.Name && b.CreatedBy == c.CreatedBy {
 			out = append(out, b)
 		}
 	}
@@ -186,8 +191,8 @@ func (s *Service) resumeBranchBestEffort(ctx context.Context, rec meta.BranchRec
 	rec.ContainerID = started.ContainerID
 	rec.Status = meta.StatusActive
 	rec.ErrorMessage = ""
-	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres", rec.Password, rec.Name, rec.SourceConnector)
-	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
+	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres", rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
+	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
 	_ = inst.EnsureAppRoles()
 	_ = s.Store.UpdateBranch(ctx, rec)
 	return rec, nil

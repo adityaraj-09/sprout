@@ -40,29 +40,29 @@ sprout health
 
 One-shot (npm): `sprout --api-url=http://strido.fit:8080 --token=secret health`
 
-Auth is `Authorization: Bearer <token>`. Humans use a **GitHub user token** from `sprout login`. `/healthz` and `GET /v1/auth/github` are unauthenticated. The shared `SPROUT_TOKEN` still works for scripts. Server must set `SPROUT_GITHUB_CLIENT_ID`. Any GitHub user can sign in unless `SPROUT_GITHUB_USERS` / `SPROUT_GITHUB_ORGS` is set.
+Auth is `Authorization: Bearer <token>`. Humans use a **GitHub user token** from `sprout login` and only see their own connectors/branches. `/healthz` and `GET /v1/auth/github` are unauthenticated. The machine `SPROUT_TOKEN` still works for scripts and sees everything. Server must set `SPROUT_GITHUB_CLIENT_ID`. Any GitHub user can sign in unless `SPROUT_GITHUB_USERS` / `SPROUT_GITHUB_ORGS` is set.
 
 ## What to do (typical)
 
-### Shared hosted server (team)
+### Hosted server (per-user)
 
-1. **Do not** run `sprout connect` for every developer. That copies the whole database again.
-2. One connector already exists (e.g. `supabase`). Confirm:
+1. Each GitHub user runs **their own** `sprout connect` (own replica). There is no shared connector or shared `main`.
+2. Confirm only **your** rows:
 
 ```bash
 sprout connector list
 sprout status supabase
 ```
 
-3. Create a **personal branch** (lowercase `[a-z0-9-]`, not `main`):
+3. Create a branch from **your** connector (lowercase `[a-z0-9-]`, not `main`):
 
 ```bash
-sprout branch create ar-login --from=supabase
+sprout branch create testdb --from=supabase
 ```
 
-Prints `connection_string` and a `psql` one-liner. Use **that URL** in the app. Do not invent hosts or ports.
+Prints `connection_string` and a `psql` one-liner. Hostnames include your GitHub login (`testdb-alice-supabase.strido.fit`) so two people can both use `testdb`. Use **that URL** in the app.
 
-4. Name branches `initials-ticket` (`ar-login`, `priya-42`) so they do not collide. Same name + same connector = error. Same name from two connectors is allowed (`testdb --from=lab` vs `testdb --from=supabase`).
+4. `sprout logout` does not fall back to `SPROUT_TOKEN` / `dev-token` against a remote API. Re-login to keep working. `sprout init` is machine-token only.
 
 ### First-time / empty server
 
@@ -92,8 +92,9 @@ sprout branch create alice --from=main
 
 - `/postgres` is the **database name inside the instance**, not the branch name.
 - With a DNS `SPROUT_PUBLIC_HOST` (e.g. `strido.fit`), URLs are:
-  - connector: `postgresql://sprout:<pass>@supabase.strido.fit:5432/postgres`
-  - branch: `postgresql://sprout:<pass>@<branch>-<connector>.strido.fit:5432/postgres`
+  - connector: `postgresql://sprout:<pass>@supabase-alice.strido.fit:5432/postgres`
+  - branch: `postgresql://sprout:<pass>@testdb-alice-supabase.strido.fit:5432/postgres`
+  - unowned/machine: `postgresql://sprout:<pass>@<branch>-<connector>.strido.fit:5432/postgres`
 - Port **5432** is the SNI proxy. Hostname selects the instance. Clients need TLS (`sslmode=require` or libpq `prefer`). Self-signed cert is normal; `verify-full` may fail.
 - Localhost / raw IP: unique ports, no subdomain (`localhost:55440`).
 - A branch is an **independent primary**. It does not keep replicating from prod. The **connector replica** does.
