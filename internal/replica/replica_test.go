@@ -1,6 +1,9 @@
 package replica
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestPrimaryKeyIgnoresCredentials(t *testing.T) {
 	a := PrimaryKeyFromURL("postgresql://postgres:one@db.example.supabase.co:5432/postgres")
@@ -29,5 +32,23 @@ func TestInitializingOnly(t *testing.T) {
 	}
 	if initializingOnly("i:1;d:26") || initializingOnly("r:27") {
 		t.Fatal("copy in progress is not initializing-only")
+	}
+}
+
+func TestCreateSubscriptionUsesPrecreatedSlot(t *testing.T) {
+	sql := createSubscriptionSQL("sprout_sub_alice", "sprout_pub_alice", "host=db.example")
+	for _, want := range []string{
+		`CREATE SUBSCRIPTION "sprout_sub_alice"`,
+		`PUBLICATION "sprout_pub_alice"`,
+		`create_slot = false`,
+		`slot_name = 'sprout_sub_alice'`,
+		`copy_data = true`,
+	} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("SQL missing %q:\n%s", want, sql)
+		}
+	}
+	if strings.Contains(sql, "create_slot = true") {
+		t.Fatalf("subscription must not create its own slot:\n%s", sql)
 	}
 }
