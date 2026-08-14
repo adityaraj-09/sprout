@@ -17,6 +17,8 @@ const (
 	perfEnd     = "# --- sprout lab perf end ---"
 	remoteBegin = "# --- sprout remote begin ---"
 	remoteEnd   = "# --- sprout remote end ---"
+	cloneBegin  = "# --- sprout clone guard begin ---"
+	cloneEnd    = "# --- sprout clone guard end ---"
 )
 
 // PublicHost is the hostname advertised in connection strings.
@@ -270,4 +272,14 @@ func ApplyNetworkSettings(dataDir string, port int) error {
 		return RemoveManagedSection(hba, remoteBegin, remoteEnd)
 	}
 	return ReplaceManagedSection(hba, remoteBegin, remoteEnd, strings.Join(lines, "\n")+"\n")
+}
+
+// SetLogicalReplicationWorkers writes max_logical_replication_workers for a clone start.
+// n < 0 removes the override so workers return to Postgres defaults.
+func SetLogicalReplicationWorkers(dataDir string, n int) error {
+	conf := filepath.Join(dataDir, "postgresql.conf")
+	if n < 0 {
+		return RemoveManagedSection(conf, cloneBegin, cloneEnd)
+	}
+	return ReplaceManagedSection(conf, cloneBegin, cloneEnd, fmt.Sprintf("max_logical_replication_workers = %d\n", n))
 }

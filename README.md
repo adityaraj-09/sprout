@@ -134,6 +134,8 @@ sprout connect --name=supabase --mode=logical 'postgresql://…'   # your replic
 sprout branch create testdb --from=supabase
 ```
 
+A later `sprout connect` to the **same** Supabase URL clones a local replica (no extra WAL sender). Only the first live replica of that database opens a logical slot on prod.
+
 Use **your** URLs (GitHub login is in the hostname so alice and bob can both have `testdb` / `supabase`):
 
 - connector: `postgresql://sprout:<pass>@supabase-alice.strido.fit:5432/postgres`

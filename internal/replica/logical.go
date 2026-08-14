@@ -21,8 +21,9 @@ type LogicalStatus struct {
 	Enabled      bool   `json:"enabled"`
 	TableTotal   int    `json:"table_total"`
 	TableReady   int    `json:"table_ready"`
-	ReceivedLSN string `json:"received_lsn"`
+	ReceivedLSN  string `json:"received_lsn"`
 	LastMsg      string `json:"last_msg_time,omitempty"`
+	RelStates    string `json:"rel_states,omitempty"` // e.g. i:27 or d:2;r:25
 }
 
 // EnsurePublication creates (or recreates) a publication on the primary.
@@ -213,8 +214,18 @@ SELECT
      JOIN pg_subscription s ON s.oid = sr.srsubid
     WHERE s.subname = %s AND sr.srsubstate = 'r'),
   COALESCE((SELECT received_lsn::text FROM pg_stat_subscription WHERE subname = %s LIMIT 1), ''),
-  COALESCE((SELECT subenabled::text FROM pg_subscription WHERE subname = %s), 'f');
-`, quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName))
+  COALESCE((SELECT subenabled::text FROM pg_subscription WHERE subname = %s), 'f'),
+  COALESCE((
+    SELECT string_agg(srsubstate || ':' || cnt, ';')
+    FROM (
+      SELECT sr.srsubstate, count(*)::text AS cnt
+      FROM pg_subscription_rel sr
+      JOIN pg_subscription s ON s.oid = sr.srsubid
+      WHERE s.subname = %s
+      GROUP BY sr.srsubstate
+    ) x
+  ), '');
+`, quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName))
 
 	cmd := exec.CommandContext(ctx, m.Bins.Psql,
 		"-h", localHost, "-p", strconv.Itoa(localPort), "-d", "postgres",
@@ -230,13 +241,26 @@ SELECT
 	}
 	total, _ := strconv.Atoi(parts[0])
 	ready, _ := strconv.Atoi(parts[1])
+	states := ""
+	if len(parts) >= 5 {
+		states = parts[4]
+	}
 	return LogicalStatus{
 		Subscription: subName,
 		TableTotal:   total,
 		TableReady:   ready,
 		ReceivedLSN:  parts[2],
-		Enabled:      parts[3] == "t",
+		Enabled:      pgBool(parts[3]),
+		RelStates:    states,
 	}, nil
+}
+
+func pgBool(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "t", "true", "on", "1", "yes":
+		return true
+	}
+	return false
 }
 
 func (m *Manager) WaitLogicalSync(ctx context.Context, localHost string, localPort int, subName string, timeout time.Duration) (LogicalStatus, error) {
@@ -265,10 +289,13 @@ func (m *Manager) WaitLogicalSync(ctx context.Context, localHost string, localPo
 					eta = "0s"
 				}
 			}
-			fmt.Fprintf(os.Stderr, "  sync tables %d/%d (%d%%) eta~%s enabled=%v lsn=%s\n",
-				st.TableReady, st.TableTotal, pct, eta, st.Enabled, st.ReceivedLSN)
+			fmt.Fprintf(os.Stderr, "  sync tables %d/%d (%d%%) eta~%s enabled=%v states=%s lsn=%s\n",
+				st.TableReady, st.TableTotal, pct, eta, st.Enabled, st.RelStates, st.ReceivedLSN)
 			if st.TableTotal > 0 && st.TableReady >= st.TableTotal {
 				return st, nil
+			}
+			if st.TableTotal > 0 && st.TableReady == 0 && time.Since(started) >= 45*time.Second && initializingOnly(st.RelStates) {
+				return st, fmt.Errorf("logical_sync_stuck: 0/%d tables ready (states=%s). Table copy needs extra WAL senders on the publisher (max_wal_senders). Delete unused sprout connectors, or connect again — a later connect to the same URL clones a local replica instead of another prod slot", st.TableTotal, st.RelStates)
 			}
 			if st.TableTotal == 0 {
 				time.Sleep(2 * time.Second)
@@ -283,7 +310,71 @@ func (m *Manager) WaitLogicalSync(ctx context.Context, localHost string, localPo
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return last, fmt.Errorf("logical sync not ready within %s (ready=%d/%d)", timeout, last.TableReady, last.TableTotal)
+	return last, fmt.Errorf("logical sync not ready within %s (ready=%d/%d states=%s)", timeout, last.TableReady, last.TableTotal, last.RelStates)
+}
+
+func initializingOnly(states string) bool {
+	s := strings.TrimSpace(states)
+	if s == "" {
+		return true
+	}
+	for _, part := range strings.Split(s, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		code := part
+		if i := strings.IndexByte(part, ':'); i >= 0 {
+			code = part[:i]
+		}
+		if code != "i" {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *Manager) psqlLocal(ctx context.Context, localHost string, localPort int, sql string) error {
+	cmd := exec.CommandContext(ctx, m.Bins.Psql,
+		"-h", localHost, "-p", strconv.Itoa(localPort), "-d", "postgres",
+		"-v", "ON_ERROR_STOP=1", "-c", sql,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// DetachSubscriptionsLocal drops local subscriptions without dropping slots on the publisher.
+// Used when cloning a logical replica so the copy does not steal the seed's prod connection.
+func (m *Manager) DetachSubscriptionsLocal(ctx context.Context, localHost string, localPort int) error {
+	cmd := exec.CommandContext(ctx, m.Bins.Psql,
+		"-h", localHost, "-p", strconv.Itoa(localPort), "-d", "postgres",
+		"-t", "-A", "-c", `SELECT subname FROM pg_subscription`,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("list subscriptions: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		ident := quoteIdent(name)
+		_ = m.psqlLocal(ctx, localHost, localPort, fmt.Sprintf(`ALTER SUBSCRIPTION %s DISABLE`, ident))
+		_ = m.psqlLocal(ctx, localHost, localPort, fmt.Sprintf(`ALTER SUBSCRIPTION %s SET (slot_name = NONE)`, ident))
+		if err := m.psqlLocal(ctx, localHost, localPort, fmt.Sprintf(`DROP SUBSCRIPTION IF EXISTS %s`, ident)); err != nil {
+			return fmt.Errorf("detach subscription %s: %w", name, err)
+		}
+		fmt.Fprintf(os.Stderr, "  detached local subscription %s (publisher slot kept)\n", name)
+	}
+	return nil
+}
+
+func (m *Manager) ReloadLocal(ctx context.Context, localHost string, localPort int) error {
+	return m.psqlLocal(ctx, localHost, localPort, "SELECT pg_reload_conf()")
 }
 
 func (m *Manager) psqlPrimary(ctx context.Context, c Conn, sql string) (string, error) {

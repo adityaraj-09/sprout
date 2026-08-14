@@ -73,6 +73,8 @@ sprout connect --name=supabase --mode=logical --dry-run 'postgresql://USER:PASS@
 sprout connect --name=supabase --mode=logical 'postgresql://USER:PASS@HOST:5432/postgres'
 ```
 
+A **second** `sprout connect` to the same host:port/database clones a local replica (no extra Supabase WAL sender). Only the first live replica of that URL opens a logical slot on prod. `max_wal_senders` errors mean too many live slots — delete unused connectors, then connect again.
+
 Physical (you control WAL / replication):
 
 ```bash

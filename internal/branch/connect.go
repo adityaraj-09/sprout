@@ -190,6 +190,17 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 	}
 
 	if needBootstrap {
+		if seed, ok := s.findSeedReplica(ctx, projectID, opts.URL, c.ID); ok {
+			fmt.Println("→ cloning existing local replica of this primary (no extra prod slot)")
+			cloned, lag, err := s.cloneConnectorFromLocal(ctx, projectID, c, seed, conn)
+			if err != nil {
+				return ConnectResult{}, err
+			}
+			fmt.Println("  ", postgres.FormatConnString(cloned.Port, "postgres", cloned.Password, cloned.Name, "", cloned.CreatedBy))
+			fmt.Println("  ", postgres.PsqlOneLiner(cloned.Port, cloned.Password, cloned.Name, "", cloned.CreatedBy))
+			return ConnectResult{Connector: &cloned, Lag: &lag}, nil
+		}
+
 		fmt.Println("→ ensure publication on primary (hits prod)")
 		if err := rm.EnsurePublication(ctx, conn, pub, "public", opts.Tables); err != nil {
 			_, _, e := s.failConnector(ctx, c, fmt.Errorf("publication: %w", err))
@@ -271,6 +282,121 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, "", c.CreatedBy))
 	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password, c.Name, "", c.CreatedBy))
 	return ConnectResult{Connector: &c, Lag: &lag}, nil
+}
+
+func (s *Service) findSeedReplica(ctx context.Context, projectID, primaryURL, excludeID string) (meta.Connector, bool) {
+	want := replica.PrimaryKeyFromURL(primaryURL)
+	if want == "" {
+		return meta.Connector{}, false
+	}
+	list, err := s.Store.ListConnectorsByProject(ctx, projectID)
+	if err != nil {
+		return meta.Connector{}, false
+	}
+	var best meta.Connector
+	bestScore := 0
+	for _, cand := range list {
+		if cand.ID == excludeID || cand.DataDir == "" {
+			continue
+		}
+		switch cand.Status {
+		case meta.ConnectorError, meta.ConnectorBootstrapping:
+			continue
+		}
+		if replica.PrimaryKeyFromURL(cand.PrimaryURL) != want {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(cand.DataDir, "PG_VERSION")); err != nil {
+			continue
+		}
+		score := 1
+		if cand.Status == meta.ConnectorReplicating {
+			score += 2
+		}
+		if cand.Status == meta.ConnectorIdle {
+			score++
+		}
+		running, _ := s.Compute.IsRunning(ctx, s.connectorHandle(cand))
+		if running {
+			score++
+		}
+		if score > bestScore {
+			bestScore = score
+			best = cand
+		}
+	}
+	return best, bestScore > 0
+}
+
+func (s *Service) cloneConnectorFromLocal(ctx context.Context, projectID string, dest, seed meta.Connector, primary replica.Conn) (meta.Connector, replica.Lag, error) {
+	unlock := s.lockBranch("snap:" + seed.ID)
+	defer unlock()
+
+	h := s.connectorHandle(dest)
+	_ = s.Compute.Stop(ctx, h)
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		running, _ := s.Compute.IsRunning(ctx, h)
+		if !running {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	_ = s.Storage.Destroy(dest.DataDir)
+
+	srcHandle := s.connectorHandle(seed)
+	srcInst := &postgres.Instance{
+		Name: seed.Name, Owner: seed.CreatedBy, DataDir: seed.DataDir, Port: seed.Port,
+		LogFile: s.logPath(srcHandle.Name), Bins: s.Bins, Password: seed.Password,
+	}
+	if running, _ := s.Compute.IsRunning(ctx, srcHandle); running {
+		if err := srcInst.Checkpoint(); err != nil {
+			return s.failConnector(ctx, dest, fmt.Errorf("storage_failed: checkpoint seed: %w", err))
+		}
+	} else if _, err := os.Stat(filepath.Join(seed.DataDir, "PG_VERSION")); err != nil {
+		return s.failConnector(ctx, dest, fmt.Errorf("source_not_ready: no local replica to clone"))
+	}
+
+	snapName := postgres.ReplicaComputeName(dest.Name, dest.CreatedBy) + "-seed"
+	snapRef, err := s.Storage.Snapshot(seed.DataDir, snapName)
+	if err != nil {
+		return s.failConnector(ctx, dest, fmt.Errorf("storage_failed: %w", err))
+	}
+	if err := s.Storage.Clone(snapRef, dest.DataDir); err != nil {
+		_ = s.Storage.Destroy(snapRef)
+		return s.failConnector(ctx, dest, fmt.Errorf("storage_failed: %w", err))
+	}
+	_ = s.Storage.Destroy(snapRef)
+
+	inst := &postgres.Instance{
+		Name: dest.Name, Owner: dest.CreatedBy, DataDir: dest.DataDir, Port: dest.Port,
+		LogFile: s.logPath(h.Name), Bins: s.Bins, Password: dest.Password,
+	}
+	if err := inst.PrepareClone(); err != nil {
+		return s.failConnector(ctx, dest, err)
+	}
+	if err := postgres.SetLogicalReplicationWorkers(dest.DataDir, 0); err != nil {
+		return s.failConnector(ctx, dest, err)
+	}
+	if _, err := s.Compute.Start(ctx, compute.Spec{
+		Name: h.Name, DataDir: dest.DataDir, Port: dest.Port, LogFile: s.logPath(h.Name),
+	}); err != nil {
+		return s.failConnector(ctx, dest, err)
+	}
+	rm := &replica.Manager{Bins: s.Bins}
+	if err := rm.DetachSubscriptionsLocal(ctx, "127.0.0.1", dest.Port); err != nil {
+		return s.failConnector(ctx, dest, err)
+	}
+	_ = postgres.SetLogicalReplicationWorkers(dest.DataDir, -1)
+	_ = rm.ReloadLocal(ctx, "127.0.0.1", dest.Port)
+	_ = inst.EnsureAppRoles()
+
+	_ = rm.DropReplicationSlot(ctx, primary, subName(dest))
+	_ = rm.DropPublication(ctx, primary, pubName(dest))
+
+	lag := replica.Lag{ReceiveLSN: seed.LastLSN, ReplayLSN: seed.LastLSN}
+	fmt.Printf("✓ cloned local replica of this primary (independent copy, not a new Supabase slot)\n")
+	return s.finishConnector(ctx, projectID, dest, lag)
 }
 
 func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, primaryURL, mode string) (meta.Connector, error) {
@@ -367,7 +493,9 @@ func (s *Service) ReplicationStatus(ctx context.Context, projectID, name string)
 			return c, replica.Lag{}, err
 		}
 		lag := replica.Lag{ReceiveLSN: st.ReceivedLSN, ReplayLSN: st.ReceivedLSN}
-		c.LastLSN = st.ReceivedLSN
+		if st.ReceivedLSN != "" {
+			c.LastLSN = st.ReceivedLSN
+		}
 		if st.TableTotal > 0 && st.TableReady >= st.TableTotal {
 			c.Status = meta.ConnectorReplicating
 		}

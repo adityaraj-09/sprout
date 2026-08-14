@@ -63,6 +63,19 @@ func ParseURL(raw string) (Conn, error) {
 	return Conn{Host: host, Port: port, User: user, Password: pass, Database: db, SSLMode: ssl, Raw: raw}, nil
 }
 
+// PrimaryKey identifies an upstream cluster so two URLs with different passwords still match.
+func (c Conn) PrimaryKey() string {
+	return fmt.Sprintf("%s:%d/%s", strings.ToLower(c.Host), c.Port, strings.ToLower(c.Database))
+}
+
+func PrimaryKeyFromURL(raw string) string {
+	c, err := ParseURL(raw)
+	if err != nil {
+		return strings.ToLower(strings.TrimSpace(raw))
+	}
+	return c.PrimaryKey()
+}
+
 func (c Conn) PrimaryConnInfo() string {
 	parts := []string{
 		fmt.Sprintf("host=%s", c.Host),
@@ -138,7 +151,7 @@ func (m *Manager) BaseBackup(ctx context.Context, c Conn, destDir string) error 
 		"-p", strconv.Itoa(c.Port),
 		"-U", c.User,
 		"-D", destDir,
-		"-R",          // write recovery config
+		"-R",           // write recovery config
 		"-X", "stream", // stream WAL while copying
 		"-c", "fast",
 		"--no-password",
@@ -168,12 +181,12 @@ func (m *Manager) PrepareStandbyDataDir(dataDir string, port int) error {
 }
 
 type Lag struct {
-	IsStandby     bool   `json:"is_standby"`
-	ReceiveLSN   string `json:"receive_lsn"`
-	ReplayLSN    string `json:"replay_lsn"`
-	ReplayPause   bool   `json:"replay_paused"`
-	LagBytes      int64  `json:"lag_bytes"`
-	InRecovery    bool   `json:"in_recovery"`
+	IsStandby   bool   `json:"is_standby"`
+	ReceiveLSN  string `json:"receive_lsn"`
+	ReplayLSN   string `json:"replay_lsn"`
+	ReplayPause bool   `json:"replay_paused"`
+	LagBytes    int64  `json:"lag_bytes"`
+	InRecovery  bool   `json:"in_recovery"`
 }
 
 func (m *Manager) Status(ctx context.Context, host string, port int) (Lag, error) {
