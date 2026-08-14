@@ -168,11 +168,13 @@ func (z *ZFS) Snapshot(sourceDir, snapshotName string) (string, error) {
 	sourceDir = filepath.Clean(sourceDir)
 	ds := z.datasetForDir(sourceDir)
 	if name, mp := lookupZFSMount(sourceDir); name == "" || filepath.Clean(mp) != sourceDir {
-		// Subdirectory of a larger dataset cannot be snapshotted independently.
-		if name != "" && filepath.Clean(mp) != sourceDir {
-			return "", fmt.Errorf("zfs: %s is a subdirectory of dataset %s (mount %s); each PGDATA must be its own dataset — run with nested volumes or SPROUT_STORAGE=copy", sourceDir, name, mp)
-		}
+		// Legacy copy-backed PGDATA is a normal directory inside datasetRoot.
+		// Promote it to its own child dataset before taking the first ZFS
+		// snapshot. ensureMountedDataset preserves the directory contents.
 		if err := z.ensureMountedDataset(ds, sourceDir); err != nil {
+			if name != "" {
+				return "", fmt.Errorf("zfs snapshot: promote %s from dataset %s (mount %s): %w", sourceDir, name, mp, err)
+			}
 			return "", fmt.Errorf("zfs snapshot: ensure dataset for %s: %w", sourceDir, err)
 		}
 		ds = z.datasetForDir(sourceDir)
