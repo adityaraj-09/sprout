@@ -64,6 +64,7 @@ export class SproutClient {
   async connect(opts: {
     url: string;
     name?: string;
+    engine?: string;
     mode?: "physical" | "logical" | string;
     wipe?: boolean;
     dryRun?: boolean;
@@ -72,7 +73,8 @@ export class SproutClient {
     return this.request("POST", `/v1/projects/${this.project}/connect`, {
       url: opts.url,
       name: opts.name ?? "primary",
-      mode: opts.mode ?? "physical",
+      engine: opts.engine,
+      mode: opts.mode ?? "",
       wipe: opts.wipe ?? true,
       dry_run: opts.dryRun ?? false,
       tables: opts.tables,

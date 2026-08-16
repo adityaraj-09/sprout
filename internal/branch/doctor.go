@@ -55,6 +55,17 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 		add(DoctorCheck{Name: "bin:" + b.name, OK: true, Level: "info", Detail: detail})
 	}
 
+	for _, name := range []string{"mysqld", "mysql", "mysqldump"} {
+		p := findOnPath(name)
+		if p == "" {
+			add(DoctorCheck{Name: "bin:" + name, OK: true, Level: "info",
+				Detail: "not found (optional; needed for --engine=mysql)",
+				Hint:   "install mysql-server and mysql-client to connect MySQL sources"})
+			continue
+		}
+		add(DoctorCheck{Name: "bin:" + name, OK: true, Level: "info", Detail: p})
+	}
+
 	// Storage / compute
 	add(DoctorCheck{Name: "storage", OK: true, Level: "info", Detail: s.Storage.Name(),
 		Hint: storageHint(s.Storage.Name())})

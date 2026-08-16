@@ -10,7 +10,9 @@ import (
 
 	"github.com/adityaraj/sprout/internal/auth"
 	"github.com/adityaraj/sprout/internal/compute"
+	"github.com/adityaraj/sprout/internal/engine"
 	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/mysql"
 	"github.com/adityaraj/sprout/internal/postgres"
 	"github.com/adityaraj/sprout/internal/replica"
 	"github.com/google/uuid"
@@ -25,6 +27,7 @@ const (
 type ConnectOpts struct {
 	Name   string
 	URL    string
+	Engine string
 	Mode   string
 	Wipe   bool     // default true — destroy local replica and rebootstrap
 	DryRun bool     // estimate only (logical)
@@ -41,8 +44,19 @@ type ConnectResult struct {
 
 // Connect bootstraps a named local replica from an upstream Postgres.
 func (s *Service) Connect(ctx context.Context, projectID string, opts ConnectOpts) (ConnectResult, error) {
+	if opts.Engine == "" {
+		opts.Engine = engine.InferFromURL(opts.URL)
+	}
+	opts.Engine = engine.Normalize(opts.Engine)
+	if !engine.IsKnown(opts.Engine) {
+		return ConnectResult{}, fmt.Errorf("invalid_engine: use postgres or mysql")
+	}
 	if opts.Mode == "" {
-		opts.Mode = ModePhysical
+		if engine.IsMySQL(opts.Engine) {
+			opts.Mode = ModeLogical
+		} else {
+			opts.Mode = ModePhysical
+		}
 	}
 	if opts.Mode != ModePhysical && opts.Mode != ModeLogical {
 		return ConnectResult{}, fmt.Errorf("invalid_mode: use physical or logical")
@@ -52,6 +66,12 @@ func (s *Service) Connect(ctx context.Context, projectID string, opts ConnectOpt
 	}
 	if !nameRe.MatchString(opts.Name) {
 		return ConnectResult{}, fmt.Errorf("invalid_name: connector name must match [a-z][a-z0-9-]*")
+	}
+	if engine.IsMySQL(opts.Engine) {
+		if opts.Mode == ModePhysical {
+			return ConnectResult{}, fmt.Errorf("invalid_mode: mysql only supports mode=logical (mysqldump snapshot) in this version")
+		}
+		return s.connectMySQLLogical(ctx, projectID, opts)
 	}
 	if opts.Mode == ModeLogical {
 		return s.connectLogical(ctx, projectID, opts)
@@ -85,7 +105,7 @@ func (s *Service) connectPhysical(ctx context.Context, projectID, name, primaryU
 		return meta.Connector{}, replica.Lag{}, err
 	}
 
-	c, err := s.prepareConnectorRecord(ctx, projectID, name, primaryURL, ModePhysical)
+	c, err := s.prepareConnectorRecord(ctx, projectID, name, primaryURL, ModePhysical, engine.Postgres)
 	if err != nil {
 		return meta.Connector{}, replica.Lag{}, err
 	}
@@ -166,7 +186,7 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 		return ConnectResult{DryRun: true, Estimate: est}, nil
 	}
 
-	c, err := s.prepareConnectorRecord(ctx, projectID, opts.Name, opts.URL, ModeLogical)
+	c, err := s.prepareConnectorRecord(ctx, projectID, opts.Name, opts.URL, ModeLogical, engine.Postgres)
 	if err != nil {
 		return ConnectResult{}, err
 	}
@@ -281,6 +301,113 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 	}
 	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, "", c.CreatedBy))
 	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password, c.Name, "", c.CreatedBy))
+	return ConnectResult{Connector: &c, Lag: &lag}, nil
+}
+
+func (s *Service) connectMySQLLogical(ctx context.Context, projectID string, opts ConnectOpts) (ConnectResult, error) {
+	unlock := s.lockBranch(s.connectorLockKey(opts.Name, auth.OwnerFrom(ctx)))
+	defer unlock()
+
+	conn, err := mysql.ParseURL(opts.URL)
+	if err != nil {
+		return ConnectResult{}, err
+	}
+	if err := replica.EnsurePrimaryReachable(conn.Host, conn.Port, 5*time.Second); err != nil {
+		return ConnectResult{}, err
+	}
+	bins, err := mysql.LookBinaries()
+	if err != nil {
+		return ConnectResult{}, err
+	}
+	if err := bins.Ping(ctx, conn); err != nil {
+		return ConnectResult{}, err
+	}
+	if opts.DryRun {
+		est, err := bins.Estimate(ctx, conn, opts.Tables)
+		if err != nil {
+			return ConnectResult{}, err
+		}
+		return ConnectResult{DryRun: true, Estimate: est}, nil
+	}
+
+	c, err := s.prepareConnectorRecord(ctx, projectID, opts.Name, opts.URL, ModeLogical, engine.MySQL)
+	if err != nil {
+		return ConnectResult{}, err
+	}
+
+	fmt.Println("=== connect mysql (snapshot dump) ===")
+	fmt.Printf("  name=%s port=%d dir=%s wipe=%v\n", c.Name, c.Port, c.DataDir, opts.Wipe)
+	fmt.Printf("  primary: %s:%d user=%s db=%s\n", conn.Host, conn.Port, conn.User, conn.Database)
+	fmt.Println("  note: this is a point-in-time import; it does not follow binlog")
+
+	h := s.connectorHandle(c)
+	needBootstrap := opts.Wipe
+	if !needBootstrap && !mysql.HasDataDir(c.DataDir) {
+		needBootstrap = true
+	}
+
+	if needBootstrap {
+		_ = s.Compute.Stop(ctx, h)
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			running, _ := s.Compute.IsRunning(ctx, h)
+			if !running {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		_ = s.Storage.Destroy(c.DataDir)
+		if err := s.Storage.EnsureVolume(c.DataDir); err != nil {
+			_, _, e := s.failConnector(ctx, c, err)
+			return ConnectResult{}, e
+		}
+		inst := &mysql.Instance{
+			Name: c.Name, Owner: c.CreatedBy, DataDir: c.DataDir, Port: c.Port,
+			LogFile: s.logPath(postgres.ReplicaComputeName(c.Name, c.CreatedBy)), Bins: bins, Password: c.Password,
+		}
+		fmt.Println("→ mysqld --initialize-insecure")
+		if err := inst.Init(); err != nil {
+			_, _, e := s.failConnector(ctx, c, err)
+			return ConnectResult{}, e
+		}
+		if _, err := s.Compute.Start(ctx, compute.Spec{
+			Name: postgres.ReplicaComputeName(c.Name, c.CreatedBy), DataDir: c.DataDir, Port: c.Port,
+			LogFile: s.logPath(postgres.ReplicaComputeName(c.Name, c.CreatedBy)), Engine: engine.MySQL,
+		}); err != nil {
+			_, _, e := s.failConnector(ctx, c, err)
+			return ConnectResult{}, e
+		}
+		if err := bins.DumpImport(ctx, conn, inst, opts.Tables); err != nil {
+			_, _, e := s.failConnector(ctx, c, err)
+			return ConnectResult{}, e
+		}
+		_ = inst.EnsureAppRoles()
+	} else {
+		fmt.Println("→ resume existing MySQL replica (--no-wipe)")
+		if err := s.Storage.EnsureVolume(c.DataDir); err != nil {
+			_, _, e := s.failConnector(ctx, c, err)
+			return ConnectResult{}, e
+		}
+		running, _ := s.Compute.IsRunning(ctx, h)
+		if !running {
+			if _, err := s.Compute.Start(ctx, compute.Spec{
+				Name: postgres.ReplicaComputeName(c.Name, c.CreatedBy), DataDir: c.DataDir, Port: c.Port,
+				LogFile: s.logPath(postgres.ReplicaComputeName(c.Name, c.CreatedBy)), Engine: engine.MySQL,
+			}); err != nil {
+				_, _, e := s.failConnector(ctx, c, err)
+				return ConnectResult{}, e
+			}
+		}
+	}
+
+	lag := replica.Lag{}
+	c, lag, err = s.finishConnector(ctx, projectID, c, lag)
+	if err != nil {
+		return ConnectResult{}, err
+	}
+	url, one := advertiseConnector(c)
+	fmt.Println("  ", url)
+	fmt.Println("  ", one)
 	return ConnectResult{Connector: &c, Lag: &lag}, nil
 }
 
@@ -399,11 +526,13 @@ func (s *Service) cloneConnectorFromLocal(ctx context.Context, projectID string,
 	return s.finishConnector(ctx, projectID, dest, lag)
 }
 
-func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, primaryURL, mode string) (meta.Connector, error) {
+func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, primaryURL, mode, eng string) (meta.Connector, error) {
 	owner := auth.OwnerFrom(ctx)
 	dataDir := s.ReplicaDir(name, owner)
+	eng = engine.Normalize(eng)
 	if existing, err := s.Store.GetConnectorByName(ctx, projectID, name, owner); err == nil {
 		existing.PrimaryURL = primaryURL
+		existing.Engine = eng
 		existing.Mode = mode
 		existing.Status = meta.ConnectorBootstrapping
 		existing.ErrorMessage = ""
@@ -436,7 +565,7 @@ func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, p
 		return meta.Connector{}, fmt.Errorf("storage_failed: ensure replica volume: %w", err)
 	}
 	c := meta.Connector{
-		ID: uuid.NewString(), ProjectID: projectID, Name: name, PrimaryURL: primaryURL, Mode: mode,
+		ID: uuid.NewString(), ProjectID: projectID, Name: name, PrimaryURL: primaryURL, Engine: eng, Mode: mode,
 		Status: meta.ConnectorBootstrapping, DataDir: dataDir, Port: port,
 		Password:  postgres.GeneratePassword(),
 		CreatedBy: owner,
@@ -468,23 +597,45 @@ func (s *Service) finishConnector(ctx context.Context, projectID string, c meta.
 	}
 	c.LastLagBytes = lag.LagBytes
 	_ = s.Store.UpdateConnector(ctx, c)
+	url, one := advertiseConnector(c)
 	_ = s.Store.PutBranch(ctx, meta.BranchRecord{
 		ID: "replica-" + c.ID, ProjectID: projectID, Name: "replica-" + c.Name, Role: "replica",
 		Status: meta.StatusActive, Port: c.Port, DataDir: c.DataDir, Compute: s.Compute.Name(),
-		ConnString:      postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, "", c.CreatedBy),
+		ConnString:      url,
 		SourceConnector: c.Name, SourceConnectorID: c.ID,
 		Password: c.Password, CreatedBy: c.CreatedBy,
 	})
-	fmt.Printf("✓ connector %q mode=%s status=replicating port=%d lsn=%s\n", c.Name, c.Mode, c.Port, c.LastLSN)
-	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, "", c.CreatedBy))
-	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password, c.Name, "", c.CreatedBy))
+	fmt.Printf("✓ connector %q engine=%s mode=%s status=replicating port=%d lsn=%s\n", c.Name, engine.Normalize(c.Engine), c.Mode, c.Port, c.LastLSN)
+	fmt.Println("  ", url)
+	fmt.Println("  ", one)
 	return c, lag, nil
+}
+
+func advertiseConnector(c meta.Connector) (connURL, oneLiner string) {
+	if engine.IsMySQL(c.Engine) {
+		return mysql.FormatConnString(c.Port, "", c.Password, c.Name, "", c.CreatedBy),
+			mysql.MysqlOneLiner(c.Port, c.Password, c.Name, "", c.CreatedBy)
+	}
+	return postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, "", c.CreatedBy),
+		postgres.PsqlOneLiner(c.Port, c.Password, c.Name, "", c.CreatedBy)
+}
+
+func advertiseBranch(rec meta.BranchRecord, eng string) (connURL, oneLiner string) {
+	if engine.IsMySQL(eng) {
+		return mysql.FormatConnString(rec.Port, "", rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy),
+			mysql.MysqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
+	}
+	return postgres.FormatConnString(rec.Port, "postgres", rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy),
+		postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
 }
 
 func (s *Service) ReplicationStatus(ctx context.Context, projectID, name string) (meta.Connector, replica.Lag, error) {
 	c, err := s.resolveConnector(ctx, projectID, name)
 	if err != nil {
 		return meta.Connector{}, replica.Lag{}, err
+	}
+	if engine.IsMySQL(c.Engine) {
+		return c, replica.Lag{}, nil
 	}
 	rm := &replica.Manager{Bins: s.Bins}
 	if c.Mode == ModeLogical {
@@ -547,7 +698,7 @@ func (s *Service) DeleteConnector(ctx context.Context, projectID, name string, f
 	rm := &replica.Manager{Bins: s.Bins}
 	h := s.connectorHandle(c)
 
-	if c.Mode == ModeLogical {
+	if c.Mode == ModeLogical && !engine.IsMySQL(c.Engine) {
 		running, _ := s.Compute.IsRunning(ctx, h)
 		if running {
 			_ = rm.DropSubscriptionLocal(ctx, "127.0.0.1", c.Port, subName(c))

@@ -37,6 +37,19 @@ func TestSQLitePasswordRoundTrip(t *testing.T) {
 	if c.Password != "secret-conn" {
 		t.Fatalf("connector password=%q", c.Password)
 	}
+	if c.Engine != "postgres" {
+		t.Fatalf("default engine=%q", c.Engine)
+	}
+	if err := store.UpdateConnector(ctx, Connector{
+		ID: c.ID, ProjectID: proj.ID, Name: "sup", Engine: "mysql", Mode: "logical",
+		Status: ConnectorReplicating, Port: 55434, Password: "secret-conn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c, err = store.GetConnectorByName(ctx, proj.ID, "sup", "")
+	if err != nil || c.Engine != "mysql" {
+		t.Fatalf("engine round-trip: %+v %v", c, err)
+	}
 	b, err := store.GetBranch(ctx, proj.ID, "feat")
 	if err != nil {
 		t.Fatal(err)

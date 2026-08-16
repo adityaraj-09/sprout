@@ -252,7 +252,7 @@ Connectors and branches each get an allocated port.
 | Command | Description |
 |---------|-------------|
 | `sprout init` | Ensure default project + local `main` + seed demo |
-| `sprout connect [--name=id] [--mode=physical\|logical] <url>` | Bootstrap named replica |
+| `sprout connect [--name=id] [--engine=postgres\|mysql] [--mode=physical\|logical] <url>` | Bootstrap named replica |
 | `sprout status [name]` | Replication lag / logical sync for a connector |
 | `sprout connector list` | List connectors (password redacted) |
 | `sprout connector delete <name> [--force]` | Drop local replica + remote pub; `--force` also deletes child branches |
@@ -273,7 +273,8 @@ Connectors and branches each get an allocated port.
 Defaults:
 
 - `--name=primary` if omitted on connect  
-- `--mode=physical` if omitted  
+- `--engine` inferred from URL (`mysql://` → mysql, otherwise postgres)  
+- `--mode=physical` if omitted for Postgres; MySQL defaults to `logical` (mysqldump snapshot, no binlog)  
 
 ---
 

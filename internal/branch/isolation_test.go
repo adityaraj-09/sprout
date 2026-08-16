@@ -138,3 +138,26 @@ func TestFindSeedReplicaSamePrimary(t *testing.T) {
 		t.Fatal("other host must not match")
 	}
 }
+
+func TestMySQLRejectsPhysical(t *testing.T) {
+	svc, proj := testService(t)
+	_, err := svc.Connect(context.Background(), proj.ID, ConnectOpts{
+		Name: "shop", URL: "mysql://root@127.0.0.1:3306/app", Engine: "mysql", Mode: ModePhysical,
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid_mode") {
+		t.Fatalf("expected invalid_mode, got %v", err)
+	}
+}
+
+func TestInferMySQLEngine(t *testing.T) {
+	svc, proj := testService(t)
+	_, err := svc.Connect(context.Background(), proj.ID, ConnectOpts{
+		Name: "shop", URL: "mysql://root@127.0.0.1:1/app", Mode: ModeLogical, DryRun: true,
+	})
+	if err == nil {
+		t.Fatal("unreachable mysql should fail reachability or ping, not succeed")
+	}
+	if strings.Contains(err.Error(), "invalid_engine") || strings.Contains(err.Error(), "url scheme must be postgres") {
+		t.Fatalf("mysql URL should be accepted as mysql engine, got %v", err)
+	}
+}

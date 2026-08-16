@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/adityaraj/sprout/internal/compute"
+	"github.com/adityaraj/sprout/internal/engine"
 	"github.com/adityaraj/sprout/internal/meta"
 	"github.com/adityaraj/sprout/internal/postgres"
 	"github.com/adityaraj/sprout/internal/storage"
@@ -139,8 +140,14 @@ func (r *Reconciler) fixBranch(ctx context.Context, b meta.BranchRecord) {
 }
 
 func (r *Reconciler) startBranch(ctx context.Context, b meta.BranchRecord) error {
+	eng := engine.Postgres
+	if b.SourceConnectorID != "" {
+		if c, err := r.Store.GetConnectorByID(ctx, b.SourceConnectorID); err == nil {
+			eng = engine.Normalize(c.Engine)
+		}
+	}
 	_, err := r.Compute.Start(ctx, compute.Spec{
-		Name: instKey(b), DataDir: b.DataDir, Port: b.Port, LogFile: r.logPath(instKey(b)),
+		Name: instKey(b), DataDir: b.DataDir, Port: b.Port, LogFile: r.logPath(instKey(b)), Engine: eng,
 	})
 	if err != nil {
 		return err
@@ -224,7 +231,7 @@ func (r *Reconciler) fixConnector(ctx context.Context, c meta.Connector) {
 func (r *Reconciler) startConnector(ctx context.Context, c meta.Connector) error {
 	_, err := r.Compute.Start(ctx, compute.Spec{
 		Name: replicaName(c), DataDir: c.DataDir, Port: c.Port,
-		LogFile: r.logPath(replicaName(c)),
+		LogFile: r.logPath(replicaName(c)), Engine: engine.Normalize(c.Engine),
 	})
 	if err != nil {
 		return err

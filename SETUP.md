@@ -110,6 +110,15 @@ pg_dump --version
 
 If `pg_dump` major is lower than the primary, logical connect fails with `version_mismatch`.
 
+Optional — MySQL snapshot connectors (`sprout connect --engine=mysql`):
+
+```bash
+sudo apt install -y mysql-server mysql-client
+which mysqld mysql mysqldump
+```
+
+MySQL connect is a `mysqldump` import into a local `mysqld` datadir (no binlog follow). Branches are CoW clones of that datadir. DSNs use the unique instance port, not the Postgres SNI proxy on `:5432`.
+
 ---
 
 ## 4. Data disk + ZFS

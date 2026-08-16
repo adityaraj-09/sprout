@@ -32,6 +32,7 @@ export type Connector = {
   project_id: string;
   name: string;
   primary_url: string;
+  engine?: string;
   mode: string;
   status: string;
   data_dir: string;
@@ -50,6 +51,7 @@ export type ConnectResult = {
   project?: Project;
   connection_string?: string;
   psql?: string;
+  mysql?: string;
   dry_run?: boolean;
   estimate?: Record<string, unknown>;
 };

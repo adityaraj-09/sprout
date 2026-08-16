@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/adityaraj/sprout/internal/engine"
 	"github.com/adityaraj/sprout/internal/postgres"
 )
 
@@ -72,6 +73,9 @@ func (d *Docker) containerName(spec Spec) string {
 }
 
 func (d *Docker) Start(ctx context.Context, spec Spec) (Handle, error) {
+	if specEngine(spec) == engine.MySQL {
+		return Handle{}, fmt.Errorf("mysql requires SPROUT_COMPUTE=local in this version")
+	}
 	name := d.containerName(spec)
 	_ = exec.CommandContext(ctx, "docker", "rm", "-f", name).Run()
 

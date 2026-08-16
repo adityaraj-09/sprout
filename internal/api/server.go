@@ -9,7 +9,9 @@ import (
 
 	"github.com/adityaraj/sprout/internal/auth"
 	"github.com/adityaraj/sprout/internal/branch"
+	"github.com/adityaraj/sprout/internal/engine"
 	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/mysql"
 	"github.com/adityaraj/sprout/internal/postgres"
 )
 
@@ -119,6 +121,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		URL    string   `json:"url"`
+		Engine string   `json:"engine"`
 		Mode   string   `json:"mode"`
 		Name   string   `json:"name"`
 		Wipe   *bool    `json:"wipe"`
@@ -127,7 +130,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.URL == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_body",
-			`JSON {"url":"postgresql://...","mode":"logical|physical","name":"...","wipe":true,"dry_run":false,"tables":["t"]} required`)
+			`JSON {"url":"postgresql://... or mysql://...","engine":"postgres|mysql","mode":"logical|physical","name":"...","wipe":true,"dry_run":false,"tables":["t"]} required`)
 		return
 	}
 	wipe := true
@@ -137,7 +140,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Minute)
 	defer cancel()
 	res, err := s.Service.Connect(ctx, proj.ID, branch.ConnectOpts{
-		Name: body.Name, URL: body.URL, Mode: body.Mode,
+		Name: body.Name, URL: body.URL, Engine: body.Engine, Mode: body.Mode,
 		Wipe: wipe, DryRun: body.DryRun, Tables: body.Tables,
 	})
 	if err != nil {
@@ -162,8 +165,13 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		"project":   proj,
 	}
 	if res.Connector != nil {
-		out["connection_string"] = postgres.FormatConnString(res.Connector.Port, "postgres", res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
-		out["psql"] = postgres.PsqlOneLiner(res.Connector.Port, res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
+		if engine.IsMySQL(res.Connector.Engine) {
+			out["connection_string"] = mysql.FormatConnString(res.Connector.Port, "", res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
+			out["mysql"] = mysql.MysqlOneLiner(res.Connector.Port, res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
+		} else {
+			out["connection_string"] = postgres.FormatConnString(res.Connector.Port, "postgres", res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
+			out["psql"] = postgres.PsqlOneLiner(res.Connector.Port, res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -289,7 +297,7 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		"container_id":        rec.ContainerID,
 		"compute":             rec.Compute,
 		"connection_string":   rec.ConnString,
-		"psql":                postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy),
+		"psql":                branchOneLiner(rec),
 		"error_message":       rec.ErrorMessage,
 		"source_lsn":          rec.SourceLSN,
 		"source_connector":    rec.SourceConnector,
@@ -421,6 +429,8 @@ func mapErr(err error) (code string, status int) {
 		return "connector_has_branches", http.StatusConflict
 	case strings.HasPrefix(msg, "connector_exists"):
 		return "connector_exists", http.StatusConflict
+	case strings.HasPrefix(msg, "invalid_engine"):
+		return "invalid_engine", http.StatusBadRequest
 	case strings.HasPrefix(msg, "invalid_mode"):
 		return "invalid_mode", http.StatusBadRequest
 	case strings.HasPrefix(msg, "version_mismatch"):
@@ -429,6 +439,7 @@ func mapErr(err error) (code string, status int) {
 		return "invalid_body", http.StatusBadRequest
 	case strings.HasPrefix(msg, "logical_sync_stuck"):
 		return "logical_sync_stuck", http.StatusConflict
+	case strings.HasPrefix(msg, "replica_lag"):
 		return "replica_lag", http.StatusConflict
 	case strings.HasPrefix(msg, "compute_failed"):
 		return "compute_failed", http.StatusInternalServerError
@@ -437,6 +448,13 @@ func mapErr(err error) (code string, status int) {
 	default:
 		return "internal", http.StatusInternalServerError
 	}
+}
+
+func branchOneLiner(rec meta.BranchRecord) string {
+	if strings.HasPrefix(rec.ConnString, "mysql://") {
+		return mysql.MysqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
+	}
+	return postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

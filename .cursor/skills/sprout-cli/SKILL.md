@@ -81,6 +81,13 @@ Physical (you control WAL / replication):
 sprout connect --name=lab --mode=physical 'postgresql://user@127.0.0.1:55431/postgres'
 ```
 
+MySQL (snapshot import, then CoW branches; does **not** follow binlog):
+
+```bash
+sprout connect --name=shop --engine=mysql --mode=logical 'mysql://user:pass@host:3306/shop'
+sprout branch create feat --from=shop
+```
+
 Local demo only (no remote):
 
 ```bash
@@ -111,7 +118,7 @@ sprout login
 sprout logout
 sprout whoami
 sprout init
-sprout connect [--name=<id>] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <postgresql-url>
+sprout connect [--name=<id>] [--engine=postgres|mysql] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
 sprout status [connector-name]
 sprout connector list
 sprout connector delete <name> [--force]

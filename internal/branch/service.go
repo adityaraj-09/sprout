@@ -12,7 +12,9 @@ import (
 
 	"github.com/adityaraj/sprout/internal/auth"
 	"github.com/adityaraj/sprout/internal/compute"
+	"github.com/adityaraj/sprout/internal/engine"
 	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/mysql"
 	"github.com/adityaraj/sprout/internal/postgres"
 	"github.com/adityaraj/sprout/internal/replica"
 	"github.com/adityaraj/sprout/internal/storage"
@@ -302,7 +304,20 @@ func (s *Service) connectorSource(c meta.Connector) (dataDir string, port int, n
 	return dir, port, c.Name, c.ID, nil
 }
 
+func (s *Service) sourceEngine(ctx context.Context, rec meta.BranchRecord) string {
+	if rec.SourceConnectorID != "" {
+		if c, err := s.Store.GetConnectorByID(ctx, rec.SourceConnectorID); err == nil {
+			return engine.Normalize(c.Engine)
+		}
+	}
+	if mysql.HasDataDir(rec.DataDir) {
+		return engine.MySQL
+	}
+	return engine.Postgres
+}
+
 func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, srcDir string, srcPort int, srcName string) error {
+	eng := s.sourceEngine(ctx, *rec)
 	rm := &replica.Manager{Bins: s.Bins}
 	srcInst := &postgres.Instance{
 		Name: srcName, DataDir: srcDir, Port: srcPort,
@@ -323,7 +338,7 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	defer unlock()
 
 	st, stErr := rm.Status(ctx, "127.0.0.1", srcPort)
-	useReplayPause := stErr == nil && st.IsStandby
+	useReplayPause := !engine.IsMySQL(eng) && stErr == nil && st.IsStandby
 
 	if useReplayPause {
 		fmt.Println("→ Step 0: replica lag check")
@@ -342,7 +357,12 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 		rec.SourceLSN = st.ReplayLSN
 	} else {
 		fmt.Println("→ Step 1: CHECKPOINT (+ cold stop if enabled)")
-		if err := srcInst.Checkpoint(); err != nil {
+		if engine.IsMySQL(eng) {
+			my := &mysql.Instance{Name: srcName, DataDir: srcDir, Port: srcPort, Bins: mysql.FindOnPath()}
+			if err := my.FlushForSnapshot(); err != nil {
+				fmt.Fprintf(os.Stderr, "  mysql flush skipped: %v\n", err)
+			}
+		} else if err := srcInst.Checkpoint(); err != nil {
 			return fmt.Errorf("storage_failed: checkpoint: %w", err)
 		}
 		if s.ColdSnap {
@@ -359,7 +379,7 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 			_ = rm.ResumeReplay(ctx, "127.0.0.1", srcPort)
 		} else if s.ColdSnap {
 			_, _ = s.Compute.Start(ctx, compute.Spec{
-				Name: srcHandle.Name, DataDir: srcDir, Port: srcPort, LogFile: s.logPath(srcHandle.Name),
+				Name: srcHandle.Name, DataDir: srcDir, Port: srcPort, LogFile: s.logPath(srcHandle.Name), Engine: eng,
 			})
 		}
 		return fmt.Errorf("storage_failed: %w", err)
@@ -374,7 +394,7 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	} else if s.ColdSnap {
 		fmt.Println("→ restart source")
 		if _, err := s.Compute.Start(ctx, compute.Spec{
-			Name: srcHandle.Name, DataDir: srcDir, Port: srcPort, LogFile: s.logPath(srcHandle.Name),
+			Name: srcHandle.Name, DataDir: srcDir, Port: srcPort, LogFile: s.logPath(srcHandle.Name), Engine: eng,
 		}); err != nil {
 			return err
 		}
@@ -386,18 +406,41 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 		return fmt.Errorf("storage_failed: %w", err)
 	}
 
+	fmt.Println("→ Step 4: PrepareClone (promote branch to independent primary)")
+	fmt.Println("→ Step 5: start compute")
+	if engine.IsMySQL(eng) {
+		inst := &mysql.Instance{
+			Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port,
+			LogFile: s.logPath(s.instKey(*rec)), Bins: mysql.FindOnPath(), Password: rec.Password,
+		}
+		if err := inst.PrepareClone(); err != nil {
+			_ = s.Storage.Destroy(rec.DataDir)
+			_ = s.Storage.Destroy(snapRef)
+			return err
+		}
+		h, err := s.Compute.Start(ctx, compute.Spec{
+			Name: s.instKey(*rec), DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(s.instKey(*rec)), Engine: engine.MySQL,
+		})
+		if err != nil {
+			_ = s.Storage.Destroy(rec.DataDir)
+			_ = s.Storage.Destroy(snapRef)
+			return fmt.Errorf("compute_failed: %w", err)
+		}
+		rec.ContainerID = h.ContainerID
+		rec.ConnString = inst.ConnString("")
+		_ = inst.EnsureAppRoles()
+		return nil
+	}
+
 	inst := &postgres.Instance{
 		Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port,
 		LogFile: s.logPath(s.instKey(*rec)), Bins: s.Bins, Password: rec.Password,
 	}
-	fmt.Println("→ Step 4: PrepareClone (promote branch to independent primary)")
 	if err := inst.PrepareClone(); err != nil {
 		_ = s.Storage.Destroy(rec.DataDir)
 		_ = s.Storage.Destroy(snapRef)
 		return err
 	}
-
-	fmt.Println("→ Step 5: start compute")
 	h, err := s.Compute.Start(ctx, compute.Spec{
 		Name: s.instKey(*rec), DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(s.instKey(*rec)),
 	})
@@ -443,6 +486,28 @@ func (s *Service) Reset(ctx context.Context, projectID, name, from string) (meta
 		rec.ErrorMessage = err.Error()
 		_ = s.Store.UpdateBranch(ctx, rec)
 		return meta.BranchRecord{}, err
+	}
+	eng := s.sourceEngine(ctx, rec)
+	if engine.IsMySQL(eng) {
+		inst := &mysql.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: mysql.FindOnPath(), Password: rec.Password}
+		if err := inst.PrepareClone(); err != nil {
+			return meta.BranchRecord{}, err
+		}
+		started, err := s.Compute.Start(ctx, compute.Spec{Name: key, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Engine: engine.MySQL})
+		if err != nil {
+			rec.Status = meta.StatusError
+			rec.ErrorMessage = err.Error()
+			_ = s.Store.UpdateBranch(ctx, rec)
+			return meta.BranchRecord{}, err
+		}
+		rec.ContainerID = started.ContainerID
+		rec.Status = meta.StatusActive
+		rec.ErrorMessage = ""
+		rec.ConnString = inst.ConnString("")
+		rec.LastUsedAt = time.Now().UTC()
+		_ = inst.EnsureAppRoles()
+		_ = s.Store.UpdateBranch(ctx, rec)
+		return rec, nil
 	}
 	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
 	if err := inst.PrepareClone(); err != nil {
@@ -530,8 +595,9 @@ func (s *Service) Resume(ctx context.Context, projectID, name, from string) (met
 		return meta.BranchRecord{}, fmt.Errorf("invalid_state: status=%s", rec.Status)
 	}
 	key := s.instKey(rec)
+	eng := s.sourceEngine(ctx, rec)
 	started, err := s.Compute.Start(ctx, compute.Spec{
-		Name: key, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key),
+		Name: key, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Engine: eng,
 	})
 	if err != nil {
 		return meta.BranchRecord{}, err
@@ -540,9 +606,14 @@ func (s *Service) Resume(ctx context.Context, projectID, name, from string) (met
 	rec.Status = meta.StatusActive
 	rec.ErrorMessage = ""
 	rec.LastUsedAt = time.Now().UTC()
-	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres", rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
-	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
-	_ = inst.EnsureAppRoles()
+	rec.ConnString, _ = advertiseBranch(rec, eng)
+	if engine.IsMySQL(eng) {
+		inst := &mysql.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: mysql.FindOnPath(), Password: rec.Password}
+		_ = inst.EnsureAppRoles()
+	} else {
+		inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
+		_ = inst.EnsureAppRoles()
+	}
 	_ = s.Store.UpdateBranch(ctx, rec)
 	return rec, nil
 }

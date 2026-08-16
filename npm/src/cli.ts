@@ -21,7 +21,7 @@ Commands:
   sprout whoami
   sprout doctor
   sprout init
-  sprout connect [--name=<id>] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
+  sprout connect [--name=<id>] [--engine=postgres|mysql] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
   sprout status [name]
   sprout connector list
   sprout connector delete <name> [--force]
@@ -242,9 +242,10 @@ async function main(): Promise<void> {
       }
       case "connect": {
         const rest = argv.slice(1);
-        let mode = flag(rest, "mode") ?? "physical";
+        let mode = flag(rest, "mode") ?? "";
         if (rest.includes("--logical")) mode = "logical";
         if (rest.includes("--physical")) mode = "physical";
+        const engineName = flag(rest, "engine");
         const name = flag(rest, "name") ?? "primary";
         const wipe = !rest.includes("--no-wipe");
         const dryRun = rest.includes("--dry-run");
@@ -259,11 +260,11 @@ async function main(): Promise<void> {
         if (!url) {
           fatal(
             new Error(
-              "usage: sprout connect [--name=<id>] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <postgresql-url>",
+              "usage: sprout connect [--name=<id>] [--engine=postgres|mysql] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>",
             ),
           );
         }
-        const out = await client.connect({ url, name, mode, wipe, dryRun, tables });
+        const out = await client.connect({ url, name, engine: engineName, mode, wipe, dryRun, tables });
         if (out.dry_run) {
           console.log("dry-run estimate (will hit prod once for real bootstrap):");
           console.log(JSON.stringify(out.estimate, null, 2));
