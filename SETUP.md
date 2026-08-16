@@ -157,8 +157,9 @@ Sprout storage detection:
 Recommended once the pool works:
 
 ```bash
+export SPROUT_STORAGE=zfs
 export SPROUT_ZFS_DATASET=sprout/data
-# unset SPROUT_STORAGE   # or do not force copy
+export SPROUT_ZFS_SUDO=true
 ```
 
 On Linux, delegated `zfs allow mount` cannot bypass the kernel's root-only
@@ -194,23 +195,24 @@ Replace the public IP with yours:
 
 ```bash
 export PATH=/usr/lib/postgresql/17/bin:$PATH
-export SPROUT_DATA=$HOME/sprout-data
-export SPROUT_ZFS_DATASET=sprout/data      # real CoW; requires §4d sudoers
-export SPROUT_ZFS_SUDO=true
-# export SPROUT_STORAGE=copy               # lab fallback if ZFS is not configured
-export SPROUT_COMPUTE=local                # prefer local over Docker
+export SPROUT_DATA=/home/flagforge/sprout-data   # or $HOME/sprout-data
+export SPROUT_STORAGE=zfs
+export SPROUT_ZFS_DATASET=sprout/data            # required with SPROUT_STORAGE=zfs
+export SPROUT_ZFS_SUDO=true                      # Linux root mounts; see §4d sudoers
+export SPROUT_COMPUTE=local
 export SPROUT_LISTEN=0.0.0.0:8080
-export SPROUT_PUBLIC_HOST=strido.fit       # or your VM public IP
-export SPROUT_TOKEN='change-me-long-secret'   # machine/break-glass; humans use sprout login
-export SPROUT_GITHUB_CLIENT_ID=Iv1.xxxxxxxx   # GitHub OAuth App; enable Device Flow
-# optional: export SPROUT_GITHUB_USERS=alice,bob   # omit = any GitHub user can login
+export SPROUT_PUBLIC_HOST=server_domain          # e.g. strido.fit or the VM public IP
+export SPROUT_TOKEN='change-me-long-secret'
 export SPROUT_SAFE=true
-export SPROUT_DB_USER=sprout               # login role in connection strings
+export SPROUT_GITHUB_CLIENT_ID=Iv1.xxxxxxxx      # GitHub OAuth App; enable Device Flow
+# optional: export SPROUT_GITHUB_USERS=alice,bob # omit = any GitHub user can login
+export SPROUT_DB_USER=sprout                     # login role in connection strings
 # optional:
-# export SPROUT_BRANCH_SUBDOMAIN=false     # keep host as-is (default auto-on for DNS names)
-# export SPROUT_PG_PROXY=false             # advertise unique ports; skip the :5432 SNI proxy
-# export SPROUT_TRUST_REMOTE=true          # lab-only: remote trust instead of SCRAM
-# export SPROUT_AUTO_RESUME=true           # restart crashed connectors/branches
+# export SPROUT_STORAGE=copy                     # lab fallback if ZFS is not configured
+# export SPROUT_BRANCH_SUBDOMAIN=false           # keep host as-is (default auto-on for DNS names)
+# export SPROUT_PG_PROXY=false                   # advertise unique ports; skip the :5432 SNI proxy
+# export SPROUT_TRUST_REMOTE=true                # lab-only: remote trust instead of SCRAM
+# export SPROUT_AUTO_RESUME=true                 # restart crashed connectors/branches
 ```
 
 Persist in `~/.bashrc` or a systemd unit (below).
@@ -240,12 +242,13 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 WorkingDirectory=/home/YOUR_USER/sprout
 Environment=PATH=/usr/lib/postgresql/17/bin:/usr/local/go/bin:/usr/bin
 Environment=SPROUT_DATA=/home/YOUR_USER/sprout-data
+Environment=SPROUT_STORAGE=zfs
 Environment=SPROUT_ZFS_DATASET=sprout/data
 Environment=SPROUT_ZFS_SUDO=true
 # Environment=SPROUT_STORAGE=copy   # lab fallback if ZFS is not configured
 Environment=SPROUT_COMPUTE=local
 Environment=SPROUT_LISTEN=0.0.0.0:8080
-Environment=SPROUT_PUBLIC_HOST=YOUR_PUBLIC_IP
+Environment=SPROUT_PUBLIC_HOST=server_domain
 Environment=SPROUT_TOKEN=change-me-long-secret
 Environment=SPROUT_GITHUB_CLIENT_ID=Iv1.xxxxxxxx
 # Environment=SPROUT_GITHUB_USERS=alice,bob   # omit for public GitHub login
