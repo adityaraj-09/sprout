@@ -166,7 +166,11 @@ mount requirement. Run ZFS mutations through non-interactive sudo:
 
 ```bash
 ZFS_BIN="$(command -v zfs)"
-echo "YOUR_USER ALL=(root) NOPASSWD: $ZFS_BIN" | sudo tee /etc/sudoers.d/sprout-zfs
+CHOWN_BIN="$(command -v chown)"
+OWNER="$(id -u)\\:$(id -g)"
+DATA_ROOT="$HOME/sprout-data"
+echo "$USER ALL=(root) NOPASSWD: $ZFS_BIN, $CHOWN_BIN -- $OWNER $DATA_ROOT/main, $CHOWN_BIN -- $OWNER $DATA_ROOT/replicas/*, $CHOWN_BIN -- $OWNER $DATA_ROOT/branches/*" |
+  sudo tee /etc/sudoers.d/sprout-zfs
 sudo chmod 0440 /etc/sudoers.d/sprout-zfs
 sudo visudo -cf /etc/sudoers.d/sprout-zfs
 export SPROUT_ZFS_SUDO=true
@@ -191,7 +195,9 @@ Replace the public IP with yours:
 ```bash
 export PATH=/usr/lib/postgresql/17/bin:$PATH
 export SPROUT_DATA=$HOME/sprout-data
-export SPROUT_STORAGE=copy                 # or omit and set SPROUT_ZFS_DATASET=sprout/data
+export SPROUT_ZFS_DATASET=sprout/data      # real CoW; requires §4d sudoers
+export SPROUT_ZFS_SUDO=true
+# export SPROUT_STORAGE=copy               # lab fallback if ZFS is not configured
 export SPROUT_COMPUTE=local                # prefer local over Docker
 export SPROUT_LISTEN=0.0.0.0:8080
 export SPROUT_PUBLIC_HOST=strido.fit       # or your VM public IP
@@ -234,7 +240,9 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 WorkingDirectory=/home/YOUR_USER/sprout
 Environment=PATH=/usr/lib/postgresql/17/bin:/usr/local/go/bin:/usr/bin
 Environment=SPROUT_DATA=/home/YOUR_USER/sprout-data
-Environment=SPROUT_STORAGE=copy
+Environment=SPROUT_ZFS_DATASET=sprout/data
+Environment=SPROUT_ZFS_SUDO=true
+# Environment=SPROUT_STORAGE=copy   # lab fallback if ZFS is not configured
 Environment=SPROUT_COMPUTE=local
 Environment=SPROUT_LISTEN=0.0.0.0:8080
 Environment=SPROUT_PUBLIC_HOST=YOUR_PUBLIC_IP
@@ -324,6 +332,7 @@ sprout connector delete sup --force      # also destroys branches from this conn
 | Symptom | Cause | Fix |
 |---------|--------|-----|
 | `unable to open database file` / SQLite 14 | ZFS mount owned by root | `chown -R $USER:$USER $HOME/sprout-data` |
+| `initdb: could not change permissions` | Child ZFS dataset mounted as root | Latest code + `SPROUT_ZFS_SUDO=true` + the `chown` sudoers rule in §4d |
 | `version_mismatch` / dump fails | Host `pg_dump` older than primary | Install matching major; put `/usr/lib/postgresql/17/bin` first |
 | Docker PG14 vs initdb 16/17 | Auto Docker compute | `SPROUT_COMPUTE=local` |
 | `network is unreachable` / IPv6 | Azure has no IPv6 route; DNS returns AAAA | Sprout prefers IPv4; ensure primary has an A record / pooler |

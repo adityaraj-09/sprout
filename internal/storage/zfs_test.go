@@ -53,3 +53,11 @@ func TestZFSExecSpec(t *testing.T) {
 		t.Fatalf("sudo command: %q %#v", name, args)
 	}
 }
+
+func TestZFSChownSpec(t *testing.T) {
+	owner, args := zfsChownSpec("/usr/bin/chown", 1000, 1001, "/data/replicas/check")
+	want := []string{"-n", "/usr/bin/chown", "--", "1000:1001", "/data/replicas/check"}
+	if owner != "1000:1001" || !reflect.DeepEqual(args, want) {
+		t.Fatalf("chown command: owner=%q args=%#v", owner, args)
+	}
+}

@@ -112,7 +112,7 @@ func (z *ZFS) EnsureVolume(path string) error {
 func (z *ZFS) ensureMountedDataset(dataset, mount string) error {
 	if name, mp := lookupZFSMount(mount); name != "" && filepath.Clean(mp) == filepath.Clean(mount) {
 		if name == dataset {
-			return nil
+			return z.ensureMountOwner(mount)
 		}
 		return fmt.Errorf("mountpoint %s already used by dataset %s (want %s)", mount, name, dataset)
 	}
@@ -121,7 +121,7 @@ func (z *ZFS) ensureMountedDataset(dataset, mount string) error {
 			return err
 		}
 		_ = zfsRun("mount", dataset)
-		return nil
+		return z.ensureMountOwner(mount)
 	}
 
 	if st, err := os.Stat(mount); err == nil && st.IsDir() {
@@ -137,7 +137,18 @@ func (z *ZFS) ensureMountedDataset(dataset, mount string) error {
 	if err := os.MkdirAll(filepath.Dir(mount), 0o755); err != nil {
 		return err
 	}
-	return zfsRun("create", "-o", "mountpoint="+mount, dataset)
+	if err := zfsRun("create", "-o", "mountpoint="+mount, dataset); err != nil {
+		// On Linux an unprivileged create can succeed but its automatic mount
+		// can fail. If the dataset exists, retry the mount through the
+		// configured root helper instead of treating the create as lost.
+		if !zfsExists(dataset) {
+			return err
+		}
+		if mountErr := zfsRun("mount", dataset); mountErr != nil {
+			return fmt.Errorf("%w; retry mount: %v", err, mountErr)
+		}
+	}
+	return z.ensureMountOwner(mount)
 }
 
 func (z *ZFS) promoteDir(dataset, mount string) error {
@@ -153,7 +164,16 @@ func (z *ZFS) promoteDir(dataset, mount string) error {
 		return err
 	}
 	if err := zfsRun("create", "-o", "mountpoint="+mount, dataset); err != nil {
-		_ = os.Rename(tmp, mount)
+		if !zfsExists(dataset) {
+			_ = os.Rename(tmp, mount)
+			return err
+		}
+		if mountErr := zfsRun("mount", dataset); mountErr != nil {
+			_ = os.Rename(tmp, mount)
+			return fmt.Errorf("%w; retry mount: %v", err, mountErr)
+		}
+	}
+	if err := z.ensureMountOwner(mount); err != nil {
 		return err
 	}
 	cmd := exec.Command("cp", "-a", tmp+"/.", mount+"/")
@@ -219,6 +239,14 @@ func (z *ZFS) Clone(snapshotRef, destDir string) error {
 	}
 	start := time.Now()
 	if err := zfsRun("clone", "-o", "mountpoint="+destAbs, snapshotRef, cloneDS); err != nil {
+		if !zfsExists(cloneDS) {
+			return err
+		}
+		if mountErr := zfsRun("mount", cloneDS); mountErr != nil {
+			return fmt.Errorf("%w; retry mount: %v", err, mountErr)
+		}
+	}
+	if err := z.ensureMountOwner(destAbs); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "  [storage/zfs] clone %s → %s (%s) in %s\n", snapshotRef, cloneDS, destAbs, time.Since(start).Round(time.Millisecond))
@@ -291,6 +319,34 @@ func zfsRun(args ...string) error {
 		return fmt.Errorf("zfs %s: %w (%s)%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)), hint)
 	}
 	return nil
+}
+
+func (z *ZFS) ensureMountOwner(path string) error {
+	uid, gid := os.Getuid(), os.Getgid()
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("SPROUT_ZFS_SUDO")), "true") {
+		chownPath, err := exec.LookPath("chown")
+		if err != nil {
+			return fmt.Errorf("chown binary not found")
+		}
+		owner, args := zfsChownSpec(chownPath, uid, gid, path)
+		cmd := exec.Command("sudo", args...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("set ZFS mount owner %s on %s: %w (%s); allow this exact chown command in sudoers",
+				owner, path, err, strings.TrimSpace(string(out)))
+		}
+	} else if err := os.Chown(path, uid, gid); err != nil {
+		return fmt.Errorf("set ZFS mount owner %d:%d on %s: %w", uid, gid, path, err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("chmod ZFS mount %s: %w", path, err)
+	}
+	return nil
+}
+
+func zfsChownSpec(chownPath string, uid, gid int, path string) (string, []string) {
+	owner := fmt.Sprintf("%d:%d", uid, gid)
+	return owner, []string{"-n", chownPath, "--", owner, path}
 }
 
 func zfsExecSpec(zfsPath string, args []string, useSudo bool) (string, []string) {
