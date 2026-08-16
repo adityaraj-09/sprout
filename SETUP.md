@@ -161,6 +161,21 @@ export SPROUT_ZFS_DATASET=sprout/data
 # unset SPROUT_STORAGE   # or do not force copy
 ```
 
+On Linux, delegated `zfs allow mount` cannot bypass the kernel's root-only
+mount requirement. Run ZFS mutations through non-interactive sudo:
+
+```bash
+ZFS_BIN="$(command -v zfs)"
+echo "YOUR_USER ALL=(root) NOPASSWD: $ZFS_BIN" | sudo tee /etc/sudoers.d/sprout-zfs
+sudo chmod 0440 /etc/sudoers.d/sprout-zfs
+sudo visudo -cf /etc/sudoers.d/sprout-zfs
+export SPROUT_ZFS_SUDO=true
+```
+
+Keep the sudo rule restricted to a dedicated Sprout VM. Sprout invokes only
+its configured dataset hierarchy, but permission to the `zfs` binary itself is
+powerful.
+
 Lab fallback:
 
 ```bash

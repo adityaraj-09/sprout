@@ -1,6 +1,9 @@
 package storage
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestParseZFSListLongestPrefix(t *testing.T) {
 	out := "" +
@@ -36,5 +39,17 @@ func TestChildDatasetNames(t *testing.T) {
 		if got := z.childDataset(path); got != want {
 			t.Errorf("childDataset(%s)=%s want %s", path, got, want)
 		}
+	}
+}
+
+func TestZFSExecSpec(t *testing.T) {
+	name, args := zfsExecSpec("/usr/sbin/zfs", []string{"snapshot", "sprout/data@x"}, false)
+	if name != "/usr/sbin/zfs" || !reflect.DeepEqual(args, []string{"snapshot", "sprout/data@x"}) {
+		t.Fatalf("direct command: %q %#v", name, args)
+	}
+	name, args = zfsExecSpec("/usr/sbin/zfs", []string{"snapshot", "sprout/data@x"}, true)
+	want := []string{"-n", "/usr/sbin/zfs", "snapshot", "sprout/data@x"}
+	if name != "sudo" || !reflect.DeepEqual(args, want) {
+		t.Fatalf("sudo command: %q %#v", name, args)
 	}
 }

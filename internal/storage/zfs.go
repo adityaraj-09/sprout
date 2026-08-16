@@ -275,12 +275,29 @@ func zfsExists(ref string) bool {
 }
 
 func zfsRun(args ...string) error {
-	cmd := exec.Command("zfs", args...)
+	zfsPath, err := exec.LookPath("zfs")
+	if err != nil {
+		return fmt.Errorf("zfs binary not found")
+	}
+	name, cmdArgs := zfsExecSpec(zfsPath, args, strings.EqualFold(strings.TrimSpace(os.Getenv("SPROUT_ZFS_SUDO")), "true"))
+	cmd := exec.Command(name, cmdArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("zfs %s: %w (%s)", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		hint := ""
+		if !strings.EqualFold(strings.TrimSpace(os.Getenv("SPROUT_ZFS_SUDO")), "true") &&
+			strings.Contains(strings.ToLower(string(out)), "only be mounted by root") {
+			hint = "; on Linux set SPROUT_ZFS_SUDO=true and grant passwordless sudo for the zfs binary"
+		}
+		return fmt.Errorf("zfs %s: %w (%s)%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)), hint)
 	}
 	return nil
+}
+
+func zfsExecSpec(zfsPath string, args []string, useSudo bool) (string, []string) {
+	if !useSudo {
+		return zfsPath, args
+	}
+	return "sudo", append([]string{"-n", zfsPath}, args...)
 }
 
 func lookupZFSMount(path string) (name, mount string) {
