@@ -166,7 +166,11 @@ mount requirement. Run ZFS mutations through non-interactive sudo:
 
 ```bash
 ZFS_BIN="$(command -v zfs)"
-echo "YOUR_USER ALL=(root) NOPASSWD: $ZFS_BIN" | sudo tee /etc/sudoers.d/sprout-zfs
+CHOWN_BIN="$(command -v chown)"
+OWNER="$(id -u)\\:$(id -g)"
+DATA_ROOT="$HOME/sprout-data"
+echo "$USER ALL=(root) NOPASSWD: $ZFS_BIN, $CHOWN_BIN -- $OWNER $DATA_ROOT/main, $CHOWN_BIN -- $OWNER $DATA_ROOT/replicas/*, $CHOWN_BIN -- $OWNER $DATA_ROOT/branches/*" |
+  sudo tee /etc/sudoers.d/sprout-zfs
 sudo chmod 0440 /etc/sudoers.d/sprout-zfs
 sudo visudo -cf /etc/sudoers.d/sprout-zfs
 export SPROUT_ZFS_SUDO=true
