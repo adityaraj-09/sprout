@@ -372,24 +372,10 @@ func (s *Service) cloneConnectorFromLocal(ctx context.Context, projectID string,
 		Name: dest.Name, Owner: dest.CreatedBy, DataDir: dest.DataDir, Port: dest.Port,
 		LogFile: s.logPath(h.Name), Bins: s.Bins, Password: dest.Password,
 	}
-	if err := inst.PrepareClone(); err != nil {
-		return s.failConnector(ctx, dest, err)
-	}
-	if err := postgres.SetLogicalReplicationWorkers(dest.DataDir, 0); err != nil {
-		return s.failConnector(ctx, dest, err)
-	}
-	if _, err := s.Compute.Start(ctx, compute.Spec{
-		Name: h.Name, DataDir: dest.DataDir, Port: dest.Port, LogFile: s.logPath(h.Name),
-	}); err != nil {
+	if _, err := s.startDetachedClone(ctx, inst, h.Name); err != nil {
 		return s.failConnector(ctx, dest, err)
 	}
 	rm := &replica.Manager{Bins: s.Bins}
-	if err := rm.DetachSubscriptionsLocal(ctx, "127.0.0.1", dest.Port); err != nil {
-		return s.failConnector(ctx, dest, err)
-	}
-	_ = postgres.SetLogicalReplicationWorkers(dest.DataDir, -1)
-	_ = rm.ReloadLocal(ctx, "127.0.0.1", dest.Port)
-	_ = inst.EnsureAppRoles()
 
 	_ = rm.DropReplicationSlot(ctx, primary, subName(dest))
 	_ = rm.DropPublication(ctx, primary, pubName(dest))

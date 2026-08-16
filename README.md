@@ -223,6 +223,9 @@ internal/
 **Branch create (logical replica / local main)**
 
 Same CoW path, but parent is a normal primary (checkpoint ± optional cold stop).
+The clone inherits `pg_subscription`; Sprout detaches it so the branch is a
+frozen snapshot and does not reuse the connector's prod replication slot.
+Live changes keep flowing only on the **connector** (`sprout status <name>`).
 
 ---
 

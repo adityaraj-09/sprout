@@ -99,7 +99,7 @@ sprout branch create alice --from=main
   - unowned/machine: `postgresql://sprout:<pass>@<branch>-<connector>.strido.fit:5432/postgres`
 - Port **5432** is the SNI proxy. Hostname selects the instance. Clients need TLS (`sslmode=require` or libpq `prefer`). Self-signed cert is normal; `verify-full` may fail.
 - Localhost / raw IP: unique ports, no subdomain (`localhost:55440`).
-- A branch is an **independent primary**. It does not keep replicating from prod. The **connector replica** does.
+- A branch is an **independent primary**. It does not keep replicating from prod. The **connector replica** does. `sprout branch create` detaches any cloned logical subscription so the branch cannot steal the connector's WAL slot.
 - Do **not** `sprout connect` using a branch URL as the upstream unless the user explicitly wants a replica-of-a-branch. Day-to-day testing = `psql` / app DSN to the branch URL.
 
 ## Commands
