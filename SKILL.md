@@ -86,8 +86,8 @@ MySQL (snapshot import, then CoW branches; does **not** follow binlog):
 ```bash
 sprout connect --name=shop --engine=mysql --mode=logical 'mysql://user:pass@host:3306/shop'
 sprout branch create feat --from=shop
-# DSN uses the unique instance port (no Postgres SNI proxy):
-# mysql://sprout:<pass>@<host>:<port>/
+# Domain host: mysql --ssl-mode=REQUIRED -h feat-shop.strido.fit -P 3306 -u sprout -p…
+# Localhost / IP: unique instance port, no proxy
 ```
 
 Local demo only (no remote):
@@ -106,7 +106,8 @@ sprout branch create alice --from=main
   - connector: `postgresql://sprout:<pass>@supabase-alice.strido.fit:5432/postgres`
   - branch: `postgresql://sprout:<pass>@testdb-alice-supabase.strido.fit:5432/postgres`
   - unowned/machine: `postgresql://sprout:<pass>@<branch>-<connector>.strido.fit:5432/postgres`
-- Port **5432** is the SNI proxy. Hostname selects the instance. Clients need TLS (`sslmode=require` or libpq `prefer`). Self-signed cert is normal; `verify-full` may fail.
+- Port **5432** is the Postgres SNI proxy. Hostname selects the instance. Clients need TLS (`sslmode=require` or libpq `prefer`). Self-signed cert is normal; `verify-full` may fail.
+- Port **3306** is the MySQL hostname proxy (same labels). Clients need `--ssl-mode=REQUIRED`. The proxy re-authenticates to local `mysqld` (native password), then splices the command phase.
 - Localhost / raw IP: unique ports, no subdomain (`localhost:55440`).
 - A branch is an **independent primary**. It does not keep replicating from prod. The **connector replica** does.
 - Do **not** `sprout connect` using a branch URL as the upstream unless the user explicitly wants a replica-of-a-branch. Day-to-day testing = `psql` / app DSN to the branch URL.

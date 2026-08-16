@@ -85,8 +85,8 @@ func (c Conn) sslArg() string {
 	}
 }
 
-// FormatConnString builds a mysql:// URL. MySQL is not on the Postgres SNI
-// proxy, so the advertised port is always the instance port.
+// FormatConnString builds a mysql:// URL. When the hostname proxy is on,
+// the advertised port is 3306 and ssl-mode=REQUIRED so clients send SNI.
 func FormatConnString(port int, db, password, name, from string, owner ...string) string {
 	own := ""
 	if len(owner) > 0 {
@@ -95,7 +95,7 @@ func FormatConnString(port int, db, password, name, from string, owner ...string
 	host := postgres.AdvertiseHost(name, from, own)
 	u := url.URL{
 		Scheme: "mysql",
-		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
+		Host:   net.JoinHostPort(host, strconv.Itoa(AdvertisePort(port))),
 	}
 	if db != "" {
 		u.Path = "/" + db
@@ -106,9 +106,22 @@ func FormatConnString(port int, db, password, name, from string, owner ...string
 	} else {
 		u.User = url.User(user)
 	}
+	if ProxyEnabled() {
+		q := u.Query()
+		q.Set("ssl-mode", "REQUIRED")
+		u.RawQuery = q.Encode()
+	}
 	return u.String()
 }
 
 func MysqlOneLiner(port int, password, name, from string, owner ...string) string {
+	own := ""
+	if len(owner) > 0 {
+		own = owner[0]
+	}
+	if ProxyEnabled() {
+		return fmt.Sprintf("mysql --ssl-mode=REQUIRED -h %s -P %d -u %s -p%s",
+			postgres.AdvertiseHost(name, from, own), AdvertisePort(port), postgres.DBUser(), password)
+	}
 	return fmt.Sprintf(`mysql "%s"`, FormatConnString(port, "", password, name, from, owner...))
 }

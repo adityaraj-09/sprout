@@ -1,4 +1,4 @@
-package pgproxy
+package mysqlproxy
 
 import (
 	"context"
@@ -7,36 +7,45 @@ import (
 
 	"github.com/adityaraj/sprout/internal/engine"
 	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/mysql"
 	"github.com/adityaraj/sprout/internal/postgres"
 )
 
-// Resolver maps a TLS server name to a backend host:port.
-type Resolver func(sni string) (host string, port int, err error)
+// Target is the local mysqld the proxy logs into after SNI + client auth.
+type Target struct {
+	Host     string
+	Port     int
+	Password string
+}
 
-// StoreResolver looks up connectors and branches by advertised hostname.
+// Resolver maps a TLS server name to a MySQL instance.
+type Resolver func(sni string) (Target, error)
+
+// StoreResolver looks up MySQL connectors and their branches by advertised hostname.
+// Postgres rows are ignored so the same label space can be shared with pgproxy.
 func StoreResolver(store meta.Store) Resolver {
-	return func(sni string) (string, int, error) {
+	return func(sni string) (Target, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		sni = postgres.NormalizeSNI(sni)
 		if sni == "" {
-			return "", 0, fmt.Errorf("missing TLS server name")
+			return Target{}, fmt.Errorf("missing TLS server name")
 		}
-		backend := postgres.ProxyBackendHost()
+		backend := mysql.ProxyBackendHost()
 		conns, err := store.ListConnectors(ctx)
 		if err != nil {
-			return "", 0, err
+			return Target{}, err
 		}
 		mysqlIDs, mysqlKeys := mysqlConnectorIndex(conns)
 		branches, err := store.ListAllBranches(ctx)
 		if err != nil {
-			return "", 0, err
+			return Target{}, err
 		}
 		for _, b := range branches {
 			if b.Port <= 0 || b.Role == "replica" {
 				continue
 			}
-			if branchFromMySQL(b, mysqlIDs, mysqlKeys) {
+			if !branchFromMySQL(b, mysqlIDs, mysqlKeys) {
 				continue
 			}
 			from := ""
@@ -44,18 +53,18 @@ func StoreResolver(store meta.Store) Resolver {
 				from = b.SourceConnector
 			}
 			if postgres.MatchesSNI(sni, b.Name, from, b.CreatedBy) {
-				return backend, b.Port, nil
+				return Target{Host: backend, Port: b.Port, Password: b.Password}, nil
 			}
 		}
 		for _, c := range conns {
-			if c.Port <= 0 || engine.IsMySQL(c.Engine) {
+			if c.Port <= 0 || !engine.IsMySQL(c.Engine) {
 				continue
 			}
 			if postgres.MatchesSNI(sni, c.Name, "", c.CreatedBy) {
-				return backend, c.Port, nil
+				return Target{Host: backend, Port: c.Port, Password: c.Password}, nil
 			}
 		}
-		return "", 0, fmt.Errorf("unknown server name %q", sni)
+		return Target{}, fmt.Errorf("unknown server name %q", sni)
 	}
 }
 

@@ -46,6 +46,38 @@ func TestPrepareCloneRewritesPortAndDropsUUID(t *testing.T) {
 	if !strings.Contains(string(body), "port=33061") {
 		t.Fatalf("my.cnf:\n%s", body)
 	}
+	if !strings.Contains(string(body), "default_authentication_plugin=mysql_native_password") {
+		t.Fatalf("native password plugin missing:\n%s", body)
+	}
+}
+
+func TestFormatConnStringProxyPort(t *testing.T) {
+	t.Setenv("SPROUT_DB_USER", "sprout")
+	t.Setenv("SPROUT_PUBLIC_HOST", "localhost")
+	t.Setenv("SPROUT_BRANCH_SUBDOMAIN", "")
+	local := FormatConnString(33061, "shop", "secret", "feat", "shop")
+	if !strings.Contains(local, "localhost:33061") {
+		t.Fatalf("local: %s", local)
+	}
+
+	t.Setenv("SPROUT_PUBLIC_HOST", "strido.fit")
+	proxied := FormatConnString(33061, "shop", "secret", "feat", "shop")
+	if !strings.Contains(proxied, "feat-shop.strido.fit:3306") {
+		t.Fatalf("expected :3306 host, got %s", proxied)
+	}
+	if !strings.Contains(proxied, "ssl-mode=REQUIRED") {
+		t.Fatalf("ssl-mode missing: %s", proxied)
+	}
+	line := MysqlOneLiner(33061, "secret", "feat", "shop")
+	if !strings.Contains(line, "--ssl-mode=REQUIRED") || !strings.Contains(line, "-P 3306") {
+		t.Fatalf("one-liner: %s", line)
+	}
+
+	t.Setenv("SPROUT_MYSQL_PROXY", "false")
+	direct := FormatConnString(33061, "shop", "secret", "feat", "shop")
+	if !strings.Contains(direct, "feat-shop.strido.fit:33061") {
+		t.Fatalf("proxy off: %s", direct)
+	}
 }
 
 func TestHasDataDir(t *testing.T) {

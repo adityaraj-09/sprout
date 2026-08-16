@@ -9,6 +9,7 @@ import (
 	"runtime"
 
 	"github.com/adityaraj/sprout/internal/auth"
+	"github.com/adityaraj/sprout/internal/mysql"
 	"github.com/adityaraj/sprout/internal/postgres"
 )
 
@@ -107,9 +108,13 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 		add(DoctorCheck{Name: "pg_proxy", OK: true, Level: "info",
 			Detail: fmt.Sprintf("SNI proxy :%d → %s:<instance port>", postgres.ProxyPort(), postgres.ProxyBackendHost()),
 			Hint:   "clients connect on 5432; TLS SNI selects test-x vs test-y. Self-signed cert in $SPROUT_DATA/tls unless SPROUT_TLS_CERT is set"})
+		fw := "open NSG/security group for 5432 (and 8080 for the API); unique branch ports stay on loopback"
+		if mysql.ProxyEnabled() {
+			fw = "open NSG/security group for 5432 and 3306 (and 8080 for the API); unique branch ports stay on loopback"
+		}
 		add(DoctorCheck{Name: "firewall", OK: true, Level: "warn",
 			Detail: "public Postgres is the SNI proxy on 5432",
-			Hint:   "open NSG/security group for 5432 (and 8080 for the API); unique branch ports stay on loopback"})
+			Hint:   fw})
 	} else if remote {
 		if postgres.TrustRemote() {
 			if os.Getenv("SPROUT_SAFE") != "true" {
@@ -133,6 +138,11 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 		add(DoctorCheck{Name: "firewall", OK: true, Level: "info",
 			Detail: "Postgres bound to loopback only",
 			Hint:   "set SPROUT_PUBLIC_HOST=<vm-ip> and open firewall to reach branches remotely"})
+	}
+	if mysql.ProxyEnabled() {
+		add(DoctorCheck{Name: "mysql_proxy", OK: true, Level: "info",
+			Detail: fmt.Sprintf("MySQL hostname proxy :%d → %s:<instance port>", mysql.ProxyPort(), mysql.ProxyBackendHost()),
+			Hint:   "clients use --ssl-mode=REQUIRED on 3306; TLS SNI selects the instance. Same cert as pgproxy"})
 	}
 
 	// Control store

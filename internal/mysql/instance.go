@@ -66,7 +66,7 @@ type Instance struct {
 	Bins     Binaries
 }
 
-func (i *Instance) socket() string { return filepath.Join(i.DataDir, "mysql.sock") }
+func (i *Instance) socket() string  { return filepath.Join(i.DataDir, "mysql.sock") }
 func (i *Instance) pidFile() string { return filepath.Join(i.DataDir, "mysqld.pid") }
 func (i *Instance) autoCNF() string { return filepath.Join(i.DataDir, "auto.cnf") }
 
@@ -114,6 +114,8 @@ pid-file=%s
 log-error=%s
 mysqlx=0
 skip-name-resolve
+default_authentication_plugin=mysql_native_password
+loose-mysql_native_password=ON
 `, i.DataDir, i.Port, i.socket(), i.pidFile(), i.LogFile)
 	return os.WriteFile(filepath.Join(i.DataDir, "my.cnf"), []byte(body), 0o600)
 }
@@ -220,12 +222,14 @@ func (i *Instance) EnsureAppRoles() error {
 	escUser := strings.ReplaceAll(user, "'", "''")
 	escPass := strings.ReplaceAll(pass, "'", "''")
 	sql := fmt.Sprintf(`
-CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED BY '%s';
-CREATE USER IF NOT EXISTS '%s'@'localhost' IDENTIFIED BY '%s';
+CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED WITH mysql_native_password BY '%s';
+CREATE USER IF NOT EXISTS '%s'@'localhost' IDENTIFIED WITH mysql_native_password BY '%s';
+ALTER USER '%s'@'%%' IDENTIFIED WITH mysql_native_password BY '%s';
+ALTER USER '%s'@'localhost' IDENTIFIED WITH mysql_native_password BY '%s';
 GRANT ALL PRIVILEGES ON *.* TO '%s'@'%%' WITH GRANT OPTION;
 GRANT ALL PRIVILEGES ON *.* TO '%s'@'localhost' WITH GRANT OPTION;
 FLUSH PRIVILEGES;
-`, escUser, escPass, escUser, escPass, escUser, escUser)
+`, escUser, escPass, escUser, escPass, escUser, escPass, escUser, escPass, escUser, escUser)
 	_, err := i.ExecSQL(sql)
 	return err
 }

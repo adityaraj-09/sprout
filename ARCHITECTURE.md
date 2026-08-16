@@ -39,7 +39,7 @@ Two planes:
 | Plane | Port | Who talks | Purpose |
 |-------|------|-----------|---------|
 | Control | `:8080` | CLI / SDK | connect, branch, suspend, doctor |
-| Data | `:5432` (domain) or unique ports (localhost / IP) | `psql` / apps | SQL against a replica or branch |
+| Data | `:5432` Postgres / `:3306` MySQL (domain) or unique ports (localhost / IP) | `psql` / `mysql` / apps | SQL against a replica or branch |
 
 ## 2. Inside `sprout-server`
 
@@ -55,6 +55,7 @@ flowchart TB
     CMP["compute/ — local pg_ctl or Docker"]
     PG["postgres/ — initdb, hba, SCRAM, PrepareClone"]
     PXP["pgproxy/ — SSLRequest + TLS SNI splice"]
+    MXP["mysqlproxy/ — greeting + TLS SNI + re-auth"]
     REC["reconcile/ — 30s compute vs metadata"]
     META["meta/ — SQLite control.db"]
   end
@@ -66,6 +67,7 @@ flowchart TB
   ORCH --> PG
   ORCH --> META
   PXP --> META
+  MXP --> META
   REC --> META
   REC --> CMP
   REC --> ST
@@ -86,6 +88,8 @@ internal/
   compute/    local pg_ctl (Docker optional)
   postgres/   initdb, checkpoint, PrepareClone, advertised URLs
   pgproxy/    TLS SNI router on :5432
+  mysql/      dump-import + local mysqld
+  mysqlproxy/ MySQL hostname router on :3306
   meta/       SQLite → data/control.db
   reconcile/  keep compute vs metadata aligned
   config/     env defaults
@@ -209,6 +213,8 @@ sequenceDiagram
 ```
 
 Disable with `SPROUT_PG_PROXY=false` to advertise unique ports again (no proxy).
+
+MySQL cannot splice the first packets the same way (server-speaks-first; auth salt is per connection). `mysqlproxy` greets, upgrades to TLS for SNI, verifies `mysql_native_password`, logs into `127.0.0.1:<instance port>`, then splices the command phase. Disable with `SPROUT_MYSQL_PROXY=false`.
 
 ## 7. Storage and compute
 

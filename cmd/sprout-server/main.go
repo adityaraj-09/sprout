@@ -15,6 +15,8 @@ import (
 	"github.com/adityaraj/sprout/internal/compute"
 	"github.com/adityaraj/sprout/internal/config"
 	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/mysql"
+	"github.com/adityaraj/sprout/internal/mysqlproxy"
 	"github.com/adityaraj/sprout/internal/pgproxy"
 	"github.com/adityaraj/sprout/internal/postgres"
 	"github.com/adityaraj/sprout/internal/reconcile"
@@ -63,26 +65,41 @@ func main() {
 	}
 	go rec.Loop(ctx, 30*time.Second)
 
-	if postgres.ProxyEnabled() {
+	if postgres.ProxyEnabled() || mysql.ProxyEnabled() {
 		tlsCfg, err := pgproxy.LoadTLSConfig(cfg.DataRoot)
 		if err != nil {
-			fatal(fmt.Errorf("pgproxy tls: %w", err))
+			fatal(fmt.Errorf("proxy tls: %w", err))
 		}
-		proxy := &pgproxy.Server{
-			Addr:      pgproxy.ListenAddr(),
-			TLSConfig: tlsCfg,
-			Resolve:   pgproxy.StoreResolver(store),
+		if postgres.ProxyEnabled() {
+			proxy := &pgproxy.Server{
+				Addr:      pgproxy.ListenAddr(),
+				TLSConfig: tlsCfg,
+				Resolve:   pgproxy.StoreResolver(store),
+			}
+			if err := proxy.Listen(); err != nil {
+				fatal(err)
+			}
+			go func() { _ = proxy.Serve() }()
+			go func() {
+				<-ctx.Done()
+				_ = proxy.Close()
+			}()
 		}
-		if err := proxy.Listen(); err != nil {
-			fatal(err)
+		if mysql.ProxyEnabled() {
+			mp := &mysqlproxy.Server{
+				Addr:      mysqlproxy.ListenAddr(),
+				TLSConfig: tlsCfg,
+				Resolve:   mysqlproxy.StoreResolver(store),
+			}
+			if err := mp.Listen(); err != nil {
+				fatal(err)
+			}
+			go func() { _ = mp.Serve() }()
+			go func() {
+				<-ctx.Done()
+				_ = mp.Close()
+			}()
 		}
-		go func() {
-			_ = proxy.Serve()
-		}()
-		go func() {
-			<-ctx.Done()
-			_ = proxy.Close()
-		}()
 	}
 
 	srv := api.New(svc, cfg.Token)
@@ -116,9 +133,12 @@ func main() {
 	fmt.Printf("  pg_host:   %s (listen_addresses=%s subdomain=%v)\n", postgres.PublicHost(), postgres.ListenAddresses(), postgres.BranchSubdomain())
 	if postgres.BranchSubdomain() {
 		if postgres.ProxyEnabled() {
-			fmt.Printf("  dns:       *.%s → this VM; URLs use :%d (SNI proxy)\n", postgres.PublicHost(), postgres.ProxyPort())
+			fmt.Printf("  dns:       *.%s → this VM; Postgres URLs use :%d (SNI proxy)\n", postgres.PublicHost(), postgres.ProxyPort())
 		} else {
-			fmt.Printf("  dns:       *.%s → this VM (wildcard A/AAAA); URLs keep the branch port\n", postgres.PublicHost())
+			fmt.Printf("  dns:       *.%s → this VM (wildcard A/AAAA); Postgres URLs keep the branch port\n", postgres.PublicHost())
+		}
+		if mysql.ProxyEnabled() {
+			fmt.Printf("  mysql:     hostname proxy :%d (TLS + native password; --ssl-mode=REQUIRED)\n", mysql.ProxyPort())
 		}
 	}
 	if postgres.RemoteAccess() {

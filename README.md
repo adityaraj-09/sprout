@@ -207,6 +207,8 @@ internal/
   compute/    local pg_ctl (Docker stub)
   postgres/   initdb, checkpoint, PrepareClone, seed
   pgproxy/    TLS SNI router on :5432
+  mysql/      mysqldump snapshot, local mysqld, advertised :3306 URLs
+  mysqlproxy/ MySQL hostname router on :3306 (SSL + SNI + re-auth)
   meta/       SQLite → data/control.db (imports legacy control.json once)
   reconcile/  keep compute vs metadata aligned
   config/     env defaults
@@ -341,7 +343,9 @@ Logical is for hosts that block physical replication (common on managed Postgres
 | `SPROUT_BRANCH_SUBDOMAIN` | auto | `true`/`false`. Auto-on when public host is a DNS name: URLs become `<name>-<owner>-<connector>.<host>:5432` |
 | `SPROUT_PG_PROXY` | auto | SNI proxy on `:5432` when subdomains are on. `false` advertises unique ports instead |
 | `SPROUT_PG_PROXY_PORT` | `5432` | Public Postgres port for the SNI proxy |
-| `SPROUT_TLS_CERT` / `SPROUT_TLS_KEY` | auto | TLS cert for the proxy; otherwise a self-signed wildcard is written to `$SPROUT_DATA/tls` |
+| `SPROUT_MYSQL_PROXY` | auto | MySQL hostname proxy on `:3306` when subdomains are on. `false` advertises unique ports instead |
+| `SPROUT_MYSQL_PROXY_PORT` | `3306` | Public MySQL port for the hostname proxy |
+| `SPROUT_TLS_CERT` / `SPROUT_TLS_KEY` | auto | TLS cert for both proxies; otherwise a self-signed wildcard is written to `$SPROUT_DATA/tls` |
 | `SPROUT_PG_LISTEN` | auto | Postgres `listen_addresses` (`*` when public host is set) |
 | `SPROUT_SAFE` | unset | Set `true` to keep fsync on (recommended when exposing) |
 | `SPROUT_TRUST_REMOTE` | unset | Set `true` to keep trust auth for remote TCP (lab only). Default remote auth is SCRAM-SHA-256 |
@@ -386,7 +390,13 @@ postgresql://sprout:<pass>@testdb-lab.strido.fit:5432/postgres
 postgresql://sprout:<pass>@testdb-alice-supabase.strido.fit:5432/postgres
 ```
 
-Point a wildcard record `*.strido.fit` (and `strido.fit`) at the VM. Open firewall **5432** (and 8080 for the API). Localhost and raw IPs stay as-is (`localhost:55440`) with no proxy. `/postgres` is the database inside the instance, not the branch name.
+Point a wildcard record `*.strido.fit` (and `strido.fit`) at the VM. Open firewall **5432** and **3306** (and 8080 for the API). Localhost and raw IPs stay as-is (`localhost:55440`) with no proxy. `/postgres` is the database inside the instance, not the branch name.
+
+MySQL branches use the same hostname labels on **3306**. Clients must enable TLS so SNI is visible (`--ssl-mode=REQUIRED`). The proxy verifies `mysql_native_password`, logs into local `mysqld`, then splices the command phase:
+
+```text
+mysql --ssl-mode=REQUIRED -h feat-shop.strido.fit -P 3306 -u sprout -p<pass>
+```
 
 Clients use TLS so SNI is visible (`sslmode=require` or libpq's default `prefer`). A self-signed `*.strido.fit` cert is created under `$SPROUT_DATA/tls` unless you set `SPROUT_TLS_CERT` / `SPROUT_TLS_KEY`. Binding `:5432` needs root or `setcap cap_net_bind_service=+ep ./bin/sprout-server`.
 
@@ -422,7 +432,8 @@ make reset-data         # clean + wipe main, replicas, branches, snapshots, cont
 
 | Port | Role |
 |------|------|
-| `5432` | Public SNI proxy when `SPROUT_PUBLIC_HOST` is a DNS name |
+| `5432` | Public Postgres SNI proxy when `SPROUT_PUBLIC_HOST` is a DNS name |
+| `3306` | Public MySQL hostname proxy when `SPROUT_PUBLIC_HOST` is a DNS name |
 | `55431` | Lab primary (`scripts/lab-primary.sh`) |
 | `55432` | Local demo `main` (`sprout init`) |
 | `55433+` | Internal connector/branch ports (loopback when the proxy is on) |

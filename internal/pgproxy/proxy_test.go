@@ -58,6 +58,21 @@ func TestStoreResolverSNI(t *testing.T) {
 	if _, _, err := resolve("missing.strido.fit"); err == nil {
 		t.Fatal("expected unknown server name")
 	}
+
+	_ = store.PutConnector(ctx, meta.Connector{
+		ID: "cm", ProjectID: proj.ID, Name: "shop", Engine: "mysql",
+		Status: meta.ConnectorReplicating, Port: 33061,
+	})
+	_ = store.PutBranch(ctx, meta.BranchRecord{
+		ID: "bm", ProjectID: proj.ID, Name: "feat", Role: "branch",
+		Status: meta.StatusActive, Port: 33062, SourceConnector: "shop", SourceConnectorID: "cm",
+	})
+	if _, _, err := resolve("shop.strido.fit"); err == nil {
+		t.Fatal("mysql connector must not resolve on pgproxy")
+	}
+	if _, _, err := resolve("feat-shop.strido.fit"); err == nil {
+		t.Fatal("mysql branch must not resolve on pgproxy")
+	}
 }
 
 func TestProxySNIRoutes(t *testing.T) {

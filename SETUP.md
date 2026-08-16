@@ -24,7 +24,7 @@ On Azure/Linux you typically:
 2. Prefer **ZFS** for real CoW branches, or **`SPROUT_STORAGE=copy`** for a simple full-copy fallback.
 3. Install **Postgres client/server tools** whose major version is **≥ your primary** (Supabase 17 → PG 17 tools).
 4. Run with **`SPROUT_COMPUTE=local`** (Docker often mismatches `initdb` major).
-5. Open **NSG** for API `8080` and Postgres `5432` (SNI proxy when using a domain).
+5. Open **NSG** for API `8080`, Postgres `5432`, and MySQL `3306` (hostname proxies when using a domain).
 
 ---
 
@@ -46,6 +46,7 @@ On Azure/Linux you typically:
 | `22` | SSH (your IP) |
 | `8080` | `sprout-server` API |
 | `5432` | Postgres SNI proxy (domain URLs). Unique branch ports stay on the VM loopback. |
+| `3306` | MySQL hostname proxy (domain URLs, `--ssl-mode=REQUIRED`). |
 
 From your laptop you will connect like:
 
@@ -117,7 +118,7 @@ sudo apt install -y mysql-server mysql-client
 which mysqld mysql mysqldump
 ```
 
-MySQL connect is a `mysqldump` import into a local `mysqld` datadir (no binlog follow). Branches are CoW clones of that datadir. DSNs use the unique instance port, not the Postgres SNI proxy on `:5432`.
+MySQL connect is a `mysqldump` import into a local `mysqld` datadir (no binlog follow). Branches are CoW clones of that datadir. With a DNS `SPROUT_PUBLIC_HOST`, DSNs use `:3306` and `--ssl-mode=REQUIRED` (same hostname labels as Postgres). Localhost / raw IP still advertise the unique instance port.
 
 ---
 
@@ -218,6 +219,7 @@ export SPROUT_DB_USER=sprout               # login role in connection strings
 # optional:
 # export SPROUT_BRANCH_SUBDOMAIN=false     # keep host as-is (default auto-on for DNS names)
 # export SPROUT_PG_PROXY=false             # advertise unique ports; skip the :5432 SNI proxy
+# export SPROUT_MYSQL_PROXY=false          # advertise unique MySQL ports; skip the :3306 hostname proxy
 # export SPROUT_TRUST_REMOTE=true          # lab-only: remote trust instead of SCRAM
 # export SPROUT_AUTO_RESUME=true           # restart crashed connectors/branches
 ```
@@ -348,7 +350,7 @@ sprout connector delete sup --force      # also destroys branches from this conn
 | `replication slot … already exists` | Wiped subscriber left slot on prod | Fixed in recent builds; or `SELECT pg_drop_replication_slot('sprout_sub_<name>')` on primary |
 | `database "flagforge" does not exist` spam | `pg_isready` without `-d postgres` | Fixed; pull latest |
 | `Address already in use` / not ready | Leftover postmaster on port | `pg_ctl -D … stop` or `fuser -k PORT/tcp`, then reconnect |
-| Branch URL works remotely? | NSG missing 5432, or proxy not bound | Open `5432`; `setcap cap_net_bind_service=+ep ./bin/sprout-server` |
+| Branch URL works remotely? | NSG missing 5432/3306, or proxy not bound | Open `5432` (and `3306` for MySQL); `setcap cap_net_bind_service=+ep ./bin/sprout-server` |
 | Publisher timeouts after sync | Egress / Supabase allowlist | Allow VM egress to primary `5432` |
 
 Clean leftover Postgres processes:
@@ -392,7 +394,7 @@ pkill -f sprout-server || true
 - [ ] Postgres **17** (or matching major) first on `PATH`
 - [ ] `SPROUT_COMPUTE=local`, `SPROUT_PUBLIC_HOST=<strido.fit or ip>`, `SPROUT_SAFE=true`
 - [ ] Wildcard DNS `*.strido.fit` → VM if using a domain (optional)
-- [ ] NSG: `8080` + `5432` (domain) or unique branch ports (raw IP)
+- [ ] NSG: `8080` + `5432` + `3306` (domain) or unique branch ports (raw IP)
 - [ ] `make build` + `sprout-server` running
 - [ ] `sprout doctor` / `sprout health` OK from laptop
 - [ ] `connect --mode=logical` then `branch create`
