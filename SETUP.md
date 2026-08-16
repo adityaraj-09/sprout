@@ -384,7 +384,7 @@ pkill -f sprout-server || true
 - [ ] ZFS pool + `sprout/data` mounted at `$HOME/sprout-data`
 - [ ] `chown` so your user can write
 - [ ] Postgres **17** (or matching major) first on `PATH`
-- [ ] `SPROUT_COMPUTE=local`, `SPROUT_PUBLIC_HOST=<strido.fit or ip>`, `SPROUT_SAFE=true`
+- [ ] `SPROUT_COMPUTE=local`, `SPROUT_STORAGE=zfs`, `SPROUT_ZFS_DATASET=sprout/data`, `SPROUT_ZFS_SUDO=true`, `SPROUT_PUBLIC_HOST=server_domain`, `SPROUT_SAFE=true`
 - [ ] Wildcard DNS `*.strido.fit` → VM if using a domain (optional)
 - [ ] NSG: `8080` + `5432` (domain) or unique branch ports (raw IP)
 - [ ] `make build` + `sprout-server` running
