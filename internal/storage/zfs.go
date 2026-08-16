@@ -164,8 +164,14 @@ func (z *ZFS) promoteDir(dataset, mount string) error {
 		return err
 	}
 	if err := zfsRun("create", "-o", "mountpoint="+mount, dataset); err != nil {
-		_ = os.Rename(tmp, mount)
-		return err
+		if !zfsExists(dataset) {
+			_ = os.Rename(tmp, mount)
+			return err
+		}
+		if mountErr := zfsRun("mount", dataset); mountErr != nil {
+			_ = os.Rename(tmp, mount)
+			return fmt.Errorf("%w; retry mount: %v", err, mountErr)
+		}
 	}
 	if err := z.ensureMountOwner(mount); err != nil {
 		return err
