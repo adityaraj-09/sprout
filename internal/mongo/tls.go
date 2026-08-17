@@ -26,8 +26,8 @@ func bindIP() string {
 	return "0.0.0.0"
 }
 
-// writeTLSPEM writes a combined certificate+key PEM for mongod.
-func writeTLSPEM(dest string) error {
+// writeTLSPEM writes a combined certificate+key PEM and a CA file for mongod.
+func writeTLSPEM(dest, caDest string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return err
 	}
@@ -49,6 +49,13 @@ func writeTLSPEM(dest string) error {
 	if err != nil {
 		return fmt.Errorf("mongo tls key: %w", err)
 	}
+	if len(cert) > 0 && cert[len(cert)-1] != '\n' {
+		cert = append(cert, '\n')
+	}
 	out := append(append([]byte{}, cert...), key...)
-	return os.WriteFile(dest, out, 0o600)
+	if err := os.WriteFile(dest, out, 0o600); err != nil {
+		return err
+	}
+	// MongoDB 7+ requires a CA chain of trust (SERVER-72839). Self-signed: the cert is the CA.
+	return os.WriteFile(caDest, cert, 0o600)
 }

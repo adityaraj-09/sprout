@@ -91,15 +91,33 @@ func (m Binaries) DumpImport(ctx context.Context, c Conn, local *Instance, colle
 	restore := []string{
 		"--host=127.0.0.1",
 		"--port=" + strconv.Itoa(local.Port),
-		"--tls",
-		"--tlsAllowInvalidCertificates",
-		"--drop",
-		dir,
 	}
+	restore = append(restore, toolTLSFlags(m.Mongorestore)...)
+	restore = append(restore, "--drop", dir)
 	cmd := exec.CommandContext(ctx, m.Mongorestore, restore...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mongorestore: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// toolTLSFlags returns database-tools TLS flags. MongoDB Database Tools 100.x
+// expose --ssl/--tlsInsecure; newer builds use --tls/--tlsAllowInvalidCertificates.
+func toolTLSFlags(bin string) []string {
+	out, _ := exec.Command(bin, "--help").CombinedOutput()
+	help := string(out)
+	if strings.Contains(help, "--tlsAllowInvalidCertificates") || (strings.Contains(help, "--tls") && !strings.Contains(help, "--tlsInsecure")) {
+		return []string{"--tls", "--tlsAllowInvalidCertificates"}
+	}
+	if strings.Contains(help, "--ssl") {
+		if strings.Contains(help, "--tlsInsecure") {
+			return []string{"--ssl", "--tlsInsecure"}
+		}
+		if strings.Contains(help, "--sslAllowInvalidCertificates") {
+			return []string{"--ssl", "--sslAllowInvalidCertificates"}
+		}
+		return []string{"--ssl"}
+	}
+	return []string{"--tls", "--tlsAllowInvalidCertificates"}
 }

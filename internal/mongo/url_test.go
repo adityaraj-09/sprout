@@ -2,6 +2,7 @@ package mongo
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -74,6 +75,20 @@ func TestPrepareCloneRewritesPortAndDropsLock(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "requireTLS") {
 		t.Fatalf("tls missing:\n%s", body)
+	}
+	if !strings.Contains(string(body), "CAFile:") {
+		t.Fatalf("CAFile missing (MongoDB 7+):\n%s", body)
+	}
+}
+
+func TestToolTLSFlagsPreferSSLOnDatabaseTools(t *testing.T) {
+	p, err := exec.LookPath("mongorestore")
+	if err != nil {
+		t.Skip("mongorestore not installed")
+	}
+	flags := toolTLSFlags(p)
+	if len(flags) == 0 {
+		t.Fatal("no tls flags")
 	}
 }
 

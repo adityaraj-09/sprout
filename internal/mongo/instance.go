@@ -77,6 +77,7 @@ type Instance struct {
 func (i *Instance) pidFile() string  { return filepath.Join(i.DataDir, "mongod.pid") }
 func (i *Instance) confFile() string { return filepath.Join(i.DataDir, "mongod.conf") }
 func (i *Instance) pemFile() string  { return filepath.Join(i.DataDir, "mongod.pem") }
+func (i *Instance) caFile() string   { return filepath.Join(i.DataDir, "mongod.ca.pem") }
 func (i *Instance) lockFile() string { return filepath.Join(i.DataDir, "mongod.lock") }
 
 func HasDataDir(dir string) bool {
@@ -108,7 +109,7 @@ func (i *Instance) writeConfig(authorization bool) error {
 	if err := os.MkdirAll(filepath.Dir(i.LogFile), 0o755); err != nil {
 		return err
 	}
-	if err := writeTLSPEM(i.pemFile()); err != nil {
+	if err := writeTLSPEM(i.pemFile(), i.caFile()); err != nil {
 		return err
 	}
 	auth := "disabled"
@@ -116,25 +117,27 @@ func (i *Instance) writeConfig(authorization bool) error {
 		auth = "enabled"
 	}
 	i.auth = authorization
+	// MongoDB 7+ requires CAFile (SERVER-72839). Quote paths for YAML.
 	body := fmt.Sprintf(`storage:
-  dbPath: %s
+  dbPath: %q
 net:
   port: %d
   bindIp: %s
   tls:
     mode: requireTLS
-    certificateKeyFile: %s
+    certificateKeyFile: %q
+    CAFile: %q
     allowConnectionsWithoutCertificates: true
 systemLog:
   destination: file
-  path: %s
+  path: %q
   logAppend: true
 processManagement:
   fork: true
-  pidFilePath: %s
+  pidFilePath: %q
 security:
   authorization: %s
-`, i.DataDir, i.Port, bindIP(), i.pemFile(), i.LogFile, i.pidFile(), auth)
+`, i.DataDir, i.Port, bindIP(), i.pemFile(), i.caFile(), i.LogFile, i.pidFile(), auth)
 	return os.WriteFile(i.confFile(), []byte(body), 0o600)
 }
 
@@ -148,22 +151,29 @@ func (i *Instance) Start() error {
 	if i.LogFile == "" {
 		i.LogFile = filepath.Join(i.DataDir, "mongod.log")
 	}
-	if _, err := os.Stat(i.confFile()); err != nil {
-		if err := i.writeConfig(HasDataDir(i.DataDir)); err != nil {
-			return err
-		}
+	auth := HasDataDir(i.DataDir)
+	if b, err := os.ReadFile(i.confFile()); err == nil && strings.Contains(string(b), "authorization: enabled") {
+		auth = true
+	}
+	if err := i.writeConfig(auth); err != nil {
+		return err
 	}
 	if i.IsRunning() {
 		return nil
 	}
-	cmd := exec.Command(i.Bins.Mongod, "--config", i.confFile())
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("mongod start: %w", err)
+	if i.Bins.Mongod == "" {
+		i.Bins = FindOnPath()
 	}
-	_ = cmd.Process.Release()
+	// fork:true — wait for the parent so config/TLS errors are not swallowed.
+	cmd := exec.Command(i.Bins.Mongod, "--config", i.confFile())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		logTail, _ := os.ReadFile(i.LogFile)
+		return fmt.Errorf("mongod start: %w (%s)\nlog:\n%s", err, strings.TrimSpace(string(out)), logTail)
+	}
 	if err := i.WaitReady(45 * time.Second); err != nil {
 		logTail, _ := os.ReadFile(i.LogFile)
-		return fmt.Errorf("%w\nlog:\n%s", err, string(logTail))
+		return fmt.Errorf("%w (%s)\nlog:\n%s", err, strings.TrimSpace(string(out)), logTail)
 	}
 	return nil
 }
@@ -225,6 +235,10 @@ func (i *Instance) WaitReady(timeout time.Duration) error {
 }
 
 func (i *Instance) ping() error {
+	// hello is allowed pre-auth; ping may not be once authorization is on.
+	if err := i.eval("db.runCommand({hello:1})"); err == nil {
+		return nil
+	}
 	return i.eval("db.runCommand({ping:1})")
 }
 
@@ -267,11 +281,11 @@ func (i *Instance) EnsureAppRoles() error {
 	js := fmt.Sprintf(`
 (function() {
   var admin = db.getSiblingDB('admin');
-  var u = admin.getUser('%s');
-  if (!u) {
-    admin.createUser({user:'%s', pwd:'%s', roles:[{role:'root', db:'admin'}]});
-  } else {
+  var info = admin.runCommand({usersInfo: '%s'});
+  if (info.ok && info.users && info.users.length > 0) {
     admin.updateUser('%s', {pwd:'%s', roles:[{role:'root', db:'admin'}]});
+  } else {
+    admin.createUser({user:'%s', pwd:'%s', roles:[{role:'root', db:'admin'}]});
   }
 })();
 `, escUser, escUser, escPass, escUser, escPass)
