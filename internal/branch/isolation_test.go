@@ -138,3 +138,27 @@ func TestFindSeedReplicaSamePrimary(t *testing.T) {
 		t.Fatal("other host must not match")
 	}
 }
+
+func TestRefuseBranchWhileLogicalCopy(t *testing.T) {
+	svc, proj := testService(t)
+	alice := auth.WithActor(context.Background(), auth.Actor{Kind: auth.KindGitHub, Login: "alice"})
+	_ = svc.Store.PutConnector(alice, meta.Connector{
+		ID: "c1", ProjectID: proj.ID, Name: "check", CreatedBy: "alice",
+		Mode: ModeLogical, Status: meta.ConnectorBootstrapping, Port: 55433,
+	})
+	err := svc.ensureSourceReadyForBranch(alice, proj.ID, "check", 55433)
+	if err == nil || !strings.Contains(err.Error(), "source_not_ready") || !strings.Contains(err.Error(), "still copying") {
+		t.Fatalf("expected copy-in-progress error, got %v", err)
+	}
+
+	_ = svc.Store.UpdateConnector(alice, meta.Connector{
+		ID: "c1", ProjectID: proj.ID, Name: "check", CreatedBy: "alice",
+		Mode: ModeLogical, Status: meta.ConnectorReplicating, Port: 55433,
+	})
+	if err := svc.ensureSourceReadyForBranch(alice, proj.ID, "check", 55433); err != nil {
+		t.Fatalf("replicating connector should be allowed when status cannot be queried: %v", err)
+	}
+	if err := svc.ensureSourceReadyForBranch(alice, proj.ID, "main", 55432); err != nil {
+		t.Fatalf("main should skip logical checks: %v", err)
+	}
+}

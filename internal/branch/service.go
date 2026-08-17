@@ -188,6 +188,9 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 	if !running {
 		return meta.BranchRecord{}, fmt.Errorf("source_not_ready: %s is not running — connect/init first", srcName)
 	}
+	if err := s.ensureSourceReadyForBranch(ctx, projectID, srcName, srcPort); err != nil {
+		return meta.BranchRecord{}, err
+	}
 
 	port, err := s.Store.AllocPort(ctx)
 	if err != nil {
@@ -302,6 +305,66 @@ func (s *Service) connectorSource(c meta.Connector) (dataDir string, port int, n
 	return dir, port, c.Name, c.ID, nil
 }
 
+func (s *Service) ensureSourceReadyForBranch(ctx context.Context, projectID, srcName string, srcPort int) error {
+	if srcName == "" || srcName == "main" {
+		return nil
+	}
+	c, err := s.lookupConnector(ctx, projectID, srcName)
+	if err != nil {
+		return nil
+	}
+	if c.Mode != ModeLogical {
+		return nil
+	}
+	switch c.Status {
+	case meta.ConnectorBootstrapping:
+		return fmt.Errorf("source_not_ready: connector %q is still copying from prod — wait for sprout connect to finish", c.Name)
+	case meta.ConnectorError:
+		msg := strings.TrimSpace(c.ErrorMessage)
+		if msg == "" {
+			msg = "error"
+		}
+		return fmt.Errorf("source_not_ready: connector %q is in error (%s)", c.Name, msg)
+	}
+	rm := &replica.Manager{Bins: s.Bins}
+	st, err := rm.LogicalSyncStatus(ctx, "127.0.0.1", srcPort, subName(c))
+	if err != nil {
+		return nil
+	}
+	if st.TableTotal > 0 && st.TableReady < st.TableTotal {
+		return fmt.Errorf("source_not_ready: connector %q logical copy is %d/%d — wait for it to finish before branching", c.Name, st.TableReady, st.TableTotal)
+	}
+	return nil
+}
+
+// startDetachedClone promotes a CoW clone to an independent primary.
+// Logical replicas copy pg_subscription into the clone; start with apply
+// workers off, drop those subscriptions without touching the publisher slot,
+// then restore workers so the branch never steals the connector's prod slot.
+func (s *Service) startDetachedClone(ctx context.Context, inst *postgres.Instance, computeName string) (compute.Handle, error) {
+	if err := inst.PrepareClone(); err != nil {
+		return compute.Handle{}, err
+	}
+	if err := postgres.SetLogicalReplicationWorkers(inst.DataDir, 0); err != nil {
+		return compute.Handle{}, err
+	}
+	h, err := s.Compute.Start(ctx, compute.Spec{
+		Name: computeName, DataDir: inst.DataDir, Port: inst.Port, LogFile: inst.LogFile,
+	})
+	if err != nil {
+		return compute.Handle{}, fmt.Errorf("compute_failed: %w", err)
+	}
+	rm := &replica.Manager{Bins: s.Bins}
+	if err := rm.DetachSubscriptionsLocal(ctx, "127.0.0.1", inst.Port); err != nil {
+		_ = s.Compute.Stop(ctx, h)
+		return compute.Handle{}, err
+	}
+	_ = postgres.SetLogicalReplicationWorkers(inst.DataDir, -1)
+	_ = rm.ReloadLocal(ctx, "127.0.0.1", inst.Port)
+	_ = inst.EnsureAppRoles()
+	return h, nil
+}
+
 func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, srcDir string, srcPort int, srcName string) error {
 	rm := &replica.Manager{Bins: s.Bins}
 	srcInst := &postgres.Instance{
@@ -391,24 +454,18 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 		LogFile: s.logPath(s.instKey(*rec)), Bins: s.Bins, Password: rec.Password,
 	}
 	fmt.Println("→ Step 4: PrepareClone (promote branch to independent primary)")
-	if err := inst.PrepareClone(); err != nil {
-		_ = s.Storage.Destroy(rec.DataDir)
-		_ = s.Storage.Destroy(snapRef)
-		return err
-	}
-
 	fmt.Println("→ Step 5: start compute")
-	h, err := s.Compute.Start(ctx, compute.Spec{
-		Name: s.instKey(*rec), DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(s.instKey(*rec)),
-	})
+	h, err := s.startDetachedClone(ctx, inst, s.instKey(*rec))
 	if err != nil {
 		_ = s.Storage.Destroy(rec.DataDir)
 		_ = s.Storage.Destroy(snapRef)
-		return fmt.Errorf("compute_failed: %w", err)
+		if strings.Contains(err.Error(), "pg_ctl start") || strings.HasPrefix(err.Error(), "compute_failed") {
+			return fmt.Errorf("compute_failed: %w", err)
+		}
+		return err
 	}
 	rec.ContainerID = h.ContainerID
 	rec.ConnString = inst.ConnString("postgres")
-	_ = inst.EnsureAppRoles()
 	return nil
 }
 
@@ -445,10 +502,7 @@ func (s *Service) Reset(ctx context.Context, projectID, name, from string) (meta
 		return meta.BranchRecord{}, err
 	}
 	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
-	if err := inst.PrepareClone(); err != nil {
-		return meta.BranchRecord{}, err
-	}
-	started, err := s.Compute.Start(ctx, compute.Spec{Name: key, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key)})
+	started, err := s.startDetachedClone(ctx, inst, key)
 	if err != nil {
 		rec.Status = meta.StatusError
 		rec.ErrorMessage = err.Error()
@@ -460,7 +514,6 @@ func (s *Service) Reset(ctx context.Context, projectID, name, from string) (meta
 	rec.ErrorMessage = ""
 	rec.ConnString = inst.ConnString("postgres")
 	rec.LastUsedAt = time.Now().UTC()
-	_ = inst.EnsureAppRoles()
 	_ = s.Store.UpdateBranch(ctx, rec)
 	return rec, nil
 }

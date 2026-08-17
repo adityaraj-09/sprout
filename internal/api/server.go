@@ -429,6 +429,7 @@ func mapErr(err error) (code string, status int) {
 		return "invalid_body", http.StatusBadRequest
 	case strings.HasPrefix(msg, "logical_sync_stuck"):
 		return "logical_sync_stuck", http.StatusConflict
+	case strings.HasPrefix(msg, "replica_lag"):
 		return "replica_lag", http.StatusConflict
 	case strings.HasPrefix(msg, "compute_failed"):
 		return "compute_failed", http.StatusInternalServerError
