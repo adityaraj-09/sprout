@@ -169,6 +169,8 @@ sequenceDiagram
 
 Physical replicas stay standbys (WAL replay). Logical replicas are writable primaries; branches still CoW that directory.
 
+MongoDB connectors (`mongodb://` / `mongodb+srv://`) skip this Postgres path: `mongodump` into a local standalone `mongod` (TLS on the allocated port), then the same CoW snapshot/clone. There is no oplog follow and no `:27017` SNI proxy — clients use `mongodb://sprout:<pass>@<host>:<port>/?tls=true`.
+
 ## 5. Branch create (CoW)
 
 ```mermaid

@@ -1,8 +1,8 @@
 # sprout
 
-Open-source **Postgres CoW branching**: near-instant database branches plus production sync via named connectors.
+Open-source **Postgres CoW branching** (plus MongoDB dump-restore connectors): near-instant database branches plus production sync via named connectors.
 
-Spin up independent Postgres instances that start as near-instant clones of a parent dataset (local demo or a replica of production), then diverge freely.
+Spin up independent database instances that start as near-instant clones of a parent dataset (local demo or a replica of production), then diverge freely.
 
 **VM / Azure from scratch:** see [`SETUP.md`](SETUP.md) (ZFS disk, Postgres 17 tools, firewall, connect + branch).  
 **System diagrams:** [`ARCHITECTURE.md`](ARCHITECTURE.md).  
@@ -20,6 +20,7 @@ Spin up independent Postgres instances that start as near-instant clones of a pa
 | **Connectors** | Multiple named remotes; each gets its own local replica + port |
 | **Physical sync** | `pg_basebackup` → hot standby → branch with replay pause |
 | **Logical sync** | Publication + schema dump + subscription (e.g. Supabase) |
+| **MongoDB (v1)** | `mongodump` snapshot into local `mongod`; CoW branches; unique TLS ports (no `:27017` proxy, no oplog) |
 
 ```text
 upstream(s)  ──connect --name──►  data/replicas/<name>/
@@ -255,7 +256,7 @@ Connectors and branches each get an allocated port.
 | Command | Description |
 |---------|-------------|
 | `sprout init` | Ensure default project + local `main` + seed demo |
-| `sprout connect [--name=id] [--mode=physical\|logical] <url>` | Bootstrap named replica |
+| `sprout connect [--name=id] [--engine=postgres\|mongodb] [--mode=physical\|logical] <url>` | Bootstrap named replica |
 | `sprout status [name]` | Replication lag / logical sync for a connector |
 | `sprout connector list` | List connectors (password redacted) |
 | `sprout connector delete <name> [--force]` | Drop local replica + remote pub; `--force` also deletes child branches |
@@ -276,7 +277,8 @@ Connectors and branches each get an allocated port.
 Defaults:
 
 - `--name=primary` if omitted on connect  
-- `--mode=physical` if omitted  
+- `--engine` inferred from URL (`mongodb://` / `mongodb+srv://` → mongodb, else postgres)  
+- `--mode=physical` if omitted for Postgres; MongoDB is always `logical` (dump snapshot) 
 
 ---
 
@@ -293,7 +295,7 @@ Auth: `Authorization: Bearer <token>` (GitHub user token from `sprout login`, or
 | `POST` | `/v1/init` | create/start local main |
 | `GET` | `/v1/projects` | list projects |
 | `GET` | `/v1/connectors` | all connectors (URL passwords redacted) |
-| `POST` | `/v1/projects/{project}/connect` | `{"url","mode","name"}` |
+| `POST` | `/v1/projects/{project}/connect` | `{"url","engine","mode","name"}` |
 | `DELETE` | `/v1/projects/{project}/connectors/{name}` | delete replica; `?force=true` also deletes child branches |
 | `GET` | `/v1/projects/{project}/replication?name=` | lag (name optional if sole connector) |
 | `GET` | `/v1/projects/{project}/connectors/{name}/replication` | lag for one connector |
@@ -315,10 +317,13 @@ Use `project` = `default` (resolved by name) or a project UUID.
 
 | Mode | Command | Behavior |
 |------|---------|----------|
-| **physical** | `connect --name=x URL` | `pg_basebackup -R` into `data/replicas/x/`, streaming hot standby |
-| **logical** | `connect --name=x --mode=logical URL` | Create scoped publication → init local PGDATA → `pg_dump --schema-only` → `CREATE SUBSCRIPTION` with `copy_data` |
+| **physical** | `connect --name=x URL` | Postgres: `pg_basebackup -R` into `data/replicas/x/`, streaming hot standby |
+| **logical** | `connect --name=x --mode=logical URL` | Postgres: publication → init local PGDATA → `pg_dump --schema-only` → `CREATE SUBSCRIPTION` |
+| **mongodb** | `connect --name=x 'mongodb://…'` | `mongodump` → local standalone `mongod` (TLS on the allocated port). No oplog follow, no Docker Mongo, no `:27017` hostname proxy |
 
 Logical is for hosts that block physical replication (common on managed Postgres / Supabase). Publication/subscription names are scoped per connector (`sprout_pub_<name>`, `sprout_sub_<name>`). Logical publications are limited to `public` schema tables where applicable.
+
+MongoDB connect is a **point-in-time snapshot**, not continuous replication. `--tables=` is a collection allowlist and requires a database in the URL. Branches CoW the local `dbPath` and start as independent standalones. Connection strings always use the unique instance port with `tls=true` (never port 27017).
 
 **Physical** branch create can pause WAL replay for a consistent snapshot.  
 **Logical** local datasets are writable primaries; branches still CoW that directory.

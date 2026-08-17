@@ -162,3 +162,26 @@ func TestRefuseBranchWhileLogicalCopy(t *testing.T) {
 		t.Fatalf("main should skip logical checks: %v", err)
 	}
 }
+
+func TestMongoRejectsPhysical(t *testing.T) {
+	svc, proj := testService(t)
+	_, err := svc.Connect(context.Background(), proj.ID, ConnectOpts{
+		Name: "atlas", Engine: "mongodb", Mode: ModePhysical, URL: "mongodb://u@h:27017/shop",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid_mode") {
+		t.Fatalf("expected invalid_mode, got %v", err)
+	}
+}
+
+func TestInferMongoEngine(t *testing.T) {
+	svc, proj := testService(t)
+	_, err := svc.Connect(context.Background(), proj.ID, ConnectOpts{
+		Name: "atlas", URL: "mongodb://u@127.0.0.1:1/shop", Mode: ModeLogical,
+	})
+	if err == nil {
+		t.Fatal("expected connect to fail without mongod tools / ping")
+	}
+	if strings.Contains(err.Error(), "invalid_engine") || strings.Contains(err.Error(), "url scheme must be postgres") {
+		t.Fatalf("mongodb URL should be accepted as mongodb engine, got %v", err)
+	}
+}

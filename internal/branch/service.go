@@ -12,7 +12,9 @@ import (
 
 	"github.com/adityaraj/sprout/internal/auth"
 	"github.com/adityaraj/sprout/internal/compute"
+	"github.com/adityaraj/sprout/internal/engine"
 	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
 	"github.com/adityaraj/sprout/internal/replica"
 	"github.com/adityaraj/sprout/internal/storage"
@@ -197,12 +199,20 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 		return meta.BranchRecord{}, err
 	}
 
+	password := postgres.GeneratePassword()
+	if srcID != "" {
+		if c, err := s.Store.GetConnectorByID(ctx, srcID); err == nil && engine.IsMongo(c.Engine) && c.Password != "" {
+			// CoW clones keep the connector's sprout user; mongod has no local-trust ALTER USER.
+			password = c.Password
+		}
+	}
+
 	rec := meta.BranchRecord{
 		ID: uuid.NewString(), ProjectID: projectID, Name: name, Role: "branch",
 		Status: meta.StatusCreating, Port: port, DataDir: s.BranchDir(name, srcName, owner),
 		Compute:         s.Compute.Name(),
 		SourceConnector: srcName, SourceConnectorID: srcID,
-		Password: postgres.GeneratePassword(), CreatedBy: owner,
+		Password: password, CreatedBy: owner,
 	}
 	if err := s.Store.PutBranch(ctx, rec); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -229,7 +239,8 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 	}
 	fmt.Printf("✓ branch %q ready in %s\n", name, time.Since(total).Round(time.Millisecond))
 	fmt.Println("  ", rec.ConnString)
-	fmt.Println("  ", postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy))
+	_, one := advertiseBranch(rec, s.sourceEngine(ctx, rec))
+	fmt.Println("  ", one)
 	return rec, nil
 }
 
@@ -326,6 +337,9 @@ func (s *Service) ensureSourceReadyForBranch(ctx context.Context, projectID, src
 		}
 		return fmt.Errorf("source_not_ready: connector %q is in error (%s)", c.Name, msg)
 	}
+	if engine.IsMongo(c.Engine) {
+		return nil
+	}
 	rm := &replica.Manager{Bins: s.Bins}
 	st, err := rm.LogicalSyncStatus(ctx, "127.0.0.1", srcPort, subName(c))
 	if err != nil {
@@ -365,7 +379,38 @@ func (s *Service) startDetachedClone(ctx context.Context, inst *postgres.Instanc
 	return h, nil
 }
 
+func (s *Service) sourceEngine(ctx context.Context, rec meta.BranchRecord) string {
+	if rec.SourceConnectorID != "" {
+		if c, err := s.Store.GetConnectorByID(ctx, rec.SourceConnectorID); err == nil {
+			return engine.Normalize(c.Engine)
+		}
+	}
+	if mongo.HasDataDir(rec.DataDir) {
+		return engine.Mongo
+	}
+	return engine.Postgres
+}
+
+func (s *Service) startMongoClone(ctx context.Context, rec meta.BranchRecord, computeName string) (compute.Handle, error) {
+	inst := &mongo.Instance{
+		Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port,
+		LogFile: s.logPath(computeName), Bins: mongo.FindOnPath(), Password: rec.Password,
+	}
+	if err := inst.PrepareClone(); err != nil {
+		return compute.Handle{}, err
+	}
+	h, err := s.Compute.Start(ctx, compute.Spec{
+		Name: computeName, DataDir: rec.DataDir, Port: rec.Port, LogFile: inst.LogFile, Engine: engine.Mongo,
+	})
+	if err != nil {
+		return compute.Handle{}, fmt.Errorf("compute_failed: %w", err)
+	}
+	_ = inst.EnsureAppRoles()
+	return h, nil
+}
+
 func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, srcDir string, srcPort int, srcName string) error {
+	eng := s.sourceEngine(ctx, *rec)
 	rm := &replica.Manager{Bins: s.Bins}
 	srcInst := &postgres.Instance{
 		Name: srcName, DataDir: srcDir, Port: srcPort,
@@ -374,19 +419,31 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	srcHandle := compute.Handle{
 		Provider: s.Compute.Name(), Name: srcName, Port: srcPort, DataDir: srcDir,
 	}
+	srcPass := rec.Password
 	if rec.SourceConnectorID != "" {
 		if c, err := s.Store.GetConnectorByID(ctx, rec.SourceConnectorID); err == nil {
 			srcHandle.Name = postgres.ReplicaComputeName(c.Name, c.CreatedBy)
+			if c.Password != "" {
+				srcPass = c.Password
+			}
 		}
 	} else if srcName != "main" && !strings.HasPrefix(srcName, "replica-") {
 		srcHandle.Name = postgres.ReplicaComputeName(srcName, rec.CreatedBy)
+	}
+	srcSpec := compute.Spec{
+		Name: srcHandle.Name, DataDir: srcDir, Port: srcPort, LogFile: s.logPath(srcHandle.Name), Engine: eng,
 	}
 
 	unlock := s.lockBranch("snap:" + srcName)
 	defer unlock()
 
 	st, stErr := rm.Status(ctx, "127.0.0.1", srcPort)
-	useReplayPause := stErr == nil && st.IsStandby
+	useReplayPause := !engine.IsMongo(eng) && stErr == nil && st.IsStandby
+	srcMongo := &mongo.Instance{
+		Name: srcHandle.Name, DataDir: srcDir, Port: srcPort,
+		LogFile: s.logPath(srcHandle.Name), Bins: mongo.FindOnPath(), Password: srcPass,
+	}
+	mongoLocked := false
 
 	if useReplayPause {
 		fmt.Println("→ Step 0: replica lag check")
@@ -403,6 +460,18 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 			return fmt.Errorf("storage_failed: checkpoint: %w", err)
 		}
 		rec.SourceLSN = st.ReplayLSN
+	} else if engine.IsMongo(eng) {
+		fmt.Println("→ Step 1: fsyncLock mongod (+ cold stop if enabled)")
+		if s.ColdSnap {
+			if err := s.Compute.Stop(ctx, srcHandle); err != nil {
+				return err
+			}
+		} else {
+			if err := srcMongo.LockForSnapshot(); err != nil {
+				return fmt.Errorf("storage_failed: mongo fsyncLock: %w", err)
+			}
+			mongoLocked = true
+		}
 	} else {
 		fmt.Println("→ Step 1: CHECKPOINT (+ cold stop if enabled)")
 		if err := srcInst.Checkpoint(); err != nil {
@@ -418,17 +487,24 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	fmt.Println("→ Step 2: snapshot")
 	snapRef, err := s.Storage.Snapshot(srcDir, s.instKey(*rec))
 	if err != nil {
+		if mongoLocked {
+			_ = srcMongo.UnlockForSnapshot()
+		}
 		if useReplayPause {
 			_ = rm.ResumeReplay(ctx, "127.0.0.1", srcPort)
 		} else if s.ColdSnap {
-			_, _ = s.Compute.Start(ctx, compute.Spec{
-				Name: srcHandle.Name, DataDir: srcDir, Port: srcPort, LogFile: s.logPath(srcHandle.Name),
-			})
+			_, _ = s.Compute.Start(ctx, srcSpec)
 		}
 		return fmt.Errorf("storage_failed: %w", err)
 	}
 	rec.SnapshotRef = snapRef
 
+	if mongoLocked {
+		fmt.Println("→ fsyncUnlock mongod")
+		if err := srcMongo.UnlockForSnapshot(); err != nil {
+			return fmt.Errorf("storage_failed: mongo fsyncUnlock: %w", err)
+		}
+	}
 	if useReplayPause {
 		fmt.Println("→ resume WAL replay on source")
 		if err := rm.ResumeReplay(ctx, "127.0.0.1", srcPort); err != nil {
@@ -436,9 +512,7 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 		}
 	} else if s.ColdSnap {
 		fmt.Println("→ restart source")
-		if _, err := s.Compute.Start(ctx, compute.Spec{
-			Name: srcHandle.Name, DataDir: srcDir, Port: srcPort, LogFile: s.logPath(srcHandle.Name),
-		}); err != nil {
+		if _, err := s.Compute.Start(ctx, srcSpec); err != nil {
 			return err
 		}
 	}
@@ -449,23 +523,33 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 		return fmt.Errorf("storage_failed: %w", err)
 	}
 
-	inst := &postgres.Instance{
-		Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port,
-		LogFile: s.logPath(s.instKey(*rec)), Bins: s.Bins, Password: rec.Password,
-	}
 	fmt.Println("→ Step 4: PrepareClone (promote branch to independent primary)")
 	fmt.Println("→ Step 5: start compute")
-	h, err := s.startDetachedClone(ctx, inst, s.instKey(*rec))
+	var h compute.Handle
+	if engine.IsMongo(eng) {
+		h, err = s.startMongoClone(ctx, *rec, s.instKey(*rec))
+		if err == nil {
+			rec.ConnString, _ = advertiseBranch(*rec, engine.Mongo)
+		}
+	} else {
+		inst := &postgres.Instance{
+			Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port,
+			LogFile: s.logPath(s.instKey(*rec)), Bins: s.Bins, Password: rec.Password,
+		}
+		h, err = s.startDetachedClone(ctx, inst, s.instKey(*rec))
+		if err == nil {
+			rec.ConnString = inst.ConnString("postgres")
+		}
+	}
 	if err != nil {
 		_ = s.Storage.Destroy(rec.DataDir)
 		_ = s.Storage.Destroy(snapRef)
-		if strings.Contains(err.Error(), "pg_ctl start") || strings.HasPrefix(err.Error(), "compute_failed") {
+		if strings.Contains(err.Error(), "pg_ctl start") || strings.Contains(err.Error(), "mongod") || strings.HasPrefix(err.Error(), "compute_failed") {
 			return fmt.Errorf("compute_failed: %w", err)
 		}
 		return err
 	}
 	rec.ContainerID = h.ContainerID
-	rec.ConnString = inst.ConnString("postgres")
 	return nil
 }
 
@@ -501,8 +585,20 @@ func (s *Service) Reset(ctx context.Context, projectID, name, from string) (meta
 		_ = s.Store.UpdateBranch(ctx, rec)
 		return meta.BranchRecord{}, err
 	}
-	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
-	started, err := s.startDetachedClone(ctx, inst, key)
+	eng := s.sourceEngine(ctx, rec)
+	var started compute.Handle
+	if engine.IsMongo(eng) {
+		started, err = s.startMongoClone(ctx, rec, key)
+		if err == nil {
+			rec.ConnString, _ = advertiseBranch(rec, engine.Mongo)
+		}
+	} else {
+		inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
+		started, err = s.startDetachedClone(ctx, inst, key)
+		if err == nil {
+			rec.ConnString = inst.ConnString("postgres")
+		}
+	}
 	if err != nil {
 		rec.Status = meta.StatusError
 		rec.ErrorMessage = err.Error()
@@ -512,7 +608,6 @@ func (s *Service) Reset(ctx context.Context, projectID, name, from string) (meta
 	rec.ContainerID = started.ContainerID
 	rec.Status = meta.StatusActive
 	rec.ErrorMessage = ""
-	rec.ConnString = inst.ConnString("postgres")
 	rec.LastUsedAt = time.Now().UTC()
 	_ = s.Store.UpdateBranch(ctx, rec)
 	return rec, nil
@@ -583,8 +678,9 @@ func (s *Service) Resume(ctx context.Context, projectID, name, from string) (met
 		return meta.BranchRecord{}, fmt.Errorf("invalid_state: status=%s", rec.Status)
 	}
 	key := s.instKey(rec)
+	eng := s.sourceEngine(ctx, rec)
 	started, err := s.Compute.Start(ctx, compute.Spec{
-		Name: key, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key),
+		Name: key, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Engine: eng,
 	})
 	if err != nil {
 		return meta.BranchRecord{}, err
@@ -593,9 +689,14 @@ func (s *Service) Resume(ctx context.Context, projectID, name, from string) (met
 	rec.Status = meta.StatusActive
 	rec.ErrorMessage = ""
 	rec.LastUsedAt = time.Now().UTC()
-	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres", rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
-	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
-	_ = inst.EnsureAppRoles()
+	rec.ConnString, _ = advertiseBranch(rec, eng)
+	if engine.IsMongo(eng) {
+		inst := &mongo.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: mongo.FindOnPath(), Password: rec.Password}
+		_ = inst.EnsureAppRoles()
+	} else {
+		inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
+		_ = inst.EnsureAppRoles()
+	}
 	_ = s.Store.UpdateBranch(ctx, rec)
 	return rec, nil
 }

@@ -9,15 +9,25 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/adityaraj/sprout/internal/engine"
+	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
 )
 
-// Spec describes one Postgres workload to run.
+// Spec describes one database workload to run.
 type Spec struct {
 	Name    string // logical name (main, feature-x)
-	DataDir string // host path to PGDATA (already prepared)
+	DataDir string // host path to data dir (already prepared)
 	Port    int    // host port clients connect to
 	LogFile string // used by local provider
+	Engine  string // postgres (default) | mongodb
+}
+
+func specEngine(spec Spec) string {
+	if engine.IsMongo(spec.Engine) || mongo.HasDataDir(spec.DataDir) {
+		return engine.Mongo
+	}
+	return engine.Postgres
 }
 
 // Handle is whatever we need later to stop/inspect the workload.
@@ -60,8 +70,21 @@ func (l *Local) instance(spec Spec) *postgres.Instance {
 
 func (l *Local) Start(ctx context.Context, spec Spec) (Handle, error) {
 	_ = ctx
-	inst := l.instance(spec)
 	h := Handle{Provider: "local", Name: spec.Name, Port: spec.Port, DataDir: spec.DataDir}
+	if specEngine(spec) == engine.Mongo {
+		inst := &mongo.Instance{
+			Name: spec.Name, DataDir: spec.DataDir, Port: spec.Port, LogFile: spec.LogFile,
+			Bins: mongo.FindOnPath(),
+		}
+		if inst.IsRunning() {
+			return h, nil
+		}
+		if err := inst.Start(); err != nil {
+			return Handle{}, err
+		}
+		return h, nil
+	}
+	inst := l.instance(spec)
 	if inst.IsRunning() {
 		return h, nil
 	}
@@ -73,6 +96,10 @@ func (l *Local) Start(ctx context.Context, spec Spec) (Handle, error) {
 
 func (l *Local) Stop(ctx context.Context, h Handle) error {
 	_ = ctx
+	if specEngine(Spec{DataDir: h.DataDir}) == engine.Mongo {
+		inst := &mongo.Instance{Name: h.Name, DataDir: h.DataDir, Port: h.Port, Bins: mongo.FindOnPath()}
+		return inst.Stop()
+	}
 	inst := &postgres.Instance{
 		Name: h.Name, DataDir: h.DataDir, Port: h.Port,
 		Bins: l.Bins,
@@ -82,6 +109,10 @@ func (l *Local) Stop(ctx context.Context, h Handle) error {
 
 func (l *Local) IsRunning(ctx context.Context, h Handle) (bool, error) {
 	_ = ctx
+	if specEngine(Spec{DataDir: h.DataDir, Port: h.Port}) == engine.Mongo {
+		inst := &mongo.Instance{Port: h.Port, DataDir: h.DataDir, Bins: mongo.FindOnPath()}
+		return inst.IsRunning(), nil
+	}
 	inst := &postgres.Instance{Port: h.Port, DataDir: h.DataDir, Bins: l.Bins}
 	return inst.IsRunning(), nil
 }

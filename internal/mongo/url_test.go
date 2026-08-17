@@ -1,0 +1,98 @@
+package mongo
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestParseURL(t *testing.T) {
+	c, err := ParseURL("mongodb://alice:s3cret@db.example.com:27018/shop?tls=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Host != "db.example.com" || c.Port != 27018 || c.User != "alice" || c.Database != "shop" || !c.TLS {
+		t.Fatalf("%+v", c)
+	}
+	if _, err := ParseURL("postgresql://u@h/db"); err == nil {
+		t.Fatal("postgres scheme must fail")
+	}
+	c, err = ParseURL("mongodb+srv://user:pass@cluster0.mongodb.net/app")
+	if err != nil || !c.SRV || c.Host != "cluster0.mongodb.net" || c.Database != "app" {
+		t.Fatalf("srv: %+v %v", c, err)
+	}
+}
+
+func TestFormatConnStringUniqueTLSPort(t *testing.T) {
+	t.Setenv("SPROUT_DB_USER", "sprout")
+	t.Setenv("SPROUT_PUBLIC_HOST", "localhost")
+	t.Setenv("SPROUT_BRANCH_SUBDOMAIN", "")
+	local := FormatConnString(55461, "shop", "secret", "feat", "atlas")
+	if !strings.Contains(local, "localhost:55461") {
+		t.Fatalf("local: %s", local)
+	}
+	if !strings.Contains(local, "tls=true") || !strings.Contains(local, "authSource=admin") {
+		t.Fatalf("tls missing: %s", local)
+	}
+
+	t.Setenv("SPROUT_PUBLIC_HOST", "strido.fit")
+	hosted := FormatConnString(55461, "shop", "secret", "feat", "atlas")
+	if !strings.Contains(hosted, "feat-atlas.strido.fit:55461") {
+		t.Fatalf("expected unique port, got %s", hosted)
+	}
+	if strings.Contains(hosted, ":27017") {
+		t.Fatalf("must not advertise 27017: %s", hosted)
+	}
+}
+
+func TestPrepareCloneRewritesPortAndDropsLock(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SPROUT_DATA", dir)
+	if err := os.WriteFile(filepath.Join(dir, "mongod.lock"), []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mongod.pid"), []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inst := &Instance{DataDir: dir, Port: 55461, LogFile: filepath.Join(dir, "mongod.log")}
+	if err := inst.PrepareClone(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "mongod.lock")); !os.IsNotExist(err) {
+		t.Fatal("mongod.lock should be removed")
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "mongod.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "port: 55461") {
+		t.Fatalf("mongod.conf:\n%s", body)
+	}
+	if !strings.Contains(string(body), "authorization: enabled") {
+		t.Fatalf("auth missing:\n%s", body)
+	}
+	if !strings.Contains(string(body), "requireTLS") {
+		t.Fatalf("tls missing:\n%s", body)
+	}
+}
+
+func TestHasDataDir(t *testing.T) {
+	dir := t.TempDir()
+	if HasDataDir(dir) {
+		t.Fatal("empty")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "WiredTiger.wt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !HasDataDir(dir) {
+		t.Fatal("WiredTiger.wt")
+	}
+	pg := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pg, "PG_VERSION"), []byte("17\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if HasDataDir(pg) {
+		t.Fatal("postgres dir is not mongo")
+	}
+}

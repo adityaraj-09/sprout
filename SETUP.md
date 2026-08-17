@@ -112,6 +112,26 @@ If `pg_dump` major is lower than the primary, logical connect fails with `versio
 
 ---
 
+## 3b. Optional: MongoDB tools (dump-restore connectors)
+
+MongoDB connectors need `mongod`, `mongodump`, `mongorestore`, and `mongosh` on `PATH`. Compute is **local only** (`SPROUT_COMPUTE=local`). There is no Docker Mongo and no `:27017` hostname proxy — branches advertise TLS on their allocated port (`55433+`).
+
+```bash
+# MongoDB 7 Community + database tools (Ubuntu)
+curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc \
+  | sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
+echo "deb [ signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" \
+  | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+sudo apt update
+sudo apt install -y mongodb-org mongodb-database-tools mongodb-mongosh
+
+which mongod mongodump mongorestore mongosh
+```
+
+Skip this if you only use Postgres connectors. `sprout doctor` reports these binaries as optional.
+
+---
+
 ## 4. Data disk + ZFS
 
 ### 4a. Find the empty disk

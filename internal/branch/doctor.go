@@ -54,6 +54,16 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 		}
 		add(DoctorCheck{Name: "bin:" + b.name, OK: true, Level: "info", Detail: detail})
 	}
+	for _, name := range []string{"mongod", "mongodump", "mongorestore", "mongosh"} {
+		p, err := exec.LookPath(name)
+		if err != nil {
+			add(DoctorCheck{Name: "bin:" + name, OK: true, Level: "info",
+				Detail: "not found (optional; needed for --engine=mongodb)",
+				Hint:   "install MongoDB server and database tools"})
+			continue
+		}
+		add(DoctorCheck{Name: "bin:" + name, OK: true, Level: "info", Detail: p})
+	}
 
 	// Storage / compute
 	add(DoctorCheck{Name: "storage", OK: true, Level: "info", Detail: s.Storage.Name(),
