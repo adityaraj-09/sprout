@@ -117,19 +117,33 @@ If `pg_dump` major is lower than the primary, logical connect fails with `versio
 
 MongoDB connectors need `mongod`, `mongodump`, `mongorestore`, and `mongosh` on `PATH`. Compute is **local only** (`SPROUT_COMPUTE=local`). There is no Docker Mongo. With a DNS `SPROUT_PUBLIC_HOST`, clients use `:27017` (`tls=true`); hostname SNI selects the instance. `SPROUT_MONGO_PROXY=false` keeps unique ports.
 
+Ubuntu **24.04 (noble)** has MongoDB **8.0** packages. Ubuntu **22.04 (jammy)** has **7.0**. There is no `noble/mongodb-org/7.0` repo.
+
 ```bash
-# MongoDB 7 Community + database tools (Ubuntu)
-curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc \
-  | sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
-echo "deb [ signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" \
-  | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+sudo rm -f /etc/apt/sources.list.d/mongodb-org-7.0.list
+
+. /etc/os-release
+MONGO_VER=8.0
+case "$VERSION_CODENAME" in
+  jammy|focal) MONGO_VER=7.0 ;;
+esac
+
+curl -fsSL "https://www.mongodb.org/static/pgp/server-${MONGO_VER}.asc" \
+  | sudo gpg -o "/usr/share/keyrings/mongodb-server-${MONGO_VER}.gpg" --dearmor
+echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-${MONGO_VER}.gpg ] https://repo.mongodb.org/apt/ubuntu ${VERSION_CODENAME}/mongodb-org/${MONGO_VER} multiverse" \
+  | sudo tee "/etc/apt/sources.list.d/mongodb-org-${MONGO_VER}.list"
+
 sudo apt update
 sudo apt install -y mongodb-org mongodb-database-tools mongodb-mongosh
 
+# Sprout starts its own mongod; do not keep the distro service on :27017
+sudo systemctl disable --now mongod 2>/dev/null || true
+
 which mongod mongodump mongorestore mongosh
+mongod --version | head -1
 ```
 
-Skip this if you only use Postgres connectors. `sprout doctor` reports these binaries as optional.
+Skip this if you only use Postgres connectors. `sprout doctor` reports these binaries as optional. Restart `sprout-server` after install so it picks up `PATH`.
 
 ---
 
