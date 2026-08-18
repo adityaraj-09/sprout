@@ -85,6 +85,13 @@ func TestPrepareCloneRewritesPortAndDropsLock(t *testing.T) {
 	}
 }
 
+func TestLocalRestoreURI(t *testing.T) {
+	u := localRestoreURI(55433)
+	if !strings.Contains(u, "127.0.0.1:55433") || !strings.Contains(u, "tls=true") {
+		t.Fatalf("%s", u)
+	}
+}
+
 func TestToolTLSFlagsPreferSSLOnDatabaseTools(t *testing.T) {
 	p, err := exec.LookPath("mongorestore")
 	if err != nil {

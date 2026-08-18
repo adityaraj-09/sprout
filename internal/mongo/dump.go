@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -89,17 +88,35 @@ func (m Binaries) DumpImport(ctx context.Context, c Conn, local *Instance, colle
 	}
 
 	restore := []string{
-		"--host=127.0.0.1",
-		"--port=" + strconv.Itoa(local.Port),
+		"--uri=" + localRestoreURI(local.Port),
+		"--drop",
+		dir,
 	}
-	restore = append(restore, toolTLSFlags(m.Mongorestore)...)
-	restore = append(restore, "--drop", dir)
 	cmd := exec.CommandContext(ctx, m.Mongorestore, restore...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("mongorestore: %w (%s)", err, strings.TrimSpace(string(out)))
+		logTail := ""
+		if local.LogFile != "" {
+			if b, rerr := os.ReadFile(local.LogFile); rerr == nil {
+				logTail = strings.TrimSpace(string(b))
+				if len(logTail) > 4000 {
+					logTail = logTail[len(logTail)-4000:]
+				}
+			}
+		}
+		msg := fmt.Sprintf("mongorestore: %v (%s)", err, strings.TrimSpace(string(out)))
+		if logTail != "" {
+			msg += "\nmongod.log:\n" + logTail
+		}
+		return fmt.Errorf("%s", msg)
 	}
 	return nil
+}
+
+// localRestoreURI talks to the loopback mongod with TLS in the URI so we do not
+// depend on mongorestore --tls vs --ssl flag names (MongoDB 7 vs 8 tools).
+func localRestoreURI(port int) string {
+	return fmt.Sprintf("mongodb://127.0.0.1:%d/?directConnection=true&tls=true&tlsAllowInvalidCertificates=true&tlsInsecure=true", port)
 }
 
 // toolTLSFlags returns database-tools TLS flags. MongoDB Database Tools 100.x
