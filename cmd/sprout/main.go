@@ -73,8 +73,9 @@ func main() {
 			os.Exit(1)
 		}
 	case "connect":
-		// sprout connect [--name=...] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
-		mode := "physical"
+		// sprout connect [--name=...] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
+		mode := ""
+		engineName := ""
 		name := "primary"
 		url := ""
 		wipe := true
@@ -83,6 +84,10 @@ func main() {
 		for _, a := range os.Args[2:] {
 			if strings.HasPrefix(a, "--mode=") {
 				mode = strings.TrimPrefix(a, "--mode=")
+				continue
+			}
+			if strings.HasPrefix(a, "--engine=") {
+				engineName = strings.TrimPrefix(a, "--engine=")
 				continue
 			}
 			if strings.HasPrefix(a, "--name=") {
@@ -124,9 +129,12 @@ func main() {
 			}
 		}
 		if url == "" {
-			fatal(fmt.Errorf("usage: sprout connect [--name=<id>] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <postgresql-url>"))
+			fatal(fmt.Errorf("usage: sprout connect [--name=<id>] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>"))
 		}
 		body := map[string]any{"url": url, "mode": mode, "name": name, "wipe": wipe, "dry_run": dryRun}
+		if engineName != "" {
+			body["engine"] = engineName
+		}
 		if len(tables) > 0 {
 			body["tables"] = tables
 		}
@@ -145,6 +153,9 @@ func main() {
 			fmt.Println(" ", cs)
 			if psql, _ := out["psql"].(string); psql != "" {
 				fmt.Println(" ", psql)
+			}
+			if sh, _ := out["mongosh"].(string); sh != "" {
+				fmt.Println(" ", sh)
 			}
 		}
 		b, _ := json.MarshalIndent(out, "", "  ")
@@ -242,11 +253,11 @@ func main() {
 			name := ""
 			for _, a := range os.Args[3:] {
 				if strings.HasPrefix(a, "--from=") {
-					from = strings.TrimPrefix(a, "--from=")
+					from = strings.Trim(strings.TrimSpace(strings.TrimPrefix(a, "--from=")), ",;")
 					continue
 				}
 				if name == "" && !strings.HasPrefix(a, "-") {
-					name = a
+					name = strings.Trim(strings.TrimSpace(a), ",;")
 				}
 			}
 			if name == "" {
@@ -266,11 +277,15 @@ func main() {
 			}
 			cs, _ := rec["connection_string"].(string)
 			psql, _ := rec["psql"].(string)
+			mongosh, _ := rec["mongosh"].(string)
 			status, _ := rec["status"].(string)
 			bname, _ := rec["name"].(string)
 			fmt.Printf("✓ %s [%s] from=%s\n  %s\n", bname, status, src, cs)
 			if psql != "" {
 				fmt.Println(" ", psql)
+			}
+			if mongosh != "" {
+				fmt.Println(" ", mongosh)
 			}
 		case "list":
 			var list []meta.BranchRecord
@@ -430,11 +445,11 @@ func need(n int) {
 func parseNameFrom(args []string) (name, from string) {
 	for _, a := range args {
 		if strings.HasPrefix(a, "--from=") {
-			from = strings.TrimPrefix(a, "--from=")
+			from = strings.Trim(strings.TrimSpace(strings.TrimPrefix(a, "--from=")), ",;")
 			continue
 		}
 		if name == "" && !strings.HasPrefix(a, "-") {
-			name = a
+			name = strings.Trim(strings.TrimSpace(a), ",;")
 		}
 	}
 	return name, from
@@ -457,11 +472,12 @@ Usage:
   sprout whoami
   sprout doctor
   sprout init
-  sprout connect [--name=<id>] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
+  sprout connect [--name=<id>] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
+                                  engine         = infer from URL (mongodb:// → mongodb)
                                   wipe (default) = destroy local replica and rebootstrap
                                   --no-wipe      = resume existing replica when possible
                                   --dry-run      = estimate tables/rows (logical only)
-                                  --tables=...   = allowlist for logical sync
+                                  --tables=...   = allowlist for logical sync (Postgres tables / Mongo collections)
   sprout status [name]
   sprout connector list
   sprout connector delete <name> [--force]

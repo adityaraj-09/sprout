@@ -6,7 +6,9 @@ import (
 
 	"github.com/adityaraj/sprout/internal/auth"
 	"github.com/adityaraj/sprout/internal/compute"
+	"github.com/adityaraj/sprout/internal/engine"
 	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
 )
 
@@ -20,7 +22,10 @@ type ConnectorLifecycleResult struct {
 // SuspendConnector stops the connector replica compute and all branches from it.
 // Data directories are kept (same idea as branch suspend).
 func (s *Service) SuspendConnector(ctx context.Context, projectID, name string) (ConnectorLifecycleResult, error) {
-	unlock := s.lockBranch(s.connectorLockKey(name, auth.OwnerFrom(ctx)))
+	unlock, err := s.lockBranch(ctx, s.connectorLockKey(name, auth.OwnerFrom(ctx)))
+	if err != nil {
+		return ConnectorLifecycleResult{}, err
+	}
 	defer unlock()
 
 	c, err := s.lookupConnector(ctx, projectID, name)
@@ -63,7 +68,10 @@ func (s *Service) SuspendConnector(ctx context.Context, projectID, name string) 
 
 // ResumeConnector starts the connector replica and all idle branches from it.
 func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (ConnectorLifecycleResult, error) {
-	unlock := s.lockBranch(s.connectorLockKey(name, auth.OwnerFrom(ctx)))
+	unlock, err := s.lockBranch(ctx, s.connectorLockKey(name, auth.OwnerFrom(ctx)))
+	if err != nil {
+		return ConnectorLifecycleResult{}, err
+	}
 	defer unlock()
 
 	c, err := s.lookupConnector(ctx, projectID, name)
@@ -74,15 +82,23 @@ func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (
 	h := s.connectorHandle(c)
 	if _, err := s.Compute.Start(ctx, compute.Spec{
 		Name: h.Name, DataDir: h.DataDir, Port: h.Port,
-		LogFile: s.logPath(h.Name),
+		LogFile: s.logPath(h.Name), Engine: engine.Normalize(c.Engine),
 	}); err != nil {
 		return ConnectorLifecycleResult{}, fmt.Errorf("compute_failed: start connector: %w", err)
 	}
-	inst := &postgres.Instance{
-		Name: h.Name, Owner: c.CreatedBy, DataDir: h.DataDir, Port: h.Port,
-		LogFile: s.logPath(h.Name), Bins: s.Bins, Password: c.Password,
+	if engine.IsMongo(c.Engine) {
+		inst := &mongo.Instance{
+			Name: h.Name, Owner: c.CreatedBy, DataDir: h.DataDir, Port: h.Port,
+			LogFile: s.logPath(h.Name), Bins: mongo.FindOnPath(), Password: c.Password,
+		}
+		_ = inst.EnsureAppRoles()
+	} else {
+		inst := &postgres.Instance{
+			Name: h.Name, Owner: c.CreatedBy, DataDir: h.DataDir, Port: h.Port,
+			LogFile: s.logPath(h.Name), Bins: s.Bins, Password: c.Password,
+		}
+		_ = inst.EnsureAppRoles()
 	}
-	_ = inst.EnsureAppRoles()
 	c.Status = meta.ConnectorReplicating
 	c.ErrorMessage = ""
 	_ = s.Store.UpdateConnector(ctx, c)
@@ -90,7 +106,7 @@ func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (
 	if br, err := lookupReplicaRow(ctx, s.Store, projectID, c); err == nil {
 		br.Status = meta.StatusActive
 		br.ErrorMessage = ""
-		br.ConnString = postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, "", c.CreatedBy)
+		br.ConnString = advertiseConnURL(c.Engine, c.Port, c.Password, c.Name, "", c.CreatedBy)
 		_ = s.Store.UpdateBranch(ctx, br)
 	}
 
@@ -108,8 +124,9 @@ func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (
 	}
 
 	fmt.Printf("✓ connector %q resumed (%d branches)\n", c.Name, len(out))
-	fmt.Println("  ", postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, "", c.CreatedBy))
-	fmt.Println("  ", postgres.PsqlOneLiner(c.Port, c.Password, c.Name, "", c.CreatedBy))
+	cs, one := advertiseConnector(c)
+	fmt.Println("  ", cs)
+	fmt.Println("  ", one)
 	return ConnectorLifecycleResult{
 		Connector: c,
 		Branches:  out,
@@ -145,7 +162,10 @@ func (s *Service) suspendBranchBestEffort(ctx context.Context, rec meta.BranchRe
 	if rec.Status != meta.StatusActive && rec.Status != meta.StatusError && rec.Status != meta.StatusCrashed {
 		return rec, nil
 	}
-	unlock := s.lockBranch(s.instKey(rec))
+	unlock, err := s.lockBranch(ctx, s.instKey(rec))
+	if err != nil {
+		return meta.BranchRecord{}, err
+	}
 	defer unlock()
 	fresh, err := s.Store.GetBranchByID(ctx, rec.ID)
 	if err != nil {
@@ -156,7 +176,7 @@ func (s *Service) suspendBranchBestEffort(ctx context.Context, rec meta.BranchRe
 		return rec, nil
 	}
 	key := s.instKey(rec)
-	h := compute.Handle{Provider: s.Compute.Name(), Name: key, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID}
+	h := compute.Handle{Provider: s.Compute.Name(), Name: key, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID, Engine: s.sourceEngine(ctx, rec), Password: rec.Password}
 	_ = s.Compute.Stop(ctx, h)
 	rec.Status = meta.StatusIdle
 	rec.ContainerID = ""
@@ -171,7 +191,10 @@ func (s *Service) resumeBranchBestEffort(ctx context.Context, rec meta.BranchRec
 	if rec.Status != meta.StatusIdle && rec.Status != meta.StatusCrashed {
 		return rec, fmt.Errorf("invalid_state: status=%s", rec.Status)
 	}
-	unlock := s.lockBranch(s.instKey(rec))
+	unlock, err := s.lockBranch(ctx, s.instKey(rec))
+	if err != nil {
+		return meta.BranchRecord{}, err
+	}
 	defer unlock()
 	fresh, err := s.Store.GetBranchByID(ctx, rec.ID)
 	if err != nil {
@@ -182,8 +205,9 @@ func (s *Service) resumeBranchBestEffort(ctx context.Context, rec meta.BranchRec
 		return rec, nil
 	}
 	key := s.instKey(rec)
+	eng := s.sourceEngine(ctx, rec)
 	started, err := s.Compute.Start(ctx, compute.Spec{
-		Name: key, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key),
+		Name: key, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Engine: eng,
 	})
 	if err != nil {
 		return meta.BranchRecord{}, err
@@ -191,9 +215,14 @@ func (s *Service) resumeBranchBestEffort(ctx context.Context, rec meta.BranchRec
 	rec.ContainerID = started.ContainerID
 	rec.Status = meta.StatusActive
 	rec.ErrorMessage = ""
-	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres", rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
-	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
-	_ = inst.EnsureAppRoles()
+	rec.ConnString, _ = advertiseBranch(rec, eng)
+	if engine.IsMongo(eng) {
+		inst := &mongo.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: mongo.FindOnPath(), Password: rec.Password}
+		_ = inst.EnsureAppRoles()
+	} else {
+		inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
+		_ = inst.EnsureAppRoles()
+	}
 	_ = s.Store.UpdateBranch(ctx, rec)
 	return rec, nil
 }

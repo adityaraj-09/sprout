@@ -9,7 +9,9 @@ import (
 
 	"github.com/adityaraj/sprout/internal/auth"
 	"github.com/adityaraj/sprout/internal/branch"
+	"github.com/adityaraj/sprout/internal/engine"
 	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
 )
 
@@ -119,6 +121,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		URL    string   `json:"url"`
+		Engine string   `json:"engine"`
 		Mode   string   `json:"mode"`
 		Name   string   `json:"name"`
 		Wipe   *bool    `json:"wipe"`
@@ -127,7 +130,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.URL == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_body",
-			`JSON {"url":"postgresql://...","mode":"logical|physical","name":"...","wipe":true,"dry_run":false,"tables":["t"]} required`)
+			`JSON {"url":"postgresql://... or mongodb://...","engine":"postgres|mongodb","mode":"logical|physical","name":"...","wipe":true,"dry_run":false,"tables":["t"]} required`)
 		return
 	}
 	wipe := true
@@ -137,7 +140,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Minute)
 	defer cancel()
 	res, err := s.Service.Connect(ctx, proj.ID, branch.ConnectOpts{
-		Name: body.Name, URL: body.URL, Mode: body.Mode,
+		Name: body.Name, URL: body.URL, Engine: body.Engine, Mode: body.Mode,
 		Wipe: wipe, DryRun: body.DryRun, Tables: body.Tables,
 	})
 	if err != nil {
@@ -162,8 +165,13 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		"project":   proj,
 	}
 	if res.Connector != nil {
-		out["connection_string"] = postgres.FormatConnString(res.Connector.Port, "postgres", res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
-		out["psql"] = postgres.PsqlOneLiner(res.Connector.Port, res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
+		if engine.IsMongo(res.Connector.Engine) {
+			out["connection_string"] = mongo.FormatConnString(res.Connector.Port, "", res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
+			out["mongosh"] = mongo.MongoshOneLiner(res.Connector.Port, res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
+		} else {
+			out["connection_string"] = postgres.FormatConnString(res.Connector.Port, "postgres", res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
+			out["psql"] = postgres.PsqlOneLiner(res.Connector.Port, res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -269,7 +277,7 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_body", `JSON {"name":"...","from":"connector-name"} required`)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 	rec, err := s.Service.Create(ctx, proj.ID, body.Name, body.From)
 	if err != nil {
@@ -277,28 +285,19 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, status, code, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":                  rec.ID,
-		"project_id":          rec.ProjectID,
-		"name":                rec.Name,
-		"role":                rec.Role,
-		"status":              rec.Status,
-		"port":                rec.Port,
-		"data_dir":            rec.DataDir,
-		"snapshot_ref":        rec.SnapshotRef,
-		"container_id":        rec.ContainerID,
-		"compute":             rec.Compute,
-		"connection_string":   rec.ConnString,
-		"psql":                postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy),
-		"error_message":       rec.ErrorMessage,
-		"source_lsn":          rec.SourceLSN,
-		"source_connector":    rec.SourceConnector,
-		"source_connector_id": rec.SourceConnectorID,
-		"created_by":          rec.CreatedBy,
-		"created_at":          rec.CreatedAt,
-		"updated_at":          rec.UpdatedAt,
-		"last_used_at":        rec.LastUsedAt,
-	})
+	out := map[string]any{
+		"id": rec.ID, "project_id": rec.ProjectID, "name": rec.Name, "role": rec.Role, "status": rec.Status,
+		"port": rec.Port, "data_dir": rec.DataDir, "snapshot_ref": rec.SnapshotRef, "container_id": rec.ContainerID,
+		"compute": rec.Compute, "connection_string": rec.ConnString, "error_message": rec.ErrorMessage,
+		"source_lsn": rec.SourceLSN, "source_connector": rec.SourceConnector, "source_connector_id": rec.SourceConnectorID,
+		"created_by": rec.CreatedBy, "created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "last_used_at": rec.LastUsedAt,
+	}
+	if strings.HasPrefix(rec.ConnString, "mongodb") {
+		out["mongosh"] = mongo.MongoshOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
+	} else {
+		out["psql"] = postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
+	}
+	writeJSON(w, http.StatusCreated, out)
 }
 
 func (s *Server) handleDiffBranch(w http.ResponseWriter, r *http.Request) {
@@ -353,7 +352,9 @@ func (s *Server) handleDeleteBranch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "project_not_found", err.Error())
 		return
 	}
-	if err := s.Service.Delete(r.Context(), proj.ID, r.PathValue("name"), branchFrom(r)); err != nil {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	if err := s.Service.Delete(ctx, proj.ID, r.PathValue("name"), branchFrom(r)); err != nil {
 		code, status := mapErr(err)
 		writeErr(w, status, code, err.Error())
 		return
@@ -376,7 +377,7 @@ func (s *Server) handleResumeBranch(w http.ResponseWriter, r *http.Request) {
 type branchMutator func(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error)
 
 func branchFrom(r *http.Request) string {
-	return strings.TrimSpace(r.URL.Query().Get("from"))
+	return strings.Trim(strings.TrimSpace(r.URL.Query().Get("from")), ",;")
 }
 
 func (s *Server) mutateBranch(w http.ResponseWriter, r *http.Request, fn branchMutator) {
@@ -413,6 +414,8 @@ func mapErr(err error) (code string, status int) {
 		return "invalid_name", http.StatusBadRequest
 	case strings.HasPrefix(msg, "invalid_state"):
 		return "invalid_state", http.StatusConflict
+	case strings.HasPrefix(msg, "operation_in_progress"):
+		return "operation_in_progress", http.StatusConflict
 	case strings.HasPrefix(msg, "main_not_ready"), strings.HasPrefix(msg, "source_not_ready"):
 		return "source_not_ready", http.StatusServiceUnavailable
 	case strings.HasPrefix(msg, "connector_not_found"), strings.HasPrefix(msg, "no source"), strings.HasPrefix(msg, "multiple connectors"):
@@ -423,6 +426,8 @@ func mapErr(err error) (code string, status int) {
 		return "connector_exists", http.StatusConflict
 	case strings.HasPrefix(msg, "invalid_mode"):
 		return "invalid_mode", http.StatusBadRequest
+	case strings.HasPrefix(msg, "invalid_engine"):
+		return "invalid_engine", http.StatusBadRequest
 	case strings.HasPrefix(msg, "version_mismatch"):
 		return "version_mismatch", http.StatusBadRequest
 	case strings.HasPrefix(msg, "dry_run"):

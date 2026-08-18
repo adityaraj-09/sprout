@@ -86,6 +86,7 @@ internal/
   compute/    local pg_ctl (Docker optional)
   postgres/   initdb, checkpoint, PrepareClone, advertised URLs
   pgproxy/    TLS SNI router on :5432
+  mongoproxy/ TLS SNI passthrough on :27017
   meta/       SQLite → data/control.db
   reconcile/  keep compute vs metadata aligned
   config/     env defaults
@@ -93,13 +94,14 @@ internal/
 
 ## 3. Data plane on the VM
 
-Each connector and each branch is a **separate Postgres** with its own PGDATA and loopback port. The proxy is the only public Postgres listener when `SPROUT_PUBLIC_HOST` is a DNS name.
+Each connector and each branch is a **separate database process** with its own data dir and loopback port. The proxies are the only public database listeners when `SPROUT_PUBLIC_HOST` is a DNS name.
 
 ```mermaid
 flowchart TB
   subgraph public [Public NIC]
     API["HTTP :8080"]
     SNI["TLS SNI proxy :5432"]
+    MNI["Mongo SNI passthrough :27017"]
   end
 
   subgraph loop [Loopback]
@@ -107,6 +109,7 @@ flowchart TB
     RY["replica y  127.0.0.1:55435  trust"]
     BX["branch test from x  127.0.0.2:55440  SCRAM"]
     BY["branch test from y  127.0.0.2:55441  SCRAM"]
+    MX["mongod atlas  127.0.0.1:55461  TLS"]
     MAIN["optional main  :55432"]
   end
 
@@ -122,8 +125,10 @@ flowchart TB
   SNI -->|"SNI test-x.host"| BX
   SNI -->|"SNI test-y.host"| BY
   SNI -->|"SNI x.host"| RX
+  MNI -->|"SNI atlas.host"| MX
   API --> DB
   SNI --> TLS
+  MNI --> TLS
   RX --- D1
   RY --- D2
   BX --- D3
@@ -169,6 +174,8 @@ sequenceDiagram
 
 Physical replicas stay standbys (WAL replay). Logical replicas are writable primaries; branches still CoW that directory.
 
+MongoDB connectors (`mongodb://` / `mongodb+srv://`) skip this Postgres path: `mongodump` into a local standalone `mongod`, then the same CoW snapshot/clone. There is no oplog follow. Clients use `mongodb://sprout:<pass>@<host>:27017/?tls=true` when the SNI passthrough is on (`SPROUT_MONGO_PROXY=false` keeps unique ports).
+
 ## 5. Branch create (CoW)
 
 ```mermaid
@@ -208,7 +215,23 @@ sequenceDiagram
   App->>PG: SCRAM + SQL  via the TLS tunnel
 ```
 
-Disable with `SPROUT_PG_PROXY=false` to advertise unique ports again (no proxy).
+Disable with `SPROUT_PG_PROXY=false` to advertise unique Postgres ports again (no proxy).
+
+MongoDB clients start TLS immediately (`tls=true`). `mongoproxy` peeks SNI from the ClientHello and splices TCP to loopback `mongod`, which terminates TLS.
+
+```mermaid
+sequenceDiagram
+  participant App as mongosh / app
+  participant PX as mongoproxy :27017
+  participant M as mongod 127.0.0.1:port
+
+  App->>PX: TLS ClientHello SNI=feat-atlas.strido.fit
+  PX->>PX: Lookup control.db → port 55461
+  PX->>M: splice ClientHello + TCP
+  App->>M: TLS + SCRAM end-to-end
+```
+
+`SPROUT_MONGO_PROXY=false` advertises unique Mongo ports instead.
 
 ## 7. Storage and compute
 

@@ -24,7 +24,7 @@ On Azure/Linux you typically:
 2. Prefer **ZFS** for real CoW branches, or **`SPROUT_STORAGE=copy`** for a simple full-copy fallback.
 3. Install **Postgres client/server tools** whose major version is **≥ your primary** (Supabase 17 → PG 17 tools).
 4. Run with **`SPROUT_COMPUTE=local`** (Docker often mismatches `initdb` major).
-5. Open **NSG** for API `8080` and Postgres `5432` (SNI proxy when using a domain).
+5. Open **NSG** for API `8080`, Postgres `5432`, and Mongo `27017` (SNI proxies when using a domain).
 
 ---
 
@@ -46,6 +46,7 @@ On Azure/Linux you typically:
 | `22` | SSH (your IP) |
 | `8080` | `sprout-server` API |
 | `5432` | Postgres SNI proxy (domain URLs). Unique branch ports stay on the VM loopback. |
+| `27017` | Mongo SNI passthrough (domain URLs). `mongod` unique ports stay on loopback. |
 
 From your laptop you will connect like:
 
@@ -109,6 +110,40 @@ pg_dump --version
 ```
 
 If `pg_dump` major is lower than the primary, logical connect fails with `version_mismatch`.
+
+---
+
+## 3b. Optional: MongoDB tools (dump-restore connectors)
+
+MongoDB connectors need `mongod`, `mongodump`, `mongorestore`, and `mongosh` on `PATH`. Compute is **local only** (`SPROUT_COMPUTE=local`). There is no Docker Mongo. With a DNS `SPROUT_PUBLIC_HOST`, clients use `:27017` (`tls=true`); hostname SNI selects the instance. `SPROUT_MONGO_PROXY=false` keeps unique ports.
+
+Ubuntu **24.04 (noble)** has MongoDB **8.0** packages. Ubuntu **22.04 (jammy)** has **7.0**. There is no `noble/mongodb-org/7.0` repo.
+
+```bash
+sudo rm -f /etc/apt/sources.list.d/mongodb-org-7.0.list
+
+. /etc/os-release
+MONGO_VER=8.0
+case "$VERSION_CODENAME" in
+  jammy|focal) MONGO_VER=7.0 ;;
+esac
+
+curl -fsSL "https://www.mongodb.org/static/pgp/server-${MONGO_VER}.asc" \
+  | sudo gpg -o "/usr/share/keyrings/mongodb-server-${MONGO_VER}.gpg" --dearmor
+echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-${MONGO_VER}.gpg ] https://repo.mongodb.org/apt/ubuntu ${VERSION_CODENAME}/mongodb-org/${MONGO_VER} multiverse" \
+  | sudo tee "/etc/apt/sources.list.d/mongodb-org-${MONGO_VER}.list"
+
+sudo apt update
+sudo apt install -y mongodb-org mongodb-database-tools mongodb-mongosh
+
+# Sprout starts its own mongod; do not keep the distro service on :27017
+sudo systemctl disable --now mongod 2>/dev/null || true
+
+which mongod mongodump mongorestore mongosh
+mongod --version | head -1
+```
+
+Skip this if you only use Postgres connectors. `sprout doctor` reports these binaries as optional. Restart `sprout-server` after install so it picks up `PATH`.
 
 ---
 
@@ -211,6 +246,7 @@ export SPROUT_DB_USER=sprout                     # login role in connection stri
 # export SPROUT_STORAGE=copy                     # lab fallback if ZFS is not configured
 # export SPROUT_BRANCH_SUBDOMAIN=false           # keep host as-is (default auto-on for DNS names)
 # export SPROUT_PG_PROXY=false                   # advertise unique ports; skip the :5432 SNI proxy
+# export SPROUT_MONGO_PROXY=false                # advertise unique Mongo ports; skip the :27017 SNI passthrough
 # export SPROUT_TRUST_REMOTE=true                # lab-only: remote trust instead of SCRAM
 # export SPROUT_AUTO_RESUME=true                 # restart crashed connectors/branches
 ```
@@ -304,6 +340,15 @@ sprout branch create my-feature --from=sup
 #   psql "postgresql://sprout@YOUR_PUBLIC_IP:55434/postgres"
 ```
 
+MongoDB uses the **same ZFS CoW path** (snapshot the replica dataset, clone a branch dataset, start a new `mongod`). Storage must be `SPROUT_STORAGE=zfs` with `SPROUT_ZFS_DATASET` (or `copy` for a full-file clone):
+
+```bash
+sprout connect --name=mongo 'mongodb+srv://USER:PASS@cluster.mongodb.net/test'
+sprout branch create feat --from=mongo
+# mongodb://sprout:<pass>@feat-<github>-mongo.strido.fit:27017/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin
+# mongosh "<that url>"
+```
+
 Useful flags:
 
 | Flag | Meaning |
@@ -342,7 +387,12 @@ sprout connector delete sup --force      # also destroys branches from this conn
 | `replication slot … already exists` | Wiped subscriber left slot on prod | Fixed in recent builds; or `SELECT pg_drop_replication_slot('sprout_sub_<name>')` on primary |
 | `database "flagforge" does not exist` spam | `pg_isready` without `-d postgres` | Fixed; pull latest |
 | `Address already in use` / not ready | Leftover postmaster on port | `pg_ctl -D … stop` or `fuser -k PORT/tcp`, then reconnect |
-| Branch URL works remotely? | NSG missing 5432, or proxy not bound | Open `5432`; `setcap cap_net_bind_service=+ep ./bin/sprout-server` |
+| `port 55434 already in use` while adding a second connector | Failed mongo/postgres connect left `mongod`/`postgres` listening; allocator used to hand out the busy port | Latest code skips busy ports and stops leftover compute on connect failure. Or `ss -lptn 'sport = :55434'` / `fuser -k 55434/tcp`, then retry |
+| Mongo `branch create` / `branch delete` sit there with no error | Create used to `psql` the mongod port (libpq waits for a Postgres handshake until the 10-minute HTTP timeout) and held the branch lock, so delete waited on the same lock | Pull latest: Mongo CoW skips `psql`, stops mongod via `mongod --shutdown` (not mongosh), and delete returns `operation_in_progress` instead of hanging. Rebuild `sprout-server`, restart it, then retry `branch create`. If a previous create is still running, Ctrl+C the CLI and retry delete after the server restart. |
+| `cannot unmount ... pool or dataset is busy` on `connect --wipe` | Leftover `mongod` still has the replica dataset open (often an old `~/sprout/data` mount after `SPROUT_DATA` moved to `~/sprout-data`) | Pull latest — wipe stops mongod, then `zfs unmount -f` / destroy. Or `sudo zfs umount -f sprout/data/replica-<name>` after `mongosh`/`kill` the leftover mongod. |
+| `filesystem has dependent clones` on wipe | A CoW branch (e.g. `mango`) is a ZFS clone of the replica | Latest code `zfs promote`s the branch then destroys only the replica. Or `sprout branch delete mango --from=mongo` first. Never `zfs destroy -R` (that deletes branches). |
+| `branch_not_found` for a branch you just created | Trailing comma (`--from=mongo,`) or leftover ZFS clone with no control-plane row | Pull latest (trims `--from`, deletes orphan datasets). `sprout branch list`. |
+| Branch URL works remotely? | NSG missing 5432/27017, or proxy not bound | Open `5432` and `27017`; `setcap cap_net_bind_service=+ep ./bin/sprout-server` |
 | Publisher timeouts after sync | Egress / Supabase allowlist | Allow VM egress to primary `5432` |
 
 Clean leftover Postgres processes:
@@ -386,7 +436,7 @@ pkill -f sprout-server || true
 - [ ] Postgres **17** (or matching major) first on `PATH`
 - [ ] `SPROUT_COMPUTE=local`, `SPROUT_STORAGE=zfs`, `SPROUT_ZFS_DATASET=sprout/data`, `SPROUT_ZFS_SUDO=true`, `SPROUT_PUBLIC_HOST=server_domain`, `SPROUT_SAFE=true`
 - [ ] Wildcard DNS `*.strido.fit` → VM if using a domain (optional)
-- [ ] NSG: `8080` + `5432` (domain) or unique branch ports (raw IP)
+- [ ] NSG: `8080` + `5432` + `27017` (domain) or unique branch ports (raw IP)
 - [ ] `make build` + `sprout-server` running
 - [ ] `sprout doctor` / `sprout health` OK from laptop
 - [ ] `connect --mode=logical` then `branch create`

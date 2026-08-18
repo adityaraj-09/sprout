@@ -12,7 +12,9 @@ import (
 
 	"github.com/adityaraj/sprout/internal/auth"
 	"github.com/adityaraj/sprout/internal/compute"
+	"github.com/adityaraj/sprout/internal/engine"
 	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
 	"github.com/adityaraj/sprout/internal/replica"
 	"github.com/adityaraj/sprout/internal/storage"
@@ -61,14 +63,22 @@ func (s *Service) instKey(rec meta.BranchRecord) string {
 }
 
 func (s *Service) lookupBranch(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error) {
+	name, from = trimIdent(name), trimIdent(from)
 	rec, err := s.Store.FindBranch(ctx, projectID, name, from, auth.OwnerFrom(ctx))
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "ambiguous_branch") {
 			return meta.BranchRecord{}, err
 		}
-		return meta.BranchRecord{}, fmt.Errorf("branch_not_found")
+		if from != "" {
+			return meta.BranchRecord{}, fmt.Errorf("branch_not_found: %q from %q — try sprout branch list", name, from)
+		}
+		return meta.BranchRecord{}, fmt.Errorf("branch_not_found: %q — try sprout branch list", name)
 	}
 	return rec, nil
+}
+
+func trimIdent(s string) string {
+	return strings.Trim(strings.TrimSpace(s), ",;")
 }
 
 func (s *Service) lookupConnector(ctx context.Context, projectID, name string) (meta.Connector, error) {
@@ -86,11 +96,27 @@ func (s *Service) connectorLockKey(name, owner string) string {
 	return "connector:" + postgres.HostLabel(name, "", owner)
 }
 
-func (s *Service) lockBranch(name string) func() {
+func (s *Service) lockBranch(ctx context.Context, name string) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	v, _ := s.opsMu.LoadOrStore(name, &sync.Mutex{})
 	m := v.(*sync.Mutex)
-	m.Lock()
-	return m.Unlock
+	if m.TryLock() {
+		return m.Unlock, nil
+	}
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("operation_in_progress: timed out waiting for lock on %q (another create/delete is running)", name)
+		case <-tick.C:
+			if m.TryLock() {
+				return m.Unlock, nil
+			}
+		}
+	}
 }
 
 func (s *Service) mainHandle() compute.Handle {
@@ -166,6 +192,7 @@ func (s *Service) InitMain(ctx context.Context) (meta.Project, error) {
 }
 
 func (s *Service) Create(ctx context.Context, projectID, name, fromConnector string) (meta.BranchRecord, error) {
+	name, fromConnector = trimIdent(name), trimIdent(fromConnector)
 	if !nameRe.MatchString(name) || name == "main" {
 		return meta.BranchRecord{}, fmt.Errorf("invalid_name: use lowercase [a-z0-9-], not 'main'")
 	}
@@ -177,14 +204,22 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 
 	owner := auth.OwnerFrom(ctx)
 
-	unlock := s.lockBranch(postgres.HostLabel(name, srcName, owner))
+	unlock, err := s.lockBranch(ctx, postgres.HostLabel(name, srcName, owner))
+	if err != nil {
+		return meta.BranchRecord{}, err
+	}
 	defer unlock()
 
-	if _, err := s.Store.FindBranch(ctx, projectID, name, srcName, owner); err == nil {
-		return meta.BranchRecord{}, fmt.Errorf("branch_exists: %q already exists from %s", name, srcName)
+	if existing, err := s.Store.FindBranch(ctx, projectID, name, srcName, owner); err == nil {
+		if existing.Status != meta.StatusError && existing.Status != meta.StatusCreating {
+			return meta.BranchRecord{}, fmt.Errorf("branch_exists: %q already exists from %s", name, srcName)
+		}
+		if err := s.clearFailedBranch(ctx, existing); err != nil {
+			return meta.BranchRecord{}, err
+		}
 	}
 
-	running, _ := s.Compute.IsRunning(ctx, compute.Handle{Port: srcPort, DataDir: srcDir})
+	running, _ := s.Compute.IsRunning(ctx, compute.Handle{Port: srcPort, DataDir: srcDir, Engine: s.dirEngine(srcDir)})
 	if !running {
 		return meta.BranchRecord{}, fmt.Errorf("source_not_ready: %s is not running — connect/init first", srcName)
 	}
@@ -192,9 +227,17 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 		return meta.BranchRecord{}, err
 	}
 
-	port, err := s.Store.AllocPort(ctx)
+	port, err := s.allocFreePort(ctx)
 	if err != nil {
 		return meta.BranchRecord{}, err
+	}
+
+	password := postgres.GeneratePassword()
+	if srcID != "" {
+		if c, err := s.Store.GetConnectorByID(ctx, srcID); err == nil && engine.IsMongo(c.Engine) && c.Password != "" {
+			// CoW clones keep the connector's sprout user; mongod has no local-trust ALTER USER.
+			password = c.Password
+		}
 	}
 
 	rec := meta.BranchRecord{
@@ -202,7 +245,7 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 		Status: meta.StatusCreating, Port: port, DataDir: s.BranchDir(name, srcName, owner),
 		Compute:         s.Compute.Name(),
 		SourceConnector: srcName, SourceConnectorID: srcID,
-		Password: postgres.GeneratePassword(), CreatedBy: owner,
+		Password: password, CreatedBy: owner,
 	}
 	if err := s.Store.PutBranch(ctx, rec); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -229,8 +272,21 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 	}
 	fmt.Printf("✓ branch %q ready in %s\n", name, time.Since(total).Round(time.Millisecond))
 	fmt.Println("  ", rec.ConnString)
-	fmt.Println("  ", postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy))
+	_, one := advertiseBranch(rec, s.sourceEngine(ctx, rec))
+	fmt.Println("  ", one)
 	return rec, nil
+}
+
+func (s *Service) clearFailedBranch(ctx context.Context, rec meta.BranchRecord) error {
+	h := compute.Handle{Provider: s.Compute.Name(), Name: s.instKey(rec), Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID}
+	_ = s.Compute.Stop(ctx, h)
+	if rec.DataDir != "" {
+		_ = s.Storage.Destroy(rec.DataDir)
+	}
+	if rec.SnapshotRef != "" {
+		_ = s.Storage.Destroy(rec.SnapshotRef)
+	}
+	return s.Store.DeleteBranch(ctx, rec.ID)
 }
 
 // resolveBranchSource picks the parent dataset for CoW.
@@ -326,6 +382,9 @@ func (s *Service) ensureSourceReadyForBranch(ctx context.Context, projectID, src
 		}
 		return fmt.Errorf("source_not_ready: connector %q is in error (%s)", c.Name, msg)
 	}
+	if engine.IsMongo(c.Engine) {
+		return nil
+	}
 	rm := &replica.Manager{Bins: s.Bins}
 	st, err := rm.LogicalSyncStatus(ctx, "127.0.0.1", srcPort, subName(c))
 	if err != nil {
@@ -365,28 +424,94 @@ func (s *Service) startDetachedClone(ctx context.Context, inst *postgres.Instanc
 	return h, nil
 }
 
+func (s *Service) sourceEngine(ctx context.Context, rec meta.BranchRecord) string {
+	if rec.SourceConnectorID != "" {
+		if c, err := s.Store.GetConnectorByID(ctx, rec.SourceConnectorID); err == nil {
+			if engine.IsMongo(c.Engine) || mongo.HasDataDir(c.DataDir) {
+				return engine.Mongo
+			}
+			return engine.Normalize(c.Engine)
+		}
+	}
+	return s.dirEngine(rec.DataDir)
+}
+
+func (s *Service) dirEngine(dir string) string {
+	if mongo.HasDataDir(dir) {
+		return engine.Mongo
+	}
+	return engine.Postgres
+}
+
+func (s *Service) startMongoClone(ctx context.Context, rec meta.BranchRecord, computeName string) (compute.Handle, error) {
+	inst := &mongo.Instance{
+		Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port,
+		LogFile: s.logPath(computeName), Bins: mongo.FindOnPath(), Password: rec.Password,
+	}
+	if err := inst.PrepareClone(); err != nil {
+		return compute.Handle{}, err
+	}
+	h, err := s.Compute.Start(ctx, compute.Spec{
+		Name: computeName, DataDir: rec.DataDir, Port: rec.Port, LogFile: inst.LogFile, Engine: engine.Mongo,
+	})
+	if err != nil {
+		return compute.Handle{}, fmt.Errorf("compute_failed: %w", err)
+	}
+	_ = inst.EnsureAppRoles()
+	return h, nil
+}
+
 func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, srcDir string, srcPort int, srcName string) error {
+	eng := s.sourceEngine(ctx, *rec)
+	if mongo.HasDataDir(srcDir) {
+		eng = engine.Mongo
+	}
 	rm := &replica.Manager{Bins: s.Bins}
 	srcInst := &postgres.Instance{
 		Name: srcName, DataDir: srcDir, Port: srcPort,
 		LogFile: s.logPath(srcName), Bins: s.Bins,
 	}
 	srcHandle := compute.Handle{
-		Provider: s.Compute.Name(), Name: srcName, Port: srcPort, DataDir: srcDir,
+		Provider: s.Compute.Name(), Name: srcName, Port: srcPort, DataDir: srcDir, Engine: eng,
 	}
+	srcPass := rec.Password
 	if rec.SourceConnectorID != "" {
 		if c, err := s.Store.GetConnectorByID(ctx, rec.SourceConnectorID); err == nil {
 			srcHandle.Name = postgres.ReplicaComputeName(c.Name, c.CreatedBy)
+			srcHandle.Password = c.Password
+			if c.Password != "" {
+				srcPass = c.Password
+			}
+			if engine.IsMongo(c.Engine) {
+				eng = engine.Mongo
+				srcHandle.Engine = engine.Mongo
+			}
 		}
 	} else if srcName != "main" && !strings.HasPrefix(srcName, "replica-") {
 		srcHandle.Name = postgres.ReplicaComputeName(srcName, rec.CreatedBy)
 	}
+	srcSpec := compute.Spec{
+		Name: srcHandle.Name, DataDir: srcDir, Port: srcPort, LogFile: s.logPath(srcHandle.Name), Engine: eng,
+	}
 
-	unlock := s.lockBranch("snap:" + srcName)
+	unlock, err := s.lockBranch(ctx, "snap:"+srcName)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 
-	st, stErr := rm.Status(ctx, "127.0.0.1", srcPort)
-	useReplayPause := stErr == nil && st.IsStandby
+	// Never psql a mongod listen port — libpq waits for a Postgres handshake
+	// until the HTTP timeout, holding the branch lock so delete looks stuck.
+	var st replica.Lag
+	var stErr error
+	if !engine.IsMongo(eng) {
+		st, stErr = rm.Status(ctx, "127.0.0.1", srcPort)
+	}
+	useReplayPause := !engine.IsMongo(eng) && stErr == nil && st.IsStandby
+	srcMongo := &mongo.Instance{
+		Name: srcHandle.Name, DataDir: srcDir, Port: srcPort,
+		LogFile: s.logPath(srcHandle.Name), Bins: mongo.FindOnPath(), Password: srcPass,
+	}
 
 	if useReplayPause {
 		fmt.Println("→ Step 0: replica lag check")
@@ -403,6 +528,16 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 			return fmt.Errorf("storage_failed: checkpoint: %w", err)
 		}
 		rec.SourceLSN = st.ReplayLSN
+	} else if engine.IsMongo(eng) {
+		// WiredTiger + ZFS/APFS clones need a clean dbPath. mongod --shutdown
+		// (pidfile) is a consistent stop without hanging mongosh/TLS eval.
+		fmt.Println("→ Step 1: stop mongod for CoW snapshot")
+		if err := srcMongo.Stop(); err != nil {
+			return fmt.Errorf("storage_failed: stop mongod: %w", err)
+		}
+		if err := srcMongo.WaitPortFree(20 * time.Second); err != nil {
+			return fmt.Errorf("storage_failed: %w", err)
+		}
 	} else {
 		fmt.Println("→ Step 1: CHECKPOINT (+ cold stop if enabled)")
 		if err := srcInst.Checkpoint(); err != nil {
@@ -420,10 +555,8 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	if err != nil {
 		if useReplayPause {
 			_ = rm.ResumeReplay(ctx, "127.0.0.1", srcPort)
-		} else if s.ColdSnap {
-			_, _ = s.Compute.Start(ctx, compute.Spec{
-				Name: srcHandle.Name, DataDir: srcDir, Port: srcPort, LogFile: s.logPath(srcHandle.Name),
-			})
+		} else if engine.IsMongo(eng) || s.ColdSnap {
+			_, _ = s.Compute.Start(ctx, srcSpec)
 		}
 		return fmt.Errorf("storage_failed: %w", err)
 	}
@@ -434,11 +567,9 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 		if err := rm.ResumeReplay(ctx, "127.0.0.1", srcPort); err != nil {
 			return err
 		}
-	} else if s.ColdSnap {
+	} else if engine.IsMongo(eng) || s.ColdSnap {
 		fmt.Println("→ restart source")
-		if _, err := s.Compute.Start(ctx, compute.Spec{
-			Name: srcHandle.Name, DataDir: srcDir, Port: srcPort, LogFile: s.logPath(srcHandle.Name),
-		}); err != nil {
+		if _, err := s.Compute.Start(ctx, srcSpec); err != nil {
 			return err
 		}
 	}
@@ -449,23 +580,33 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 		return fmt.Errorf("storage_failed: %w", err)
 	}
 
-	inst := &postgres.Instance{
-		Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port,
-		LogFile: s.logPath(s.instKey(*rec)), Bins: s.Bins, Password: rec.Password,
-	}
 	fmt.Println("→ Step 4: PrepareClone (promote branch to independent primary)")
 	fmt.Println("→ Step 5: start compute")
-	h, err := s.startDetachedClone(ctx, inst, s.instKey(*rec))
+	var h compute.Handle
+	if engine.IsMongo(eng) {
+		h, err = s.startMongoClone(ctx, *rec, s.instKey(*rec))
+		if err == nil {
+			rec.ConnString, _ = advertiseBranch(*rec, engine.Mongo)
+		}
+	} else {
+		inst := &postgres.Instance{
+			Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port,
+			LogFile: s.logPath(s.instKey(*rec)), Bins: s.Bins, Password: rec.Password,
+		}
+		h, err = s.startDetachedClone(ctx, inst, s.instKey(*rec))
+		if err == nil {
+			rec.ConnString = inst.ConnString("postgres")
+		}
+	}
 	if err != nil {
 		_ = s.Storage.Destroy(rec.DataDir)
 		_ = s.Storage.Destroy(snapRef)
-		if strings.Contains(err.Error(), "pg_ctl start") || strings.HasPrefix(err.Error(), "compute_failed") {
+		if strings.Contains(err.Error(), "pg_ctl start") || strings.Contains(err.Error(), "mongod") || strings.HasPrefix(err.Error(), "compute_failed") {
 			return fmt.Errorf("compute_failed: %w", err)
 		}
 		return err
 	}
 	rec.ContainerID = h.ContainerID
-	rec.ConnString = inst.ConnString("postgres")
 	return nil
 }
 
@@ -474,7 +615,10 @@ func (s *Service) Reset(ctx context.Context, projectID, name, from string) (meta
 	if err != nil {
 		return meta.BranchRecord{}, err
 	}
-	unlock := s.lockBranch(s.instKey(rec))
+	unlock, err := s.lockBranch(ctx, s.instKey(rec))
+	if err != nil {
+		return meta.BranchRecord{}, err
+	}
 	defer unlock()
 	rec, err = s.lookupBranch(ctx, projectID, name, from)
 	if err != nil {
@@ -491,7 +635,7 @@ func (s *Service) Reset(ctx context.Context, projectID, name, from string) (meta
 	_ = s.Store.UpdateBranch(ctx, rec)
 
 	key := s.instKey(rec)
-	h := compute.Handle{Provider: s.Compute.Name(), Name: key, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID}
+	h := compute.Handle{Provider: s.Compute.Name(), Name: key, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID, Engine: s.sourceEngine(ctx, rec), Password: rec.Password}
 	_ = s.Compute.Stop(ctx, h)
 	_ = s.Storage.Destroy(rec.DataDir)
 
@@ -501,8 +645,20 @@ func (s *Service) Reset(ctx context.Context, projectID, name, from string) (meta
 		_ = s.Store.UpdateBranch(ctx, rec)
 		return meta.BranchRecord{}, err
 	}
-	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
-	started, err := s.startDetachedClone(ctx, inst, key)
+	eng := s.sourceEngine(ctx, rec)
+	var started compute.Handle
+	if engine.IsMongo(eng) {
+		started, err = s.startMongoClone(ctx, rec, key)
+		if err == nil {
+			rec.ConnString, _ = advertiseBranch(rec, engine.Mongo)
+		}
+	} else {
+		inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
+		started, err = s.startDetachedClone(ctx, inst, key)
+		if err == nil {
+			rec.ConnString = inst.ConnString("postgres")
+		}
+	}
 	if err != nil {
 		rec.Status = meta.StatusError
 		rec.ErrorMessage = err.Error()
@@ -512,18 +668,26 @@ func (s *Service) Reset(ctx context.Context, projectID, name, from string) (meta
 	rec.ContainerID = started.ContainerID
 	rec.Status = meta.StatusActive
 	rec.ErrorMessage = ""
-	rec.ConnString = inst.ConnString("postgres")
 	rec.LastUsedAt = time.Now().UTC()
 	_ = s.Store.UpdateBranch(ctx, rec)
 	return rec, nil
 }
 
 func (s *Service) Delete(ctx context.Context, projectID, name, from string) error {
+	name, from = trimIdent(name), trimIdent(from)
 	rec, err := s.lookupBranch(ctx, projectID, name, from)
+	if err != nil {
+		if oerr := s.deleteOrphanBranch(ctx, projectID, name, from); oerr == nil {
+			return nil
+		} else if oerr != nil && !strings.Contains(oerr.Error(), "branch_not_found") {
+			return oerr
+		}
+		return err
+	}
+	unlock, err := s.lockBranch(ctx, s.instKey(rec))
 	if err != nil {
 		return err
 	}
-	unlock := s.lockBranch(s.instKey(rec))
 	defer unlock()
 	rec, err = s.lookupBranch(ctx, projectID, name, from)
 	if err != nil {
@@ -536,11 +700,81 @@ func (s *Service) Delete(ctx context.Context, projectID, name, from string) erro
 	_ = s.Store.UpdateBranch(ctx, rec)
 
 	key := s.instKey(rec)
-	h := compute.Handle{Provider: s.Compute.Name(), Name: key, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID}
+	h := compute.Handle{
+		Provider: s.Compute.Name(), Name: key, Port: rec.Port, DataDir: rec.DataDir,
+		ContainerID: rec.ContainerID, Engine: s.sourceEngine(ctx, rec), Password: rec.Password,
+	}
 	_ = s.Compute.Stop(ctx, h)
 	_ = s.Storage.Destroy(rec.DataDir)
 	_ = s.Storage.Destroy(rec.SnapshotRef)
 	return s.Store.DeleteBranch(ctx, rec.ID)
+}
+
+func (s *Service) deleteOrphanBranch(ctx context.Context, projectID, name, from string) error {
+	owner := auth.OwnerFrom(ctx)
+	seen := map[string]struct{}{}
+	var dirs []string
+	add := func(dir string) {
+		if dir == "" {
+			return
+		}
+		if _, ok := seen[dir]; ok {
+			return
+		}
+		seen[dir] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+	if from != "" {
+		add(s.BranchDir(name, from, owner))
+	} else if cons, err := s.visibleConnectors(ctx, projectID); err == nil {
+		for _, c := range cons {
+			add(s.BranchDir(name, c.Name, owner))
+		}
+	}
+	if entries, err := os.ReadDir(filepath.Join(s.Root, "branches")); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			if orphanBranchDirName(e.Name(), name, from) {
+				add(filepath.Join(s.Root, "branches", e.Name()))
+			}
+		}
+	}
+	removed := 0
+	for _, dir := range dirs {
+		if dir == "" || !s.Storage.Exists(dir) {
+			continue
+		}
+		h := compute.Handle{
+			Provider: s.Compute.Name(), Name: filepath.Base(dir), DataDir: dir, Engine: s.dirEngine(dir),
+		}
+		_ = s.Compute.Stop(ctx, h)
+		if err := s.Storage.Destroy(dir); err != nil {
+			return err
+		}
+		fmt.Printf("✓ removed leftover branch dataset %s (not in control plane)\n", dir)
+		removed++
+	}
+	if removed == 0 {
+		return fmt.Errorf("branch_not_found")
+	}
+	return nil
+}
+
+// orphanBranchDirName matches HostLabel layouts: name-from and name-owner-from.
+func orphanBranchDirName(dir, name, from string) bool {
+	dir, name, from = strings.TrimSpace(dir), strings.TrimSpace(name), strings.TrimSpace(from)
+	if dir == "" || name == "" {
+		return false
+	}
+	if from == "" {
+		return dir == name || strings.HasPrefix(dir, name+"-")
+	}
+	if dir == name+"-"+from {
+		return true
+	}
+	return strings.HasPrefix(dir, name+"-") && strings.HasSuffix(dir, "-"+from)
 }
 
 func (s *Service) Suspend(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error) {
@@ -548,7 +782,10 @@ func (s *Service) Suspend(ctx context.Context, projectID, name, from string) (me
 	if err != nil {
 		return meta.BranchRecord{}, err
 	}
-	unlock := s.lockBranch(s.instKey(rec))
+	unlock, err := s.lockBranch(ctx, s.instKey(rec))
+	if err != nil {
+		return meta.BranchRecord{}, err
+	}
 	defer unlock()
 	rec, err = s.lookupBranch(ctx, projectID, name, from)
 	if err != nil {
@@ -558,7 +795,7 @@ func (s *Service) Suspend(ctx context.Context, projectID, name, from string) (me
 		return meta.BranchRecord{}, fmt.Errorf("invalid_state: status=%s", rec.Status)
 	}
 	key := s.instKey(rec)
-	h := compute.Handle{Provider: s.Compute.Name(), Name: key, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID}
+	h := compute.Handle{Provider: s.Compute.Name(), Name: key, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID, Engine: s.sourceEngine(ctx, rec), Password: rec.Password}
 	if err := s.Compute.Stop(ctx, h); err != nil {
 		return meta.BranchRecord{}, err
 	}
@@ -573,7 +810,10 @@ func (s *Service) Resume(ctx context.Context, projectID, name, from string) (met
 	if err != nil {
 		return meta.BranchRecord{}, err
 	}
-	unlock := s.lockBranch(s.instKey(rec))
+	unlock, err := s.lockBranch(ctx, s.instKey(rec))
+	if err != nil {
+		return meta.BranchRecord{}, err
+	}
 	defer unlock()
 	rec, err = s.lookupBranch(ctx, projectID, name, from)
 	if err != nil {
@@ -583,8 +823,9 @@ func (s *Service) Resume(ctx context.Context, projectID, name, from string) (met
 		return meta.BranchRecord{}, fmt.Errorf("invalid_state: status=%s", rec.Status)
 	}
 	key := s.instKey(rec)
+	eng := s.sourceEngine(ctx, rec)
 	started, err := s.Compute.Start(ctx, compute.Spec{
-		Name: key, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key),
+		Name: key, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Engine: eng,
 	})
 	if err != nil {
 		return meta.BranchRecord{}, err
@@ -593,9 +834,14 @@ func (s *Service) Resume(ctx context.Context, projectID, name, from string) (met
 	rec.Status = meta.StatusActive
 	rec.ErrorMessage = ""
 	rec.LastUsedAt = time.Now().UTC()
-	rec.ConnString = postgres.FormatConnString(rec.Port, "postgres", rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
-	inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
-	_ = inst.EnsureAppRoles()
+	rec.ConnString, _ = advertiseBranch(rec, eng)
+	if engine.IsMongo(eng) {
+		inst := &mongo.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: mongo.FindOnPath(), Password: rec.Password}
+		_ = inst.EnsureAppRoles()
+	} else {
+		inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
+		_ = inst.EnsureAppRoles()
+	}
 	_ = s.Store.UpdateBranch(ctx, rec)
 	return rec, nil
 }

@@ -1,8 +1,8 @@
 ---
 name: sprout-cli
 description: >
-  Use the Sprout CLI to connect production Postgres, create copy-on-write database
-  branches, and get psql URLs. Trigger when the user mentions Sprout, sprout CLI,
+  Use the Sprout CLI to connect production Postgres or MongoDB, create copy-on-write database
+  branches, and get psql/mongosh URLs. Trigger when the user mentions Sprout, sprout CLI,
   sproutdb-cli, database branches, connectors, or wants an isolated Postgres for
   testing against a hosted sprout-server.
 ---
@@ -81,6 +81,16 @@ Physical (you control WAL / replication):
 sprout connect --name=lab --mode=physical 'postgresql://user@127.0.0.1:55431/postgres'
 ```
 
+MongoDB (dump snapshot into local `mongod`; no oplog, no `:27017` proxy):
+
+```bash
+sprout connect --name=atlas 'mongodb+srv://USER:PASS@cluster.mongodb.net/app'
+sprout branch create feat --from=atlas
+# mongosh "mongodb://sprout:<pass>@feat-<owner>-atlas.host:27017/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin"
+```
+
+`--engine` is inferred from the URL. MongoDB only supports `--mode=logical`. `--tables=orders,items` is a collection allowlist and requires a database in the URL. With a DNS host, connection strings use port **27017** (`tls=true`); SNI selects the instance.
+
 Local demo only (no remote):
 
 ```bash
@@ -88,7 +98,7 @@ sprout init
 sprout branch create alice --from=main
 ```
 
-`connect` defaults: `--name=primary`, `--mode=physical`, `--wipe` (destroys the local replica and rebootstrap). Use `--no-wipe` to resume. `--tables=a,b` allowlists logical tables.
+`connect` defaults: `--name=primary`, `--wipe` (destroys the local replica and rebootstrap). `--mode` defaults to `physical` for Postgres and `logical` for MongoDB. Use `--no-wipe` to resume. `--tables=a,b` allowlists logical Postgres tables or Mongo collections.
 
 ## Connection URLs
 
@@ -97,8 +107,9 @@ sprout branch create alice --from=main
   - connector: `postgresql://sprout:<pass>@supabase-alice.strido.fit:5432/postgres`
   - branch: `postgresql://sprout:<pass>@testdb-alice-supabase.strido.fit:5432/postgres`
   - unowned/machine: `postgresql://sprout:<pass>@<branch>-<connector>.strido.fit:5432/postgres`
-- Port **5432** is the SNI proxy. Hostname selects the instance. Clients need TLS (`sslmode=require` or libpq `prefer`). Self-signed cert is normal; `verify-full` may fail.
+- Port **5432** is the Postgres SNI proxy. Hostname selects the instance. Clients need TLS (`sslmode=require` or libpq `prefer`). Self-signed cert is normal; `verify-full` may fail.
 - Localhost / raw IP: unique ports, no subdomain (`localhost:55440`).
+- MongoDB: same hostname labels. With a DNS host, URLs are `mongodb://sprout:<pass>@<host>:27017/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin`. Port **27017** is the SNI passthrough (`SPROUT_MONGO_PROXY=false` keeps unique ports).
 - A branch is an **independent primary**. It does not keep replicating from prod. The **connector replica** does. `sprout branch create` detaches any cloned logical subscription so the branch cannot steal the connector's WAL slot.
 - Do **not** `sprout connect` using a branch URL as the upstream unless the user explicitly wants a replica-of-a-branch. Day-to-day testing = `psql` / app DSN to the branch URL.
 
@@ -111,7 +122,7 @@ sprout login
 sprout logout
 sprout whoami
 sprout init
-sprout connect [--name=<id>] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <postgresql-url>
+sprout connect [--name=<id>] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
 sprout status [connector-name]
 sprout connector list
 sprout connector delete <name> [--force]
@@ -171,7 +182,7 @@ Base: `SPROUT_SERVER`. Header: `Authorization: Bearer <token>`. Project path is 
 - `GET /v1/doctor`
 - `POST /v1/init`
 - `GET /v1/connectors`
-- `POST /v1/projects/default/connect` body `{"url","name","mode","wipe","dry_run","tables"}`
+- `POST /v1/projects/default/connect` body `{"url","name","engine","mode","wipe","dry_run","tables"}`
 - `GET /v1/projects/default/replication` and `/v1/projects/default/connectors/{name}/replication`
 - `DELETE /v1/projects/default/connectors/{name}?force=true`
 - `POST /v1/projects/default/connectors/{name}/suspend|resume`

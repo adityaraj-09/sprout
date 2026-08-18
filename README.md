@@ -1,8 +1,8 @@
 # sprout
 
-Open-source **Postgres CoW branching**: near-instant database branches plus production sync via named connectors.
+Open-source **Postgres CoW branching** (plus MongoDB dump-restore connectors): near-instant database branches plus production sync via named connectors.
 
-Spin up independent Postgres instances that start as near-instant clones of a parent dataset (local demo or a replica of production), then diverge freely.
+Spin up independent database instances that start as near-instant clones of a parent dataset (local demo or a replica of production), then diverge freely.
 
 **VM / Azure from scratch:** see [`SETUP.md`](SETUP.md) (ZFS disk, Postgres 17 tools, firewall, connect + branch).  
 **System diagrams:** [`ARCHITECTURE.md`](ARCHITECTURE.md).  
@@ -14,12 +14,13 @@ Spin up independent Postgres instances that start as near-instant clones of a pa
 
 | Capability | How |
 |------------|-----|
-| **CoW branches** | Snapshot + clone PGDATA (APFS `cp -c` on macOS; ZFS on Linux) |
+| **CoW branches** | Snapshot + clone Postgres PGDATA or Mongo `dbPath` (APFS `cp -c` on macOS; **ZFS** on Linux) |
 | **Control plane** | HTTP API + thin CLI; metadata in `data/control.db` |
 | **Lifecycle** | create / list / get / reset / delete / suspend / resume |
 | **Connectors** | Multiple named remotes; each gets its own local replica + port |
 | **Physical sync** | `pg_basebackup` → hot standby → branch with replay pause |
 | **Logical sync** | Publication + schema dump + subscription (e.g. Supabase) |
+| **MongoDB (v1)** | `mongodump` snapshot into local `mongod`; CoW branches; `:27017` SNI passthrough; no oplog |
 
 ```text
 upstream(s)  ──connect --name──►  data/replicas/<name>/
@@ -244,7 +245,7 @@ data/
 ```
 
 Default port allocator starts at **55433** (`next_port` in `control.db`).  
-Connectors and branches each get an allocated port.
+Connectors and branches each get an allocated port; in-use listeners are skipped so a leftover `mongod` cannot block the next Postgres connector.
 
 `data/` is gitignored — never commit it (URLs may contain passwords).
 
@@ -255,7 +256,7 @@ Connectors and branches each get an allocated port.
 | Command | Description |
 |---------|-------------|
 | `sprout init` | Ensure default project + local `main` + seed demo |
-| `sprout connect [--name=id] [--mode=physical\|logical] <url>` | Bootstrap named replica |
+| `sprout connect [--name=id] [--engine=postgres\|mongodb] [--mode=physical\|logical] <url>` | Bootstrap named replica |
 | `sprout status [name]` | Replication lag / logical sync for a connector |
 | `sprout connector list` | List connectors (password redacted) |
 | `sprout connector delete <name> [--force]` | Drop local replica + remote pub; `--force` also deletes child branches |
@@ -276,7 +277,8 @@ Connectors and branches each get an allocated port.
 Defaults:
 
 - `--name=primary` if omitted on connect  
-- `--mode=physical` if omitted  
+- `--engine` inferred from URL (`mongodb://` / `mongodb+srv://` → mongodb, else postgres)  
+- `--mode=physical` if omitted for Postgres; MongoDB is always `logical` (dump snapshot) 
 
 ---
 
@@ -293,7 +295,7 @@ Auth: `Authorization: Bearer <token>` (GitHub user token from `sprout login`, or
 | `POST` | `/v1/init` | create/start local main |
 | `GET` | `/v1/projects` | list projects |
 | `GET` | `/v1/connectors` | all connectors (URL passwords redacted) |
-| `POST` | `/v1/projects/{project}/connect` | `{"url","mode","name"}` |
+| `POST` | `/v1/projects/{project}/connect` | `{"url","engine","mode","name"}` |
 | `DELETE` | `/v1/projects/{project}/connectors/{name}` | delete replica; `?force=true` also deletes child branches |
 | `GET` | `/v1/projects/{project}/replication?name=` | lag (name optional if sole connector) |
 | `GET` | `/v1/projects/{project}/connectors/{name}/replication` | lag for one connector |
@@ -315,10 +317,13 @@ Use `project` = `default` (resolved by name) or a project UUID.
 
 | Mode | Command | Behavior |
 |------|---------|----------|
-| **physical** | `connect --name=x URL` | `pg_basebackup -R` into `data/replicas/x/`, streaming hot standby |
-| **logical** | `connect --name=x --mode=logical URL` | Create scoped publication → init local PGDATA → `pg_dump --schema-only` → `CREATE SUBSCRIPTION` with `copy_data` |
+| **physical** | `connect --name=x URL` | Postgres: `pg_basebackup -R` into `data/replicas/x/`, streaming hot standby |
+| **logical** | `connect --name=x --mode=logical URL` | Postgres: publication → init local PGDATA → `pg_dump --schema-only` → `CREATE SUBSCRIPTION` |
+| **mongodb** | `connect --name=x 'mongodb://…'` | `mongodump` → local standalone `mongod`. No oplog follow, no Docker Mongo. With a DNS host, URLs use `:27017` (SNI passthrough) |
 
 Logical is for hosts that block physical replication (common on managed Postgres / Supabase). Publication/subscription names are scoped per connector (`sprout_pub_<name>`, `sprout_sub_<name>`). Logical publications are limited to `public` schema tables where applicable.
+
+MongoDB connect is a **point-in-time snapshot**, not continuous replication. `--tables=` is a collection allowlist and requires a database in the URL. Branches CoW the local `dbPath` and start as independent standalones. With a DNS `SPROUT_PUBLIC_HOST`, connection strings use `:27017` and `tls=true` (SNI selects the instance). Localhost / IP still use the unique allocated port. `SPROUT_MONGO_PROXY=false` keeps unique ports.
 
 **Physical** branch create can pause WAL replay for a consistent snapshot.  
 **Logical** local datasets are writable primaries; branches still CoW that directory.
@@ -343,6 +348,8 @@ Logical is for hosts that block physical replication (common on managed Postgres
 | `SPROUT_BRANCH_SUBDOMAIN` | auto | `true`/`false`. Auto-on when public host is a DNS name: URLs become `<name>-<owner>-<connector>.<host>:5432` |
 | `SPROUT_PG_PROXY` | auto | SNI proxy on `:5432` when subdomains are on. `false` advertises unique ports instead |
 | `SPROUT_PG_PROXY_PORT` | `5432` | Public Postgres port for the SNI proxy |
+| `SPROUT_MONGO_PROXY` | auto | SNI passthrough on `:27017` when subdomains are on. `false` advertises unique Mongo ports |
+| `SPROUT_MONGO_PROXY_PORT` | `27017` | Public Mongo port for the SNI passthrough |
 | `SPROUT_TLS_CERT` / `SPROUT_TLS_KEY` | auto | TLS cert for the proxy; otherwise a self-signed wildcard is written to `$SPROUT_DATA/tls` |
 | `SPROUT_PG_LISTEN` | auto | Postgres `listen_addresses` (`*` when public host is set) |
 | `SPROUT_SAFE` | unset | Set `true` to keep fsync on (recommended when exposing) |
@@ -381,16 +388,16 @@ export SPROUT_SAFE=true                    # keep durable writes when public
 ./bin/sprout-server
 ```
 
-When `SPROUT_PUBLIC_HOST` is a DNS name, Sprout runs a TLS SNI proxy on **5432**. The hostname selects the process (`test-x` vs `test-y`); you do not put the unique backend port in the URL:
+When `SPROUT_PUBLIC_HOST` is a DNS name, Sprout runs a TLS SNI proxy on **5432** (Postgres) and a TLS SNI passthrough on **27017** (Mongo). The hostname selects the process (`test-x` vs `test-y`); you do not put the unique backend port in the URL:
 
 ```text
 postgresql://sprout:<pass>@testdb-lab.strido.fit:5432/postgres
-postgresql://sprout:<pass>@testdb-alice-supabase.strido.fit:5432/postgres
+mongodb://sprout:<pass>@feat-alice-atlas.strido.fit:27017/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin
 ```
 
-Point a wildcard record `*.strido.fit` (and `strido.fit`) at the VM. Open firewall **5432** (and 8080 for the API). Localhost and raw IPs stay as-is (`localhost:55440`) with no proxy. `/postgres` is the database inside the instance, not the branch name.
+Point a wildcard record `*.strido.fit` (and `strido.fit`) at the VM. Open firewall **5432**, **27017**, and **8080** (API). Localhost and raw IPs stay as-is (`localhost:55440`) with no proxy. `/postgres` is the database inside the instance, not the branch name.
 
-Clients use TLS so SNI is visible (`sslmode=require` or libpq's default `prefer`). A self-signed `*.strido.fit` cert is created under `$SPROUT_DATA/tls` unless you set `SPROUT_TLS_CERT` / `SPROUT_TLS_KEY`. Binding `:5432` needs root or `setcap cap_net_bind_service=+ep ./bin/sprout-server`.
+Clients use TLS so SNI is visible (`sslmode=require` or libpq's default `prefer`; Mongo `tls=true`). A self-signed `*.strido.fit` cert is created under `$SPROUT_DATA/tls` unless you set `SPROUT_TLS_CERT` / `SPROUT_TLS_KEY`. Binding `:5432` / `:27017` needs root or `setcap cap_net_bind_service=+ep ./bin/sprout-server`.
 
 Then:
 
@@ -402,7 +409,7 @@ sprout branch create testdb --from=lab
 psql "postgresql://sprout:<pass>@testdb-lab.strido.fit:5432/postgres"
 ```
 
-Remote auth through the proxy is **SCRAM-SHA-256** (loopback `127.0.0.1` stays trust so the control plane can still connect). Connection strings include the generated password. `SPROUT_PG_PROXY=false` restores unique ports in URLs and skips the proxy. `SPROUT_TRUST_REMOTE=true` restores the old open-trust lab behavior when unique ports are public.
+Remote auth through the proxy is **SCRAM-SHA-256** (loopback `127.0.0.1` stays trust so the control plane can still connect). Connection strings include the generated password. `SPROUT_PG_PROXY=false` restores unique Postgres ports and skips the Postgres proxy. `SPROUT_MONGO_PROXY=false` does the same for Mongo. `SPROUT_TRUST_REMOTE=true` restores the old open-trust lab behavior when unique ports are public.
 
 ---
 
@@ -424,7 +431,8 @@ make reset-data         # clean + wipe main, replicas, branches, snapshots, cont
 
 | Port | Role |
 |------|------|
-| `5432` | Public SNI proxy when `SPROUT_PUBLIC_HOST` is a DNS name |
+| `5432` | Public Postgres SNI proxy when `SPROUT_PUBLIC_HOST` is a DNS name |
+| `27017` | Public Mongo SNI passthrough (same hostnames; `mongod` stays on loopback) |
 | `55431` | Lab primary (`scripts/lab-primary.sh`) |
 | `55432` | Local demo `main` (`sprout init`) |
 | `55433+` | Internal connector/branch ports (loopback when the proxy is on) |

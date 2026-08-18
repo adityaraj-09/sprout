@@ -1,10 +1,12 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -89,6 +91,27 @@ func flattenRel(rel string) string {
 	return strings.ReplaceAll(rel, "/", "-")
 }
 
+func sanitizeZFSSnapName(name string) string {
+	name = strings.TrimSpace(name)
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.', r == ':':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	s := strings.Trim(b.String(), "-.")
+	if s == "" {
+		return "snap"
+	}
+	if len(s) > 200 {
+		return s[:200]
+	}
+	return s
+}
+
 func (z *ZFS) datasetForDir(path string) string {
 	abs := filepath.Clean(path)
 	if a, err := filepath.Abs(abs); err == nil {
@@ -117,11 +140,7 @@ func (z *ZFS) ensureMountedDataset(dataset, mount string) error {
 		return fmt.Errorf("mountpoint %s already used by dataset %s (want %s)", mount, name, dataset)
 	}
 	if zfsExists(dataset) {
-		if err := zfsRun("set", "mountpoint="+mount, dataset); err != nil {
-			return err
-		}
-		_ = zfsRun("mount", dataset)
-		return z.ensureMountOwner(mount)
+		return z.retargetDataset(dataset, mount)
 	}
 
 	if st, err := os.Stat(mount); err == nil && st.IsDir() {
@@ -148,6 +167,25 @@ func (z *ZFS) ensureMountedDataset(dataset, mount string) error {
 			return fmt.Errorf("%w; retry mount: %v", err, mountErr)
 		}
 	}
+	return z.ensureMountOwner(mount)
+}
+
+func (z *ZFS) retargetDataset(dataset, mount string) error {
+	current := strings.TrimSpace(zfsGet(dataset, "mountpoint"))
+	if current != "" && current != "-" && filepath.Clean(current) == filepath.Clean(mount) {
+		_ = zfsRun("mount", dataset)
+		return z.ensureMountOwner(mount)
+	}
+	// Leftover dataset from a previous SPROUT_DATA path. Drop processes
+	// holding the old mount so `zfs set mountpoint=` can unmount it.
+	releaseDataset(dataset, current)
+	if err := zfsRun("set", "mountpoint="+mount, dataset); err != nil {
+		if isZFSBusy(err) {
+			return fmt.Errorf("dataset %s is busy at %s — stop leftover mongod/postgres using that directory, then retry: %w", dataset, current, err)
+		}
+		return err
+	}
+	_ = zfsRun("mount", dataset)
 	return z.ensureMountOwner(mount)
 }
 
@@ -199,7 +237,7 @@ func (z *ZFS) Snapshot(sourceDir, snapshotName string) (string, error) {
 		}
 		ds = z.datasetForDir(sourceDir)
 	}
-	snap := ds + "@" + snapshotName
+	snap := ds + "@" + sanitizeZFSSnapName(snapshotName)
 	if zfsExists(snap) {
 		return "", fmt.Errorf("snapshot already exists: %s", snap)
 	}
@@ -268,19 +306,184 @@ func (z *ZFS) Destroy(ref string) error {
 		abs = a
 	}
 	if name, mp := lookupZFSMount(abs); name != "" && filepath.Clean(mp) == abs {
-		if err := zfsRun("destroy", "-r", name); err != nil {
-			return err
-		}
-		return nil
+		return destroyDataset(name)
 	}
 	if strings.Contains(ref, "/") && !strings.HasPrefix(ref, "/") && zfsExists(ref) {
-		return zfsRun("destroy", "-r", ref)
+		return destroyDataset(ref)
 	}
 	ds := z.childDataset(abs)
 	if zfsExists(ds) {
-		return zfsRun("destroy", "-r", ds)
+		return destroyDataset(ds)
 	}
 	return os.RemoveAll(ref)
+}
+
+func destroyDataset(name string) error {
+	if !zfsExists(name) {
+		return nil
+	}
+	current := strings.TrimSpace(zfsGet(name, "mountpoint"))
+	releaseDataset(name, current)
+
+	var last error
+	for attempt := 0; attempt < 8; attempt++ {
+		err := zfsRun("destroy", "-r", name)
+		if err == nil {
+			return nil
+		}
+		last = err
+		clones := parseDependentClones(err.Error())
+		if len(clones) == 0 {
+			clones = listClonesOf(name)
+		}
+		if len(clones) == 0 {
+			break
+		}
+		// Keep branch datasets: promote clones so they no longer depend on
+		// this replica origin, then retry destroy (never zfs destroy -R).
+		for _, clone := range clones {
+			if clone == "" || clone == name {
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "  [storage/zfs] promote %s (keep branch; wipe replica)\n", clone)
+			if err := zfsRun("promote", clone); err != nil {
+				return fmt.Errorf("filesystem has dependent clones (%s). Delete that branch first, or: %w", strings.Join(clones, ", "), err)
+			}
+		}
+	}
+	if last == nil {
+		return nil
+	}
+	if isZFSBusy(last) {
+		releaseDataset(name, current)
+		if err2 := zfsRun("destroy", "-r", "-f", name); err2 != nil {
+			return fmt.Errorf("%w; forced destroy: %v (stop mongod/postgres using this dataset and retry)", last, err2)
+		}
+		return nil
+	}
+	if clones := parseDependentClones(last.Error()); len(clones) > 0 {
+		return fmt.Errorf("filesystem has dependent clones (%s) — delete those branches first (sprout branch delete <name> --from=<connector>)", strings.Join(clones, ", "))
+	}
+	return last
+}
+
+func parseDependentClones(msg string) []string {
+	lower := strings.ToLower(msg)
+	if !strings.Contains(lower, "dependent clone") {
+		return nil
+	}
+	rest := msg
+	if i := strings.Index(lower, "following datasets:"); i >= 0 {
+		rest = msg[i+len("following datasets:"):]
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	for _, line := range strings.Split(rest, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.Trim(line, "()")
+		if line == "" || strings.ContainsAny(line, " \t") {
+			continue
+		}
+		if !strings.Contains(line, "/") || strings.Contains(line, "@") {
+			continue
+		}
+		if _, ok := seen[line]; ok {
+			continue
+		}
+		seen[line] = struct{}{}
+		out = append(out, line)
+	}
+	return out
+}
+
+func listClonesOf(dataset string) []string {
+	parent := dataset
+	if i := strings.LastIndex(dataset, "/"); i > 0 {
+		parent = dataset[:i]
+	}
+	out, err := zfsOutput("get", "-Hr", "-o", "name,value", "origin", parent)
+	if err != nil {
+		return nil
+	}
+	return parseZFSOrigins(out, dataset)
+}
+
+func parseZFSOrigins(out, originDS string) []string {
+	prefix := originDS + "@"
+	seen := map[string]struct{}{}
+	var clones []string
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 2 {
+			continue
+		}
+		name, origin := strings.TrimSpace(fields[0]), strings.TrimSpace(fields[1])
+		if origin == "" || origin == "-" || !strings.HasPrefix(origin, prefix) {
+			continue
+		}
+		if name == "" || name == originDS {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		clones = append(clones, name)
+	}
+	return clones
+}
+
+func releaseDataset(dataset, mount string) {
+	if mount != "" && mount != "-" && strings.HasPrefix(mount, "/") {
+		killPidFile(filepath.Join(mount, "mongod.pid"))
+		killPidFile(filepath.Join(mount, "postmaster.pid"))
+		fctx, fcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = exec.CommandContext(fctx, "fuser", "-k", mount).Run()
+		fcancel()
+	}
+	_ = zfsRun("unmount", "-f", dataset)
+}
+
+func killPidFile(path string) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 1 {
+		return
+	}
+	_ = exec.Command("kill", strconv.Itoa(pid)).Run()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err != nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = exec.Command("kill", "-9", strconv.Itoa(pid)).Run()
+}
+
+func isZFSBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "busy") || strings.Contains(s, "cannot unmount")
+}
+
+func zfsGet(dataset, prop string) string {
+	zfsPath, err := exec.LookPath("zfs")
+	if err != nil {
+		return ""
+	}
+	name, args := zfsExecSpec(zfsPath, []string{"get", "-H", "-o", "value", prop, dataset}, strings.EqualFold(strings.TrimSpace(os.Getenv("SPROUT_ZFS_SUDO")), "true"))
+	cmd := exec.Command(name, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func (z *ZFS) Exists(ref string) bool {
@@ -303,12 +506,26 @@ func zfsExists(ref string) bool {
 }
 
 func zfsRun(args ...string) error {
+	_, err := zfsOutput(args...)
+	return err
+}
+
+func zfsOutput(args ...string) (string, error) {
 	zfsPath, err := exec.LookPath("zfs")
 	if err != nil {
-		return fmt.Errorf("zfs binary not found")
+		return "", fmt.Errorf("zfs binary not found")
 	}
 	name, cmdArgs := zfsExecSpec(zfsPath, args, strings.EqualFold(strings.TrimSpace(os.Getenv("SPROUT_ZFS_SUDO")), "true"))
-	cmd := exec.Command(name, cmdArgs...)
+	timeout := 2 * time.Minute
+	if len(args) > 0 {
+		switch args[0] {
+		case "list", "get":
+			timeout = 15 * time.Second
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, cmdArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		hint := ""
@@ -316,9 +533,12 @@ func zfsRun(args ...string) error {
 			strings.Contains(strings.ToLower(string(out)), "only be mounted by root") {
 			hint = "; on Linux set SPROUT_ZFS_SUDO=true and grant passwordless sudo for the zfs binary"
 		}
-		return fmt.Errorf("zfs %s: %w (%s)%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)), hint)
+		if ctx.Err() != nil {
+			return string(out), fmt.Errorf("zfs %s: timed out after %s (%s)", strings.Join(args, " "), timeout, strings.TrimSpace(string(out)))
+		}
+		return string(out), fmt.Errorf("zfs %s: %w (%s)%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)), hint)
 	}
-	return nil
+	return string(out), nil
 }
 
 func (z *ZFS) ensureMountOwner(path string) error {
@@ -357,7 +577,9 @@ func zfsExecSpec(zfsPath string, args []string, useSudo bool) (string, []string)
 }
 
 func lookupZFSMount(path string) (name, mount string) {
-	cmd := exec.Command("zfs", "list", "-H", "-o", "name,mountpoint")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "zfs", "list", "-H", "-o", "name,mountpoint")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", ""

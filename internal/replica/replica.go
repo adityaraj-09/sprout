@@ -197,11 +197,14 @@ SELECT pg_is_in_recovery(),
        pg_is_wal_replay_paused(),
        COALESCE(pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn()), 0);
 `
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, m.Bins.Psql,
 		"-h", host, "-p", strconv.Itoa(port), "-d", "postgres",
 		"-v", "ON_ERROR_STOP=1", "-t", "-A", "-F", ",",
 		"-c", sql,
 	)
+	cmd.Env = psqlLocalEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return Lag{}, fmt.Errorf("replica status: %w (%s)", err, strings.TrimSpace(string(out)))
@@ -262,10 +265,13 @@ func (m *Manager) WaitCaughtUp(ctx context.Context, host string, port int, maxLa
 }
 
 func (m *Manager) execSQL(ctx context.Context, host string, port int, sql string) error {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, m.Bins.Psql,
 		"-h", host, "-p", strconv.Itoa(port), "-d", "postgres",
 		"-v", "ON_ERROR_STOP=1", "-c", sql,
 	)
+	cmd.Env = psqlLocalEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %w (%s)", sql, err, strings.TrimSpace(string(out)))
@@ -291,6 +297,10 @@ func EnsurePrimaryReachable(host string, port int, timeout time.Duration) error 
 		hint = " — tip: host may be IPv6-only or DNS has no A record; enable IPv4 on the upstream, use a pooler with IPv4, or fix VM IPv6 routing"
 	}
 	return fmt.Errorf("primary %s not reachable (%s)%s", addr, strings.Join(errs, "; "), hint)
+}
+
+func psqlLocalEnv() []string {
+	return append(os.Environ(), "PGCONNECT_TIMEOUT=5", "PGSSLMODE=disable")
 }
 
 func lookupIPv4(host string) string {

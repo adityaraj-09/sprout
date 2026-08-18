@@ -61,7 +61,8 @@ type Connector struct {
 	ProjectID    string    `json:"project_id"`
 	Name         string    `json:"name"` // unique per project+owner (e.g. supabase)
 	PrimaryURL   string    `json:"primary_url"`
-	Mode         string    `json:"mode"` // physical | logical
+	Engine       string    `json:"engine,omitempty"` // postgres (default) | mongodb
+	Mode         string    `json:"mode"`             // physical | logical
 	Status       string    `json:"status"`
 	DataDir      string    `json:"data_dir"`
 	Port         int       `json:"port"`
