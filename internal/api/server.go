@@ -352,7 +352,9 @@ func (s *Server) handleDeleteBranch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "project_not_found", err.Error())
 		return
 	}
-	if err := s.Service.Delete(r.Context(), proj.ID, r.PathValue("name"), branchFrom(r)); err != nil {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	if err := s.Service.Delete(ctx, proj.ID, r.PathValue("name"), branchFrom(r)); err != nil {
 		code, status := mapErr(err)
 		writeErr(w, status, code, err.Error())
 		return
@@ -412,6 +414,8 @@ func mapErr(err error) (code string, status int) {
 		return "invalid_name", http.StatusBadRequest
 	case strings.HasPrefix(msg, "invalid_state"):
 		return "invalid_state", http.StatusConflict
+	case strings.HasPrefix(msg, "operation_in_progress"):
+		return "operation_in_progress", http.StatusConflict
 	case strings.HasPrefix(msg, "main_not_ready"), strings.HasPrefix(msg, "source_not_ready"):
 		return "source_not_ready", http.StatusServiceUnavailable
 	case strings.HasPrefix(msg, "connector_not_found"), strings.HasPrefix(msg, "no source"), strings.HasPrefix(msg, "multiple connectors"):

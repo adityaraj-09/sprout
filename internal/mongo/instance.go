@@ -184,33 +184,62 @@ func (i *Instance) Start() error {
 }
 
 func (i *Instance) Stop() error {
-	if i.Password != "" {
-		i.auth = true
-	}
-	if !i.IsRunning() {
+	if !i.pidAlive() && !i.IsRunning() {
 		return nil
 	}
-	_ = i.eval("db.getSiblingDB('admin').shutdownServer()")
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		if !i.IsRunning() {
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
+	// Prefer mongod --shutdown (pidfile) over mongosh. mongosh against a TLS
+	// listener can sit until its own timeout and freeze branch create/delete.
+	if i.Bins.Mongod == "" {
+		i.Bins = FindOnPath()
 	}
-	if b, err := os.ReadFile(i.pidFile()); err == nil {
-		if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 1 {
-			_ = exec.Command("kill", strconv.Itoa(pid)).Run()
-		}
+	if i.Bins.Mongod != "" && i.DataDir != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		cmd := exec.CommandContext(ctx, i.Bins.Mongod, "--shutdown", "--dbpath", i.DataDir)
+		_ = cmd.Run()
+		cancel()
 	}
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if !i.IsRunning() {
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
+	if err := i.waitDead(12 * time.Second); err == nil {
+		return nil
+	}
+	i.signalPID(false)
+	if err := i.waitDead(8 * time.Second); err == nil {
+		return nil
+	}
+	i.signalPID(true)
+	if err := i.waitDead(3 * time.Second); err == nil {
+		return nil
 	}
 	return fmt.Errorf("mongod on port %d still running after stop", i.Port)
+}
+
+func (i *Instance) signalPID(kill bool) {
+	b, err := os.ReadFile(i.pidFile())
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 1 {
+		return
+	}
+	args := []string{strconv.Itoa(pid)}
+	if kill {
+		args = []string{"-9", strconv.Itoa(pid)}
+	}
+	_ = exec.Command("kill", args...).Run()
+}
+
+func (i *Instance) waitDead(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !i.pidAlive() && (i.Port <= 0 || !postgres.PortListening(i.Port)) {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !i.pidAlive() && (i.Port <= 0 || !postgres.PortListening(i.Port)) {
+		return nil
+	}
+	return fmt.Errorf("still running")
 }
 
 func (i *Instance) pidAlive() bool {
@@ -258,10 +287,11 @@ func (i *Instance) WaitReady(timeout time.Duration) error {
 
 func (i *Instance) ping() error {
 	// hello is allowed pre-auth; ping may not be once authorization is on.
-	if err := i.eval("db.runCommand({hello:1})"); err == nil {
+	if _, err := i.evalOutputTimeout("db.runCommand({hello:1})", 5*time.Second); err == nil {
 		return nil
 	}
-	return i.eval("db.runCommand({ping:1})")
+	_, err := i.evalOutputTimeout("db.runCommand({ping:1})", 5*time.Second)
+	return err
 }
 
 func (i *Instance) eval(js string) error {
@@ -319,6 +349,10 @@ func (i *Instance) CollectionCounts() (map[string]int64, error) {
 }
 
 func (i *Instance) evalOutput(js string) (string, error) {
+	return i.evalOutputTimeout(js, 20*time.Second)
+}
+
+func (i *Instance) evalOutputTimeout(js string, d time.Duration) (string, error) {
 	shell := i.Bins.Mongosh
 	if shell == "" {
 		shell = i.Bins.Mongo
@@ -343,7 +377,10 @@ func (i *Instance) evalOutput(js string) (string, error) {
 		args = append(args, "-u", postgres.DBUser(), "-p", i.Password, "--authenticationDatabase", "admin")
 	}
 	args = append(args, "--eval", js)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if d <= 0 {
+		d = 20 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), d)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, shell, args...)
 	out, err := cmd.CombinedOutput()

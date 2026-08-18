@@ -22,7 +22,10 @@ type ConnectorLifecycleResult struct {
 // SuspendConnector stops the connector replica compute and all branches from it.
 // Data directories are kept (same idea as branch suspend).
 func (s *Service) SuspendConnector(ctx context.Context, projectID, name string) (ConnectorLifecycleResult, error) {
-	unlock := s.lockBranch(s.connectorLockKey(name, auth.OwnerFrom(ctx)))
+	unlock, err := s.lockBranch(ctx, s.connectorLockKey(name, auth.OwnerFrom(ctx)))
+	if err != nil {
+		return ConnectorLifecycleResult{}, err
+	}
 	defer unlock()
 
 	c, err := s.lookupConnector(ctx, projectID, name)
@@ -65,7 +68,10 @@ func (s *Service) SuspendConnector(ctx context.Context, projectID, name string) 
 
 // ResumeConnector starts the connector replica and all idle branches from it.
 func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (ConnectorLifecycleResult, error) {
-	unlock := s.lockBranch(s.connectorLockKey(name, auth.OwnerFrom(ctx)))
+	unlock, err := s.lockBranch(ctx, s.connectorLockKey(name, auth.OwnerFrom(ctx)))
+	if err != nil {
+		return ConnectorLifecycleResult{}, err
+	}
 	defer unlock()
 
 	c, err := s.lookupConnector(ctx, projectID, name)
@@ -156,7 +162,10 @@ func (s *Service) suspendBranchBestEffort(ctx context.Context, rec meta.BranchRe
 	if rec.Status != meta.StatusActive && rec.Status != meta.StatusError && rec.Status != meta.StatusCrashed {
 		return rec, nil
 	}
-	unlock := s.lockBranch(s.instKey(rec))
+	unlock, err := s.lockBranch(ctx, s.instKey(rec))
+	if err != nil {
+		return meta.BranchRecord{}, err
+	}
 	defer unlock()
 	fresh, err := s.Store.GetBranchByID(ctx, rec.ID)
 	if err != nil {
@@ -167,7 +176,7 @@ func (s *Service) suspendBranchBestEffort(ctx context.Context, rec meta.BranchRe
 		return rec, nil
 	}
 	key := s.instKey(rec)
-	h := compute.Handle{Provider: s.Compute.Name(), Name: key, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID}
+	h := compute.Handle{Provider: s.Compute.Name(), Name: key, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID, Engine: s.sourceEngine(ctx, rec), Password: rec.Password}
 	_ = s.Compute.Stop(ctx, h)
 	rec.Status = meta.StatusIdle
 	rec.ContainerID = ""
@@ -182,7 +191,10 @@ func (s *Service) resumeBranchBestEffort(ctx context.Context, rec meta.BranchRec
 	if rec.Status != meta.StatusIdle && rec.Status != meta.StatusCrashed {
 		return rec, fmt.Errorf("invalid_state: status=%s", rec.Status)
 	}
-	unlock := s.lockBranch(s.instKey(rec))
+	unlock, err := s.lockBranch(ctx, s.instKey(rec))
+	if err != nil {
+		return meta.BranchRecord{}, err
+	}
 	defer unlock()
 	fresh, err := s.Store.GetBranchByID(ctx, rec.ID)
 	if err != nil {

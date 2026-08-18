@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -436,7 +437,9 @@ func releaseDataset(dataset, mount string) {
 	if mount != "" && mount != "-" && strings.HasPrefix(mount, "/") {
 		killPidFile(filepath.Join(mount, "mongod.pid"))
 		killPidFile(filepath.Join(mount, "postmaster.pid"))
-		_ = exec.Command("fuser", "-k", mount).Run()
+		fctx, fcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = exec.CommandContext(fctx, "fuser", "-k", mount).Run()
+		fcancel()
 	}
 	_ = zfsRun("unmount", "-f", dataset)
 }
@@ -513,13 +516,25 @@ func zfsOutput(args ...string) (string, error) {
 		return "", fmt.Errorf("zfs binary not found")
 	}
 	name, cmdArgs := zfsExecSpec(zfsPath, args, strings.EqualFold(strings.TrimSpace(os.Getenv("SPROUT_ZFS_SUDO")), "true"))
-	cmd := exec.Command(name, cmdArgs...)
+	timeout := 2 * time.Minute
+	if len(args) > 0 {
+		switch args[0] {
+		case "list", "get":
+			timeout = 15 * time.Second
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, cmdArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		hint := ""
 		if !strings.EqualFold(strings.TrimSpace(os.Getenv("SPROUT_ZFS_SUDO")), "true") &&
 			strings.Contains(strings.ToLower(string(out)), "only be mounted by root") {
 			hint = "; on Linux set SPROUT_ZFS_SUDO=true and grant passwordless sudo for the zfs binary"
+		}
+		if ctx.Err() != nil {
+			return string(out), fmt.Errorf("zfs %s: timed out after %s (%s)", strings.Join(args, " "), timeout, strings.TrimSpace(string(out)))
 		}
 		return string(out), fmt.Errorf("zfs %s: %w (%s)%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)), hint)
 	}
@@ -562,7 +577,9 @@ func zfsExecSpec(zfsPath string, args []string, useSudo bool) (string, []string)
 }
 
 func lookupZFSMount(path string) (name, mount string) {
-	cmd := exec.Command("zfs", "list", "-H", "-o", "name,mountpoint")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "zfs", "list", "-H", "-o", "name,mountpoint")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", ""

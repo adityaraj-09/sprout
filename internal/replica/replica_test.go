@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+func TestPsqlLocalEnvHasConnectTimeout(t *testing.T) {
+	env := psqlLocalEnv()
+	found := false
+	for _, e := range env {
+		if e == "PGCONNECT_TIMEOUT=5" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("PGCONNECT_TIMEOUT=5 missing from psqlLocalEnv")
+	}
+}
+
 func TestPrimaryKeyIgnoresCredentials(t *testing.T) {
 	a := PrimaryKeyFromURL("postgresql://postgres:one@db.example.supabase.co:5432/postgres")
 	b := PrimaryKeyFromURL("postgresql://postgres:two@db.example.supabase.co:5432/postgres?sslmode=require")

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/adityaraj/sprout/internal/compute"
 	"github.com/adityaraj/sprout/internal/meta"
@@ -146,6 +147,86 @@ func TestDeleteOrphanBranchDataset(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatal("orphan dataset should be destroyed")
+	}
+}
+
+func TestDeleteOrphanBranchWithOwnerInPath(t *testing.T) {
+	svc, proj := testService(t)
+	ctx := context.Background()
+	dir := filepath.Join(svc.Root, "branches", "mango-adityaraj-09-mongo")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "WiredTiger.wt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Delete(ctx, proj.ID, "mango", "mongo"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal("owner-qualified orphan should be destroyed")
+	}
+}
+
+func TestDeleteLockTimeout(t *testing.T) {
+	svc, proj := testService(t)
+	ctx := context.Background()
+	dir := filepath.Join(svc.Root, "branches", "feat-mongo")
+	_ = os.MkdirAll(dir, 0o700)
+	rec := meta.BranchRecord{
+		ID: "b-lock", ProjectID: proj.ID, Name: "feat", Role: "branch",
+		Status: meta.StatusCreating, Port: 55451, DataDir: dir,
+		SourceConnector: "mongo", CreatedBy: "",
+	}
+	if err := svc.Store.PutBranch(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := svc.lockBranch(ctx, svc.instKey(rec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	dctx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+	defer cancel()
+	err = svc.Delete(dctx, proj.ID, "feat", "mongo")
+	if err == nil || !strings.Contains(err.Error(), "operation_in_progress") {
+		t.Fatalf("expected operation_in_progress, got %v", err)
+	}
+}
+
+func TestOrphanBranchDirName(t *testing.T) {
+	if !orphanBranchDirName("mango-mongo", "mango", "mongo") {
+		t.Fatal("name-from")
+	}
+	if !orphanBranchDirName("mango-adityaraj-09-mongo", "mango", "mongo") {
+		t.Fatal("name-owner-from")
+	}
+	if orphanBranchDirName("other-mongo", "mango", "mongo") {
+		t.Fatal("different branch")
+	}
+	if orphanBranchDirName("mango-pg", "mango", "mongo") {
+		t.Fatal("different connector")
+	}
+}
+
+func TestSourceEngineUsesMongoDataDirWhenEngineEmpty(t *testing.T) {
+	svc, proj := testService(t)
+	ctx := context.Background()
+	dir := filepath.Join(svc.Root, "replicas", "mongo")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "WiredTiger.wt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Store.PutConnector(ctx, meta.Connector{
+		ID: "c-mongo", ProjectID: proj.ID, Name: "mongo", DataDir: dir, Engine: "",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := meta.BranchRecord{SourceConnectorID: "c-mongo", DataDir: filepath.Join(svc.Root, "branches", "feat")}
+	if got := svc.sourceEngine(ctx, rec); got != "mongodb" {
+		t.Fatalf("got %q, want mongodb", got)
 	}
 }
 

@@ -87,7 +87,10 @@ func (s *Service) Connect(ctx context.Context, projectID string, opts ConnectOpt
 }
 
 func (s *Service) connectPhysical(ctx context.Context, projectID, name, primaryURL string, wipe bool) (meta.Connector, replica.Lag, error) {
-	unlock := s.lockBranch(s.connectorLockKey(name, auth.OwnerFrom(ctx)))
+	unlock, err := s.lockBranch(ctx, s.connectorLockKey(name, auth.OwnerFrom(ctx)))
+	if err != nil {
+		return meta.Connector{}, replica.Lag{}, err
+	}
 	defer unlock()
 
 	conn, err := replica.ParseURL(primaryURL)
@@ -155,7 +158,10 @@ func (s *Service) connectPhysical(ctx context.Context, projectID, name, primaryU
 }
 
 func (s *Service) connectLogical(ctx context.Context, projectID string, opts ConnectOpts) (ConnectResult, error) {
-	unlock := s.lockBranch(s.connectorLockKey(opts.Name, auth.OwnerFrom(ctx)))
+	unlock, err := s.lockBranch(ctx, s.connectorLockKey(opts.Name, auth.OwnerFrom(ctx)))
+	if err != nil {
+		return ConnectResult{}, err
+	}
 	defer unlock()
 
 	conn, err := replica.ParseURL(opts.URL)
@@ -297,7 +303,10 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 }
 
 func (s *Service) connectMongoLogical(ctx context.Context, projectID string, opts ConnectOpts) (ConnectResult, error) {
-	unlock := s.lockBranch(s.connectorLockKey(opts.Name, auth.OwnerFrom(ctx)))
+	unlock, err := s.lockBranch(ctx, s.connectorLockKey(opts.Name, auth.OwnerFrom(ctx)))
+	if err != nil {
+		return ConnectResult{}, err
+	}
 	defer unlock()
 
 	conn, err := mongo.ParseURL(opts.URL)
@@ -447,7 +456,10 @@ func (s *Service) findSeedReplica(ctx context.Context, projectID, primaryURL, ex
 }
 
 func (s *Service) cloneConnectorFromLocal(ctx context.Context, projectID string, dest, seed meta.Connector, primary replica.Conn) (meta.Connector, replica.Lag, error) {
-	unlock := s.lockBranch("snap:" + seed.ID)
+	unlock, err := s.lockBranch(ctx, "snap:"+seed.ID)
+	if err != nil {
+		return meta.Connector{}, replica.Lag{}, err
+	}
 	defer unlock()
 
 	h := s.connectorHandle(dest)
@@ -742,7 +754,10 @@ func (s *Service) ReplicationStatus(ctx context.Context, projectID, name string)
 // DeleteConnector stops the local replica, drops logical pub/sub when possible, and removes metadata.
 // Child branches block the delete unless force is set (then they are destroyed first).
 func (s *Service) DeleteConnector(ctx context.Context, projectID, name string, force bool) error {
-	unlock := s.lockBranch(s.connectorLockKey(name, auth.OwnerFrom(ctx)))
+	unlock, err := s.lockBranch(ctx, s.connectorLockKey(name, auth.OwnerFrom(ctx)))
+	if err != nil {
+		return err
+	}
 	defer unlock()
 
 	c, err := s.lookupConnector(ctx, projectID, name)

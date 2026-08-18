@@ -79,7 +79,7 @@ func (l *Local) instance(spec Spec) *postgres.Instance {
 
 func (l *Local) Start(ctx context.Context, spec Spec) (Handle, error) {
 	_ = ctx
-	h := Handle{Provider: "local", Name: spec.Name, Port: spec.Port, DataDir: spec.DataDir}
+	h := Handle{Provider: "local", Name: spec.Name, Port: spec.Port, DataDir: spec.DataDir, Engine: spec.Engine}
 	if specEngine(spec) == engine.Mongo {
 		inst := &mongo.Instance{
 			Name: spec.Name, DataDir: spec.DataDir, Port: spec.Port, LogFile: spec.LogFile,
