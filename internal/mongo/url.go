@@ -89,7 +89,8 @@ func (c Conn) dumpURI() string {
 	return u.String()
 }
 
-// FormatConnString builds a mongodb:// URL on the unique instance port with tls=true.
+// FormatConnString builds a mongodb:// URL with tls=true.
+// When the SNI proxy is on, the advertised port is 27017; otherwise the instance port.
 func FormatConnString(port int, db, password, name, from string, owner ...string) string {
 	own := ""
 	if len(owner) > 0 {
@@ -98,7 +99,7 @@ func FormatConnString(port int, db, password, name, from string, owner ...string
 	host := postgres.AdvertiseHost(name, from, own)
 	u := url.URL{
 		Scheme: "mongodb",
-		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
+		Host:   net.JoinHostPort(host, strconv.Itoa(AdvertisePort(port))),
 	}
 	if db != "" {
 		u.Path = "/" + db

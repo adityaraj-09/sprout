@@ -9,6 +9,7 @@ import (
 	"runtime"
 
 	"github.com/adityaraj/sprout/internal/auth"
+	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
 )
 
@@ -92,23 +93,44 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 	add(DoctorCheck{Name: "public_host", OK: true, Level: "info",
 		Detail: fmt.Sprintf("SPROUT_PUBLIC_HOST=%s listen_addresses=%s db_user=%s subdomain=%v", host, listen, postgres.DBUser(), postgres.BranchSubdomain())})
 	if postgres.BranchSubdomain() {
-		if postgres.ProxyEnabled() {
+		if postgres.ProxyEnabled() || mongo.ProxyEnabled() {
+			detail := fmt.Sprintf("hostnames are <name>-<owner>-<connector>.%s", host)
+			if postgres.ProxyEnabled() {
+				detail += fmt.Sprintf("; Postgres :%d", postgres.ProxyPort())
+			}
+			if mongo.ProxyEnabled() {
+				detail += fmt.Sprintf("; Mongo :%d", mongo.ProxyPort())
+			}
 			add(DoctorCheck{Name: "dns", OK: true, Level: "warn",
-				Detail: fmt.Sprintf("URLs use <name>-<owner>-<connector>.%s:5432 (SNI proxy)", host),
-				Hint:   "wildcard A/AAAA for *." + host + " → this VM; open NSG 5432; setcap cap_net_bind_service=+ep if bind fails"})
+				Detail: detail,
+				Hint:   "wildcard A/AAAA for *." + host + " → this VM; setcap cap_net_bind_service=+ep if bind fails"})
 		} else {
 			add(DoctorCheck{Name: "dns", OK: true, Level: "warn",
 				Detail: fmt.Sprintf("branch URLs use <name>-<owner>-<connector>.%s:<port>", host),
-				Hint:   "create a wildcard A/AAAA record for *." + host + " pointing at this VM; SPROUT_PG_PROXY=false keeps unique ports"})
+				Hint:   "create a wildcard A/AAAA record for *." + host + " pointing at this VM"})
 		}
 	}
 	if postgres.ProxyEnabled() {
 		add(DoctorCheck{Name: "pg_proxy", OK: true, Level: "info",
 			Detail: fmt.Sprintf("SNI proxy :%d → %s:<instance port>", postgres.ProxyPort(), postgres.ProxyBackendHost()),
 			Hint:   "clients connect on 5432; TLS SNI selects test-x vs test-y. Self-signed cert in $SPROUT_DATA/tls unless SPROUT_TLS_CERT is set"})
+	}
+	if mongo.ProxyEnabled() {
+		add(DoctorCheck{Name: "mongo_proxy", OK: true, Level: "info",
+			Detail: fmt.Sprintf("Mongo SNI passthrough :%d → %s:<instance port>", mongo.ProxyPort(), mongo.ProxyBackendHost()),
+			Hint:   "clients connect on 27017 with tls=true; hostname selects the mongod. Unique ports stay on loopback"})
+	}
+	if postgres.ProxyEnabled() || mongo.ProxyEnabled() {
+		hint := "open NSG/security group for 8080 (API)"
+		if postgres.ProxyEnabled() {
+			hint += ", 5432 (Postgres)"
+		}
+		if mongo.ProxyEnabled() {
+			hint += ", 27017 (Mongo)"
+		}
 		add(DoctorCheck{Name: "firewall", OK: true, Level: "warn",
-			Detail: "public Postgres is the SNI proxy on 5432",
-			Hint:   "open NSG/security group for 5432 (and 8080 for the API); unique branch ports stay on loopback"})
+			Detail: "public database ports are SNI proxies; instance ports stay on loopback",
+			Hint:   hint})
 	} else if remote {
 		if postgres.TrustRemote() {
 			if os.Getenv("SPROUT_SAFE") != "true" {

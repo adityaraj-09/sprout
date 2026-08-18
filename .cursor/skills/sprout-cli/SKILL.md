@@ -86,10 +86,10 @@ MongoDB (dump snapshot into local `mongod`; no oplog, no `:27017` proxy):
 ```bash
 sprout connect --name=atlas 'mongodb+srv://USER:PASS@cluster.mongodb.net/app'
 sprout branch create feat --from=atlas
-# mongosh "mongodb://sprout:<pass>@feat-<owner>-atlas.host:<port>/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin"
+# mongosh "mongodb://sprout:<pass>@feat-<owner>-atlas.host:27017/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin"
 ```
 
-`--engine` is inferred from the URL. MongoDB only supports `--mode=logical`. `--tables=orders,items` is a collection allowlist and requires a database in the URL. Connection strings always use the unique allocated port with `tls=true`.
+`--engine` is inferred from the URL. MongoDB only supports `--mode=logical`. `--tables=orders,items` is a collection allowlist and requires a database in the URL. With a DNS host, connection strings use port **27017** (`tls=true`); SNI selects the instance.
 
 Local demo only (no remote):
 
@@ -107,9 +107,9 @@ sprout branch create alice --from=main
   - connector: `postgresql://sprout:<pass>@supabase-alice.strido.fit:5432/postgres`
   - branch: `postgresql://sprout:<pass>@testdb-alice-supabase.strido.fit:5432/postgres`
   - unowned/machine: `postgresql://sprout:<pass>@<branch>-<connector>.strido.fit:5432/postgres`
-- Port **5432** is the SNI proxy. Hostname selects the instance. Clients need TLS (`sslmode=require` or libpq `prefer`). Self-signed cert is normal; `verify-full` may fail.
+- Port **5432** is the Postgres SNI proxy. Hostname selects the instance. Clients need TLS (`sslmode=require` or libpq `prefer`). Self-signed cert is normal; `verify-full` may fail.
 - Localhost / raw IP: unique ports, no subdomain (`localhost:55440`).
-- MongoDB: same hostname labels, but the URL is `mongodb://sprout:<pass>@<host>:<instance-port>/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin`. There is **no** port-27017 proxy.
+- MongoDB: same hostname labels. With a DNS host, URLs are `mongodb://sprout:<pass>@<host>:27017/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin`. Port **27017** is the SNI passthrough (`SPROUT_MONGO_PROXY=false` keeps unique ports).
 - A branch is an **independent primary**. It does not keep replicating from prod. The **connector replica** does. `sprout branch create` detaches any cloned logical subscription so the branch cannot steal the connector's WAL slot.
 - Do **not** `sprout connect` using a branch URL as the upstream unless the user explicitly wants a replica-of-a-branch. Day-to-day testing = `psql` / app DSN to the branch URL.
 

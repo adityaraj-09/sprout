@@ -29,6 +29,7 @@ func TestFormatConnStringUniqueTLSPort(t *testing.T) {
 	t.Setenv("SPROUT_DB_USER", "sprout")
 	t.Setenv("SPROUT_PUBLIC_HOST", "localhost")
 	t.Setenv("SPROUT_BRANCH_SUBDOMAIN", "")
+	t.Setenv("SPROUT_MONGO_PROXY", "")
 	local := FormatConnString(55461, "shop", "secret", "feat", "atlas")
 	if !strings.Contains(local, "localhost:55461") {
 		t.Fatalf("local: %s", local)
@@ -39,11 +40,14 @@ func TestFormatConnStringUniqueTLSPort(t *testing.T) {
 
 	t.Setenv("SPROUT_PUBLIC_HOST", "strido.fit")
 	hosted := FormatConnString(55461, "shop", "secret", "feat", "atlas")
-	if !strings.Contains(hosted, "feat-atlas.strido.fit:55461") {
-		t.Fatalf("expected unique port, got %s", hosted)
+	if !strings.Contains(hosted, "feat-atlas.strido.fit:27017") {
+		t.Fatalf("expected SNI proxy port, got %s", hosted)
 	}
-	if strings.Contains(hosted, ":27017") {
-		t.Fatalf("must not advertise 27017: %s", hosted)
+
+	t.Setenv("SPROUT_MONGO_PROXY", "false")
+	direct := FormatConnString(55461, "shop", "secret", "feat", "atlas")
+	if !strings.Contains(direct, "feat-atlas.strido.fit:55461") {
+		t.Fatalf("proxy off should keep unique port, got %s", direct)
 	}
 }
 

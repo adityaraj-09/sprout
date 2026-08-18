@@ -24,7 +24,7 @@ On Azure/Linux you typically:
 2. Prefer **ZFS** for real CoW branches, or **`SPROUT_STORAGE=copy`** for a simple full-copy fallback.
 3. Install **Postgres client/server tools** whose major version is **≥ your primary** (Supabase 17 → PG 17 tools).
 4. Run with **`SPROUT_COMPUTE=local`** (Docker often mismatches `initdb` major).
-5. Open **NSG** for API `8080` and Postgres `5432` (SNI proxy when using a domain).
+5. Open **NSG** for API `8080`, Postgres `5432`, and Mongo `27017` (SNI proxies when using a domain).
 
 ---
 
@@ -46,6 +46,7 @@ On Azure/Linux you typically:
 | `22` | SSH (your IP) |
 | `8080` | `sprout-server` API |
 | `5432` | Postgres SNI proxy (domain URLs). Unique branch ports stay on the VM loopback. |
+| `27017` | Mongo SNI passthrough (domain URLs). `mongod` unique ports stay on loopback. |
 
 From your laptop you will connect like:
 
@@ -114,7 +115,7 @@ If `pg_dump` major is lower than the primary, logical connect fails with `versio
 
 ## 3b. Optional: MongoDB tools (dump-restore connectors)
 
-MongoDB connectors need `mongod`, `mongodump`, `mongorestore`, and `mongosh` on `PATH`. Compute is **local only** (`SPROUT_COMPUTE=local`). There is no Docker Mongo and no `:27017` hostname proxy — branches advertise TLS on their allocated port (`55433+`).
+MongoDB connectors need `mongod`, `mongodump`, `mongorestore`, and `mongosh` on `PATH`. Compute is **local only** (`SPROUT_COMPUTE=local`). There is no Docker Mongo. With a DNS `SPROUT_PUBLIC_HOST`, clients use `:27017` (`tls=true`); hostname SNI selects the instance. `SPROUT_MONGO_PROXY=false` keeps unique ports.
 
 ```bash
 # MongoDB 7 Community + database tools (Ubuntu)
@@ -231,6 +232,7 @@ export SPROUT_DB_USER=sprout                     # login role in connection stri
 # export SPROUT_STORAGE=copy                     # lab fallback if ZFS is not configured
 # export SPROUT_BRANCH_SUBDOMAIN=false           # keep host as-is (default auto-on for DNS names)
 # export SPROUT_PG_PROXY=false                   # advertise unique ports; skip the :5432 SNI proxy
+# export SPROUT_MONGO_PROXY=false                # advertise unique Mongo ports; skip the :27017 SNI passthrough
 # export SPROUT_TRUST_REMOTE=true                # lab-only: remote trust instead of SCRAM
 # export SPROUT_AUTO_RESUME=true                 # restart crashed connectors/branches
 ```
@@ -362,7 +364,7 @@ sprout connector delete sup --force      # also destroys branches from this conn
 | `replication slot … already exists` | Wiped subscriber left slot on prod | Fixed in recent builds; or `SELECT pg_drop_replication_slot('sprout_sub_<name>')` on primary |
 | `database "flagforge" does not exist` spam | `pg_isready` without `-d postgres` | Fixed; pull latest |
 | `Address already in use` / not ready | Leftover postmaster on port | `pg_ctl -D … stop` or `fuser -k PORT/tcp`, then reconnect |
-| Branch URL works remotely? | NSG missing 5432, or proxy not bound | Open `5432`; `setcap cap_net_bind_service=+ep ./bin/sprout-server` |
+| Branch URL works remotely? | NSG missing 5432/27017, or proxy not bound | Open `5432` and `27017`; `setcap cap_net_bind_service=+ep ./bin/sprout-server` |
 | Publisher timeouts after sync | Egress / Supabase allowlist | Allow VM egress to primary `5432` |
 
 Clean leftover Postgres processes:
@@ -406,7 +408,7 @@ pkill -f sprout-server || true
 - [ ] Postgres **17** (or matching major) first on `PATH`
 - [ ] `SPROUT_COMPUTE=local`, `SPROUT_STORAGE=zfs`, `SPROUT_ZFS_DATASET=sprout/data`, `SPROUT_ZFS_SUDO=true`, `SPROUT_PUBLIC_HOST=server_domain`, `SPROUT_SAFE=true`
 - [ ] Wildcard DNS `*.strido.fit` → VM if using a domain (optional)
-- [ ] NSG: `8080` + `5432` (domain) or unique branch ports (raw IP)
+- [ ] NSG: `8080` + `5432` + `27017` (domain) or unique branch ports (raw IP)
 - [ ] `make build` + `sprout-server` running
 - [ ] `sprout doctor` / `sprout health` OK from laptop
 - [ ] `connect --mode=logical` then `branch create`

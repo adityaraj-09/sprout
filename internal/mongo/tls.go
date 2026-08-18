@@ -19,6 +19,9 @@ func tlsDataRoot() string {
 }
 
 func bindIP() string {
+	if ProxyEnabled() {
+		return "127.0.0.1"
+	}
 	h := postgres.PublicHost()
 	if h == "localhost" || h == "127.0.0.1" || h == "::1" {
 		return "127.0.0.1"

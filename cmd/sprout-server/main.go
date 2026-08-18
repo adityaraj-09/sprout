@@ -15,6 +15,8 @@ import (
 	"github.com/adityaraj/sprout/internal/compute"
 	"github.com/adityaraj/sprout/internal/config"
 	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/mongo"
+	"github.com/adityaraj/sprout/internal/mongoproxy"
 	"github.com/adityaraj/sprout/internal/pgproxy"
 	"github.com/adityaraj/sprout/internal/postgres"
 	"github.com/adityaraj/sprout/internal/reconcile"
@@ -85,6 +87,23 @@ func main() {
 		}()
 	}
 
+	if mongo.ProxyEnabled() {
+		mproxy := &mongoproxy.Server{
+			Addr:    mongo.ListenAddr(),
+			Resolve: mongoproxy.StoreResolver(store),
+		}
+		if err := mproxy.Listen(); err != nil {
+			fatal(err)
+		}
+		go func() {
+			_ = mproxy.Serve()
+		}()
+		go func() {
+			<-ctx.Done()
+			_ = mproxy.Close()
+		}()
+	}
+
 	srv := api.New(svc, cfg.Token)
 	httpSrv := &http.Server{Addr: cfg.Listen, Handler: srv.Handler()}
 
@@ -119,6 +138,9 @@ func main() {
 			fmt.Printf("  dns:       *.%s → this VM; URLs use :%d (SNI proxy)\n", postgres.PublicHost(), postgres.ProxyPort())
 		} else {
 			fmt.Printf("  dns:       *.%s → this VM (wildcard A/AAAA); URLs keep the branch port\n", postgres.PublicHost())
+		}
+		if mongo.ProxyEnabled() {
+			fmt.Printf("  mongo:     URLs use :%d (SNI passthrough); mongod stays on loopback\n", mongo.ProxyPort())
 		}
 	}
 	if postgres.RemoteAccess() {
