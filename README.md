@@ -245,7 +245,7 @@ data/
 ```
 
 Default port allocator starts at **55433** (`next_port` in `control.db`).  
-Connectors and branches each get an allocated port.
+Connectors and branches each get an allocated port; in-use listeners are skipped so a leftover `mongod` cannot block the next Postgres connector.
 
 `data/` is gitignored — never commit it (URLs may contain passwords).
 

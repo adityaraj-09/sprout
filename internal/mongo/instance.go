@@ -158,8 +158,11 @@ func (i *Instance) Start() error {
 	if err := i.writeConfig(auth); err != nil {
 		return err
 	}
-	if i.IsRunning() {
+	if i.pidAlive() {
 		return nil
+	}
+	if err := postgres.EnsurePortFree(i.Port); err != nil {
+		return err
 	}
 	if i.Bins.Mongod == "" {
 		i.Bins = FindOnPath()
@@ -205,20 +208,34 @@ func (i *Instance) Stop() error {
 	return fmt.Errorf("mongod on port %d still running after stop", i.Port)
 }
 
-func (i *Instance) IsRunning() bool {
-	if b, err := os.ReadFile(i.pidFile()); err == nil {
-		if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 1 {
-			if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err == nil {
-				return true
-			}
-		}
+func (i *Instance) pidAlive() bool {
+	b, err := os.ReadFile(i.pidFile())
+	if err != nil {
+		return false
 	}
-	c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(i.Port)), 200*time.Millisecond)
-	if err == nil {
-		_ = c.Close()
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 1 {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err == nil {
 		return true
 	}
 	return false
+}
+
+func (i *Instance) IsRunning() bool {
+	if i.pidAlive() {
+		return true
+	}
+	if i.Port <= 0 {
+		return false
+	}
+	c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(i.Port)), 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
 }
 
 func (i *Instance) WaitReady(timeout time.Duration) error {

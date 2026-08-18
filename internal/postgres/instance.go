@@ -105,7 +105,7 @@ func (i *Instance) Start() error {
 	if err := i.writeConfig(); err != nil {
 		return err
 	}
-	if err := ensurePortFree(i.Port); err != nil {
+	if err := EnsurePortFree(i.Port); err != nil {
 		return err
 	}
 	cmd := exec.Command(i.Bins.PgCtl, "-D", i.DataDir, "-l", i.LogFile, "start", "-o", fmt.Sprintf("-p %d", i.Port))
@@ -117,7 +117,7 @@ func (i *Instance) Start() error {
 	if err := i.WaitReady(30 * time.Second); err != nil {
 		logTail, _ := os.ReadFile(i.LogFile)
 		if strings.Contains(string(logTail), "Address already in use") {
-			return fmt.Errorf("port %d already in use — stop the other Postgres (or sprout process) on that port, then retry\n%s", i.Port, err)
+			return fmt.Errorf("port %d already in use — stop leftover sprout compute (postgres or mongod) on that port, then retry\n%s", i.Port, err)
 		}
 		return err
 	}
@@ -140,12 +140,12 @@ func (i *Instance) Stop() error {
 func (i *Instance) waitStopped(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if !i.IsRunning() && !portListening(i.Port) {
+		if !i.IsRunning() && !PortListening(i.Port) {
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if i.IsRunning() || portListening(i.Port) {
+	if i.IsRunning() || PortListening(i.Port) {
 		return fmt.Errorf("postgres on port %d still running after stop — kill leftover postmaster and retry", i.Port)
 	}
 	return nil
@@ -181,14 +181,19 @@ func (i *Instance) WaitReady(timeout time.Duration) error {
 	return fmt.Errorf("postgres on port %d not ready after %s\nlog:\n%s", i.Port, timeout, string(logTail))
 }
 
-func ensurePortFree(port int) error {
-	if !portListening(port) {
+// EnsurePortFree returns an error if something is already accepting TCP on port.
+func EnsurePortFree(port int) error {
+	if !PortListening(port) {
 		return nil
 	}
-	return fmt.Errorf("port %d already in use — stop leftover Postgres: pg_ctl -D <datadir> stop  (or fuser -k %d/tcp)", port, port)
+	return fmt.Errorf("port %d already in use — stop leftover sprout compute (postgres or mongod): pg_ctl -D <datadir> stop  (or fuser -k %d/tcp)", port, port)
 }
 
-func portListening(port int) bool {
+// PortListening reports whether 127.0.0.1:port accepts a TCP connection.
+func PortListening(port int) bool {
+	if port <= 0 {
+		return false
+	}
 	c, err := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
 	if err != nil {
 		return false

@@ -525,23 +525,19 @@ func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, p
 		existing.ErrorMessage = ""
 		existing.DataDir = dataDir
 		existing.CreatedBy = owner
-		if existing.Port == 0 {
-			port, err := s.Store.AllocPort(ctx)
-			if err != nil {
-				return meta.Connector{}, err
-			}
-			existing.Port = port
-		}
 		if existing.Password == "" {
 			existing.Password = postgres.GeneratePassword()
 		}
 		if err := s.Store.UpdateConnector(ctx, existing); err != nil {
 			return meta.Connector{}, err
 		}
+		if err := s.ensureConnectorPortFree(ctx, &existing); err != nil {
+			return meta.Connector{}, err
+		}
 		return existing, nil
 	}
 
-	port, err := s.Store.AllocPort(ctx)
+	port, err := s.allocFreePort(ctx)
 	if err != nil {
 		return meta.Connector{}, err
 	}
@@ -568,7 +564,69 @@ func (s *Service) connectorHandle(c meta.Connector) compute.Handle {
 	return compute.Handle{Provider: s.Compute.Name(), Name: postgres.ReplicaComputeName(c.Name, c.CreatedBy), Port: c.Port, DataDir: c.DataDir}
 }
 
+const allocPortAttempts = 64
+
+// allocFreePort returns the next control-plane port that is not already listening.
+func (s *Service) allocFreePort(ctx context.Context) (int, error) {
+	var last int
+	for i := 0; i < allocPortAttempts; i++ {
+		p, err := s.Store.AllocPort(ctx)
+		if err != nil {
+			return 0, err
+		}
+		last = p
+		if !postgres.PortListening(p) {
+			return p, nil
+		}
+	}
+	return 0, fmt.Errorf("no free listen port after %d allocations (last %d)", allocPortAttempts, last)
+}
+
+// ensureConnectorPortFree keeps c.Port if it is free (or we can stop leftover compute
+// for this connector). Otherwise it assigns a new unused port.
+func (s *Service) ensureConnectorPortFree(ctx context.Context, c *meta.Connector) error {
+	if c.Port != 0 && !postgres.PortListening(c.Port) {
+		return nil
+	}
+	if c.Port != 0 && postgres.PortListening(c.Port) && s.Compute != nil {
+		h := s.connectorHandle(*c)
+		_ = s.Compute.Stop(ctx, h)
+		deadline := time.Now().Add(8 * time.Second)
+		for time.Now().Before(deadline) {
+			running, _ := s.Compute.IsRunning(ctx, h)
+			if !running && !postgres.PortListening(c.Port) {
+				return nil
+			}
+			if !running {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !postgres.PortListening(c.Port) {
+			return nil
+		}
+	}
+	p, err := s.allocFreePort(ctx)
+	if err != nil {
+		return err
+	}
+	c.Port = p
+	return s.Store.UpdateConnector(ctx, *c)
+}
+
 func (s *Service) failConnector(ctx context.Context, c meta.Connector, err error) (meta.Connector, replica.Lag, error) {
+	if s.Compute != nil {
+		h := s.connectorHandle(c)
+		_ = s.Compute.Stop(ctx, h)
+		deadline := time.Now().Add(8 * time.Second)
+		for time.Now().Before(deadline) {
+			running, _ := s.Compute.IsRunning(ctx, h)
+			if !running {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
 	c.Status = meta.ConnectorError
 	c.ErrorMessage = err.Error()
 	_ = s.Store.UpdateConnector(ctx, c)

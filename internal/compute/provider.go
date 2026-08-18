@@ -76,9 +76,6 @@ func (l *Local) Start(ctx context.Context, spec Spec) (Handle, error) {
 			Name: spec.Name, DataDir: spec.DataDir, Port: spec.Port, LogFile: spec.LogFile,
 			Bins: mongo.FindOnPath(),
 		}
-		if inst.IsRunning() {
-			return h, nil
-		}
 		if err := inst.Start(); err != nil {
 			return Handle{}, err
 		}

@@ -378,6 +378,7 @@ sprout connector delete sup --force      # also destroys branches from this conn
 | `replication slot … already exists` | Wiped subscriber left slot on prod | Fixed in recent builds; or `SELECT pg_drop_replication_slot('sprout_sub_<name>')` on primary |
 | `database "flagforge" does not exist` spam | `pg_isready` without `-d postgres` | Fixed; pull latest |
 | `Address already in use` / not ready | Leftover postmaster on port | `pg_ctl -D … stop` or `fuser -k PORT/tcp`, then reconnect |
+| `port 55434 already in use` while adding a second connector | Failed mongo/postgres connect left `mongod`/`postgres` listening; allocator used to hand out the busy port | Latest code skips busy ports and stops leftover compute on connect failure. Or `ss -lptn 'sport = :55434'` / `fuser -k 55434/tcp`, then retry |
 | Branch URL works remotely? | NSG missing 5432/27017, or proxy not bound | Open `5432` and `27017`; `setcap cap_net_bind_service=+ep ./bin/sprout-server` |
 | Publisher timeouts after sync | Egress / Supabase allowlist | Allow VM egress to primary `5432` |
 

@@ -194,7 +194,7 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 		return meta.BranchRecord{}, err
 	}
 
-	port, err := s.Store.AllocPort(ctx)
+	port, err := s.allocFreePort(ctx)
 	if err != nil {
 		return meta.BranchRecord{}, err
 	}
