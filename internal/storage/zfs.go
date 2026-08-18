@@ -323,18 +323,113 @@ func destroyDataset(name string) error {
 	}
 	current := strings.TrimSpace(zfsGet(name, "mountpoint"))
 	releaseDataset(name, current)
-	err := zfsRun("destroy", "-r", name)
-	if err == nil {
+
+	var last error
+	for attempt := 0; attempt < 8; attempt++ {
+		err := zfsRun("destroy", "-r", name)
+		if err == nil {
+			return nil
+		}
+		last = err
+		clones := parseDependentClones(err.Error())
+		if len(clones) == 0 {
+			clones = listClonesOf(name)
+		}
+		if len(clones) == 0 {
+			break
+		}
+		// Keep branch datasets: promote clones so they no longer depend on
+		// this replica origin, then retry destroy (never zfs destroy -R).
+		for _, clone := range clones {
+			if clone == "" || clone == name {
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "  [storage/zfs] promote %s (keep branch; wipe replica)\n", clone)
+			if err := zfsRun("promote", clone); err != nil {
+				return fmt.Errorf("filesystem has dependent clones (%s). Delete that branch first, or: %w", strings.Join(clones, ", "), err)
+			}
+		}
+	}
+	if last == nil {
 		return nil
 	}
-	if !isZFSBusy(err) {
-		return err
+	if isZFSBusy(last) {
+		releaseDataset(name, current)
+		if err2 := zfsRun("destroy", "-r", "-f", name); err2 != nil {
+			return fmt.Errorf("%w; forced destroy: %v (stop mongod/postgres using this dataset and retry)", last, err2)
+		}
+		return nil
 	}
-	releaseDataset(name, current)
-	if err2 := zfsRun("destroy", "-r", "-f", name); err2 != nil {
-		return fmt.Errorf("%w; forced destroy: %v (stop mongod/postgres using this dataset and retry)", err, err2)
+	if clones := parseDependentClones(last.Error()); len(clones) > 0 {
+		return fmt.Errorf("filesystem has dependent clones (%s) — delete those branches first (sprout branch delete <name> --from=<connector>)", strings.Join(clones, ", "))
 	}
-	return nil
+	return last
+}
+
+func parseDependentClones(msg string) []string {
+	lower := strings.ToLower(msg)
+	if !strings.Contains(lower, "dependent clone") {
+		return nil
+	}
+	rest := msg
+	if i := strings.Index(lower, "following datasets:"); i >= 0 {
+		rest = msg[i+len("following datasets:"):]
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	for _, line := range strings.Split(rest, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.Trim(line, "()")
+		if line == "" || strings.ContainsAny(line, " \t") {
+			continue
+		}
+		if !strings.Contains(line, "/") || strings.Contains(line, "@") {
+			continue
+		}
+		if _, ok := seen[line]; ok {
+			continue
+		}
+		seen[line] = struct{}{}
+		out = append(out, line)
+	}
+	return out
+}
+
+func listClonesOf(dataset string) []string {
+	parent := dataset
+	if i := strings.LastIndex(dataset, "/"); i > 0 {
+		parent = dataset[:i]
+	}
+	out, err := zfsOutput("get", "-Hr", "-o", "name,value", "origin", parent)
+	if err != nil {
+		return nil
+	}
+	return parseZFSOrigins(out, dataset)
+}
+
+func parseZFSOrigins(out, originDS string) []string {
+	prefix := originDS + "@"
+	seen := map[string]struct{}{}
+	var clones []string
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 2 {
+			continue
+		}
+		name, origin := strings.TrimSpace(fields[0]), strings.TrimSpace(fields[1])
+		if origin == "" || origin == "-" || !strings.HasPrefix(origin, prefix) {
+			continue
+		}
+		if name == "" || name == originDS {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		clones = append(clones, name)
+	}
+	return clones
 }
 
 func releaseDataset(dataset, mount string) {
@@ -408,9 +503,14 @@ func zfsExists(ref string) bool {
 }
 
 func zfsRun(args ...string) error {
+	_, err := zfsOutput(args...)
+	return err
+}
+
+func zfsOutput(args ...string) (string, error) {
 	zfsPath, err := exec.LookPath("zfs")
 	if err != nil {
-		return fmt.Errorf("zfs binary not found")
+		return "", fmt.Errorf("zfs binary not found")
 	}
 	name, cmdArgs := zfsExecSpec(zfsPath, args, strings.EqualFold(strings.TrimSpace(os.Getenv("SPROUT_ZFS_SUDO")), "true"))
 	cmd := exec.Command(name, cmdArgs...)
@@ -421,9 +521,9 @@ func zfsRun(args ...string) error {
 			strings.Contains(strings.ToLower(string(out)), "only be mounted by root") {
 			hint = "; on Linux set SPROUT_ZFS_SUDO=true and grant passwordless sudo for the zfs binary"
 		}
-		return fmt.Errorf("zfs %s: %w (%s)%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)), hint)
+		return string(out), fmt.Errorf("zfs %s: %w (%s)%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)), hint)
 	}
-	return nil
+	return string(out), nil
 }
 
 func (z *ZFS) ensureMountOwner(path string) error {

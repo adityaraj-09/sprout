@@ -18,6 +18,29 @@ func TestIsZFSBusy(t *testing.T) {
 	}
 }
 
+func TestParseDependentClones(t *testing.T) {
+	msg := "zfs destroy -r sprout/data/replica-mongo-adityaraj-09: exit status 1 (cannot destroy 'sprout/data/replica-mongo-adityaraj-09': filesystem has dependent clones\nuse '-R' to destroy the following datasets:\nsprout/data/branch-mango-adityaraj-09-mongo)"
+	got := parseDependentClones(msg)
+	if len(got) != 1 || got[0] != "sprout/data/branch-mango-adityaraj-09-mongo" {
+		t.Fatalf("got %#v", got)
+	}
+	if parseDependentClones("dataset is busy") != nil {
+		t.Fatal("busy is not clones")
+	}
+}
+
+func TestParseZFSOrigins(t *testing.T) {
+	out := "" +
+		"sprout/data\t-\n" +
+		"sprout/data/replica-mongo-adityaraj-09\t-\n" +
+		"sprout/data/branch-mango-adityaraj-09-mongo\tsprout/data/replica-mongo-adityaraj-09@mango-adityaraj-09-mongo\n" +
+		"sprout/data/branch-other\tsprout/data/replica-pg@x\n"
+	got := parseZFSOrigins(out, "sprout/data/replica-mongo-adityaraj-09")
+	if len(got) != 1 || got[0] != "sprout/data/branch-mango-adityaraj-09-mongo" {
+		t.Fatalf("got %#v", got)
+	}
+}
+
 func TestSanitizeZFSSnapName(t *testing.T) {
 	if got := sanitizeZFSSnapName("feat-adityaraj-09-mongo"); got != "feat-adityaraj-09-mongo" {
 		t.Fatalf("got %q", got)
