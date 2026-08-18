@@ -391,6 +391,7 @@ sprout connector delete sup --force      # also destroys branches from this conn
 | Mongo `branch create` fails / URL hangs | Source `mongod` must be stopped for a consistent ZFS snapshot; leftover error branches blocked retries; SNI hostname is `<branch>-<github>-<connector>.host` | Pull latest: create cold-stops mongod, clones the ZFS dataset, then restarts. Retry the same branch name. Use the printed `mongodb://` URL (tls=true). |
 | `cannot unmount ... pool or dataset is busy` on `connect --wipe` | Leftover `mongod` still has the replica dataset open (often an old `~/sprout/data` mount after `SPROUT_DATA` moved to `~/sprout-data`) | Pull latest — wipe stops mongod, then `zfs unmount -f` / destroy. Or `sudo zfs umount -f sprout/data/replica-<name>` after `mongosh`/`kill` the leftover mongod. |
 | `filesystem has dependent clones` on wipe | A CoW branch (e.g. `mango`) is a ZFS clone of the replica | Latest code `zfs promote`s the branch then destroys only the replica. Or `sprout branch delete mango --from=mongo` first. Never `zfs destroy -R` (that deletes branches). |
+| `branch_not_found` for a branch you just created | Trailing comma (`--from=mongo,`) or leftover ZFS clone with no control-plane row | Pull latest (trims `--from`, deletes orphan datasets). `sprout branch list`. |
 | Branch URL works remotely? | NSG missing 5432/27017, or proxy not bound | Open `5432` and `27017`; `setcap cap_net_bind_service=+ep ./bin/sprout-server` |
 | Publisher timeouts after sync | Egress / Supabase allowlist | Allow VM egress to primary `5432` |
 

@@ -2,6 +2,7 @@ package branch
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -107,5 +108,52 @@ func TestDeleteConnectorForceRemovesBranches(t *testing.T) {
 	}
 	if _, err := svc.Store.GetBranch(ctx, proj.ID, "replica-sup"); err == nil {
 		t.Fatal("synthetic replica row should be gone")
+	}
+}
+
+func TestDeleteTrimsFromComma(t *testing.T) {
+	svc, proj := testService(t)
+	ctx := context.Background()
+	dir := filepath.Join(svc.Root, "branches", "mango-mongo")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = svc.Store.PutBranch(ctx, meta.BranchRecord{
+		ID: "b-mango", ProjectID: proj.ID, Name: "mango", Role: "branch",
+		Status: meta.StatusActive, Port: 55450, DataDir: dir,
+		SourceConnector: "mongo", SourceConnectorID: "c-mongo",
+	})
+	if err := svc.Delete(ctx, proj.ID, "mango", "mongo,"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Store.GetBranchByID(ctx, "b-mango"); err == nil {
+		t.Fatal("branch record should be gone")
+	}
+}
+
+func TestDeleteOrphanBranchDataset(t *testing.T) {
+	svc, proj := testService(t)
+	ctx := context.Background()
+	dir := svc.BranchDir("mango", "mongo", "")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "WiredTiger.wt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Delete(ctx, proj.ID, "mango", "mongo"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal("orphan dataset should be destroyed")
+	}
+}
+
+func TestTrimIdent(t *testing.T) {
+	if got := trimIdent("mongo,"); got != "mongo" {
+		t.Fatalf("got %q", got)
+	}
+	if got := trimIdent(" mango "); got != "mango" {
+		t.Fatalf("got %q", got)
 	}
 }

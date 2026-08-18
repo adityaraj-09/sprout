@@ -375,7 +375,7 @@ func (s *Server) handleResumeBranch(w http.ResponseWriter, r *http.Request) {
 type branchMutator func(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error)
 
 func branchFrom(r *http.Request) string {
-	return strings.TrimSpace(r.URL.Query().Get("from"))
+	return strings.Trim(strings.TrimSpace(r.URL.Query().Get("from")), ",;")
 }
 
 func (s *Server) mutateBranch(w http.ResponseWriter, r *http.Request, fn branchMutator) {

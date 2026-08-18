@@ -63,14 +63,22 @@ func (s *Service) instKey(rec meta.BranchRecord) string {
 }
 
 func (s *Service) lookupBranch(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error) {
+	name, from = trimIdent(name), trimIdent(from)
 	rec, err := s.Store.FindBranch(ctx, projectID, name, from, auth.OwnerFrom(ctx))
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "ambiguous_branch") {
 			return meta.BranchRecord{}, err
 		}
-		return meta.BranchRecord{}, fmt.Errorf("branch_not_found")
+		if from != "" {
+			return meta.BranchRecord{}, fmt.Errorf("branch_not_found: %q from %q — try sprout branch list", name, from)
+		}
+		return meta.BranchRecord{}, fmt.Errorf("branch_not_found: %q — try sprout branch list", name)
 	}
 	return rec, nil
+}
+
+func trimIdent(s string) string {
+	return strings.Trim(strings.TrimSpace(s), ",;")
 }
 
 func (s *Service) lookupConnector(ctx context.Context, projectID, name string) (meta.Connector, error) {
@@ -168,6 +176,7 @@ func (s *Service) InitMain(ctx context.Context) (meta.Project, error) {
 }
 
 func (s *Service) Create(ctx context.Context, projectID, name, fromConnector string) (meta.BranchRecord, error) {
+	name, fromConnector = trimIdent(name), trimIdent(fromConnector)
 	if !nameRe.MatchString(name) || name == "main" {
 		return meta.BranchRecord{}, fmt.Errorf("invalid_name: use lowercase [a-z0-9-], not 'main'")
 	}
@@ -619,8 +628,12 @@ func (s *Service) Reset(ctx context.Context, projectID, name, from string) (meta
 }
 
 func (s *Service) Delete(ctx context.Context, projectID, name, from string) error {
+	name, from = trimIdent(name), trimIdent(from)
 	rec, err := s.lookupBranch(ctx, projectID, name, from)
 	if err != nil {
+		if err := s.deleteOrphanBranch(ctx, projectID, name, from); err == nil {
+			return nil
+		}
 		return err
 	}
 	unlock := s.lockBranch(s.instKey(rec))
@@ -641,6 +654,35 @@ func (s *Service) Delete(ctx context.Context, projectID, name, from string) erro
 	_ = s.Storage.Destroy(rec.DataDir)
 	_ = s.Storage.Destroy(rec.SnapshotRef)
 	return s.Store.DeleteBranch(ctx, rec.ID)
+}
+
+func (s *Service) deleteOrphanBranch(ctx context.Context, projectID, name, from string) error {
+	owner := auth.OwnerFrom(ctx)
+	var dirs []string
+	if from != "" {
+		dirs = append(dirs, s.BranchDir(name, from, owner))
+	} else if cons, err := s.visibleConnectors(ctx, projectID); err == nil {
+		for _, c := range cons {
+			dirs = append(dirs, s.BranchDir(name, c.Name, owner))
+		}
+	}
+	removed := 0
+	for _, dir := range dirs {
+		if dir == "" || !s.Storage.Exists(dir) {
+			continue
+		}
+		h := compute.Handle{Provider: s.Compute.Name(), Name: filepath.Base(dir), DataDir: dir}
+		_ = s.Compute.Stop(ctx, h)
+		if err := s.Storage.Destroy(dir); err != nil {
+			return err
+		}
+		fmt.Printf("✓ removed leftover branch dataset %s (not in control plane)\n", dir)
+		removed++
+	}
+	if removed == 0 {
+		return fmt.Errorf("branch_not_found")
+	}
+	return nil
 }
 
 func (s *Service) Suspend(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error) {

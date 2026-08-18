@@ -253,11 +253,11 @@ func main() {
 			name := ""
 			for _, a := range os.Args[3:] {
 				if strings.HasPrefix(a, "--from=") {
-					from = strings.TrimPrefix(a, "--from=")
+					from = strings.Trim(strings.TrimSpace(strings.TrimPrefix(a, "--from=")), ",;")
 					continue
 				}
 				if name == "" && !strings.HasPrefix(a, "-") {
-					name = a
+					name = strings.Trim(strings.TrimSpace(a), ",;")
 				}
 			}
 			if name == "" {
@@ -445,11 +445,11 @@ func need(n int) {
 func parseNameFrom(args []string) (name, from string) {
 	for _, a := range args {
 		if strings.HasPrefix(a, "--from=") {
-			from = strings.TrimPrefix(a, "--from=")
+			from = strings.Trim(strings.TrimSpace(strings.TrimPrefix(a, "--from=")), ",;")
 			continue
 		}
 		if name == "" && !strings.HasPrefix(a, "-") {
-			name = a
+			name = strings.Trim(strings.TrimSpace(a), ",;")
 		}
 	}
 	return name, from
