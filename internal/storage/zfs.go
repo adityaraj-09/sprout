@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -138,11 +139,7 @@ func (z *ZFS) ensureMountedDataset(dataset, mount string) error {
 		return fmt.Errorf("mountpoint %s already used by dataset %s (want %s)", mount, name, dataset)
 	}
 	if zfsExists(dataset) {
-		if err := zfsRun("set", "mountpoint="+mount, dataset); err != nil {
-			return err
-		}
-		_ = zfsRun("mount", dataset)
-		return z.ensureMountOwner(mount)
+		return z.retargetDataset(dataset, mount)
 	}
 
 	if st, err := os.Stat(mount); err == nil && st.IsDir() {
@@ -169,6 +166,25 @@ func (z *ZFS) ensureMountedDataset(dataset, mount string) error {
 			return fmt.Errorf("%w; retry mount: %v", err, mountErr)
 		}
 	}
+	return z.ensureMountOwner(mount)
+}
+
+func (z *ZFS) retargetDataset(dataset, mount string) error {
+	current := strings.TrimSpace(zfsGet(dataset, "mountpoint"))
+	if current != "" && current != "-" && filepath.Clean(current) == filepath.Clean(mount) {
+		_ = zfsRun("mount", dataset)
+		return z.ensureMountOwner(mount)
+	}
+	// Leftover dataset from a previous SPROUT_DATA path. Drop processes
+	// holding the old mount so `zfs set mountpoint=` can unmount it.
+	releaseDataset(dataset, current)
+	if err := zfsRun("set", "mountpoint="+mount, dataset); err != nil {
+		if isZFSBusy(err) {
+			return fmt.Errorf("dataset %s is busy at %s — stop leftover mongod/postgres using that directory, then retry: %w", dataset, current, err)
+		}
+		return err
+	}
+	_ = zfsRun("mount", dataset)
 	return z.ensureMountOwner(mount)
 }
 
@@ -289,19 +305,87 @@ func (z *ZFS) Destroy(ref string) error {
 		abs = a
 	}
 	if name, mp := lookupZFSMount(abs); name != "" && filepath.Clean(mp) == abs {
-		if err := zfsRun("destroy", "-r", name); err != nil {
-			return err
-		}
-		return nil
+		return destroyDataset(name)
 	}
 	if strings.Contains(ref, "/") && !strings.HasPrefix(ref, "/") && zfsExists(ref) {
-		return zfsRun("destroy", "-r", ref)
+		return destroyDataset(ref)
 	}
 	ds := z.childDataset(abs)
 	if zfsExists(ds) {
-		return zfsRun("destroy", "-r", ds)
+		return destroyDataset(ds)
 	}
 	return os.RemoveAll(ref)
+}
+
+func destroyDataset(name string) error {
+	if !zfsExists(name) {
+		return nil
+	}
+	current := strings.TrimSpace(zfsGet(name, "mountpoint"))
+	releaseDataset(name, current)
+	err := zfsRun("destroy", "-r", name)
+	if err == nil {
+		return nil
+	}
+	if !isZFSBusy(err) {
+		return err
+	}
+	releaseDataset(name, current)
+	if err2 := zfsRun("destroy", "-r", "-f", name); err2 != nil {
+		return fmt.Errorf("%w; forced destroy: %v (stop mongod/postgres using this dataset and retry)", err, err2)
+	}
+	return nil
+}
+
+func releaseDataset(dataset, mount string) {
+	if mount != "" && mount != "-" && strings.HasPrefix(mount, "/") {
+		killPidFile(filepath.Join(mount, "mongod.pid"))
+		killPidFile(filepath.Join(mount, "postmaster.pid"))
+		_ = exec.Command("fuser", "-k", mount).Run()
+	}
+	_ = zfsRun("unmount", "-f", dataset)
+}
+
+func killPidFile(path string) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 1 {
+		return
+	}
+	_ = exec.Command("kill", strconv.Itoa(pid)).Run()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err != nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = exec.Command("kill", "-9", strconv.Itoa(pid)).Run()
+}
+
+func isZFSBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "busy") || strings.Contains(s, "cannot unmount")
+}
+
+func zfsGet(dataset, prop string) string {
+	zfsPath, err := exec.LookPath("zfs")
+	if err != nil {
+		return ""
+	}
+	name, args := zfsExecSpec(zfsPath, []string{"get", "-H", "-o", "value", prop, dataset}, strings.EqualFold(strings.TrimSpace(os.Getenv("SPROUT_ZFS_SUDO")), "true"))
+	cmd := exec.Command(name, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func (z *ZFS) Exists(ref string) bool {

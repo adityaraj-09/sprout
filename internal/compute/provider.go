@@ -30,6 +30,13 @@ func specEngine(spec Spec) string {
 	return engine.Postgres
 }
 
+func handleEngine(h Handle) string {
+	if engine.IsMongo(h.Engine) || mongo.HasDataDir(h.DataDir) {
+		return engine.Mongo
+	}
+	return engine.Postgres
+}
+
 // Handle is whatever we need later to stop/inspect the workload.
 type Handle struct {
 	Provider    string // "local" | "docker"
@@ -37,6 +44,8 @@ type Handle struct {
 	Name        string
 	Port        int
 	DataDir     string
+	Engine      string
+	Password    string
 }
 
 // Provider starts and stops Postgres compute.
@@ -93,8 +102,8 @@ func (l *Local) Start(ctx context.Context, spec Spec) (Handle, error) {
 
 func (l *Local) Stop(ctx context.Context, h Handle) error {
 	_ = ctx
-	if specEngine(Spec{DataDir: h.DataDir}) == engine.Mongo {
-		inst := &mongo.Instance{Name: h.Name, DataDir: h.DataDir, Port: h.Port, Bins: mongo.FindOnPath()}
+	if handleEngine(h) == engine.Mongo {
+		inst := &mongo.Instance{Name: h.Name, DataDir: h.DataDir, Port: h.Port, Bins: mongo.FindOnPath(), Password: h.Password}
 		return inst.Stop()
 	}
 	inst := &postgres.Instance{
@@ -106,8 +115,8 @@ func (l *Local) Stop(ctx context.Context, h Handle) error {
 
 func (l *Local) IsRunning(ctx context.Context, h Handle) (bool, error) {
 	_ = ctx
-	if specEngine(Spec{DataDir: h.DataDir, Port: h.Port}) == engine.Mongo {
-		inst := &mongo.Instance{Port: h.Port, DataDir: h.DataDir, Bins: mongo.FindOnPath()}
+	if handleEngine(h) == engine.Mongo {
+		inst := &mongo.Instance{Port: h.Port, DataDir: h.DataDir, Bins: mongo.FindOnPath(), Password: h.Password}
 		return inst.IsRunning(), nil
 	}
 	inst := &postgres.Instance{Port: h.Port, DataDir: h.DataDir, Bins: l.Bins}

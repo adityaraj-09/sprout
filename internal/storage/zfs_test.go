@@ -1,9 +1,22 @@
 package storage
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
+
+func TestIsZFSBusy(t *testing.T) {
+	if isZFSBusy(nil) {
+		t.Fatal("nil")
+	}
+	if !isZFSBusy(fmt.Errorf("zfs set mountpoint=/x ds: exit status 255 (cannot unmount '/old': pool or dataset is busy)")) {
+		t.Fatal("expected busy")
+	}
+	if isZFSBusy(fmt.Errorf("dataset already exists")) {
+		t.Fatal("not busy")
+	}
+}
 
 func TestSanitizeZFSSnapName(t *testing.T) {
 	if got := sanitizeZFSSnapName("feat-adityaraj-09-mongo"); got != "feat-adityaraj-09-mongo" {

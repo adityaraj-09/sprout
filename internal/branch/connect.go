@@ -114,18 +114,13 @@ func (s *Service) connectPhysical(ctx context.Context, projectID, name, primaryU
 	fmt.Printf("  name=%s port=%d dir=%s\n", c.Name, c.Port, c.DataDir)
 	fmt.Printf("  primary: %s:%d user=%s\n", conn.Host, conn.Port, conn.User)
 
-	h := s.connectorHandle(c)
-	_ = s.Compute.Stop(ctx, h)
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		running, _ := s.Compute.IsRunning(ctx, h)
-		if !running {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
 	if wipe {
-		_ = s.Storage.Destroy(c.DataDir)
+		if err := s.stopConnectorForWipe(ctx, c); err != nil {
+			return s.failConnector(ctx, c, fmt.Errorf("storage_failed: stop replica: %w", err))
+		}
+		if err := s.Storage.Destroy(c.DataDir); err != nil {
+			return s.failConnector(ctx, c, fmt.Errorf("storage_failed: destroy replica volume: %w", err))
+		}
 		if err := s.Storage.EnsureVolume(c.DataDir); err != nil {
 			return s.failConnector(ctx, c, err)
 		}
@@ -227,17 +222,14 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 			return ConnectResult{}, e
 		}
 
-		_ = s.Compute.Stop(ctx, h)
-		// Wait for postmaster to release the port before wiping PGDATA.
-		deadline := time.Now().Add(20 * time.Second)
-		for time.Now().Before(deadline) {
-			running, _ := s.Compute.IsRunning(ctx, h)
-			if !running {
-				break
-			}
-			time.Sleep(200 * time.Millisecond)
+		if err := s.stopConnectorForWipe(ctx, c); err != nil {
+			_, _, e := s.failConnector(ctx, c, fmt.Errorf("storage_failed: stop replica: %w", err))
+			return ConnectResult{}, e
 		}
-		_ = s.Storage.Destroy(c.DataDir)
+		if err := s.Storage.Destroy(c.DataDir); err != nil {
+			_, _, e := s.failConnector(ctx, c, fmt.Errorf("storage_failed: destroy replica volume: %w", err))
+			return ConnectResult{}, e
+		}
 		if err := s.Storage.EnsureVolume(c.DataDir); err != nil {
 			_, _, e := s.failConnector(ctx, c, err)
 			return ConnectResult{}, e
@@ -348,16 +340,14 @@ func (s *Service) connectMongoLogical(ctx context.Context, projectID string, opt
 	}
 
 	if needBootstrap {
-		_ = s.Compute.Stop(ctx, h)
-		deadline := time.Now().Add(20 * time.Second)
-		for time.Now().Before(deadline) {
-			running, _ := s.Compute.IsRunning(ctx, h)
-			if !running {
-				break
-			}
-			time.Sleep(200 * time.Millisecond)
+		if err := s.stopConnectorForWipe(ctx, c); err != nil {
+			_, _, e := s.failConnector(ctx, c, fmt.Errorf("storage_failed: stop replica: %w", err))
+			return ConnectResult{}, e
 		}
-		_ = s.Storage.Destroy(c.DataDir)
+		if err := s.Storage.Destroy(c.DataDir); err != nil {
+			_, _, e := s.failConnector(ctx, c, fmt.Errorf("storage_failed: destroy replica volume: %w", err))
+			return ConnectResult{}, e
+		}
 		if err := s.Storage.EnsureVolume(c.DataDir); err != nil {
 			_, _, e := s.failConnector(ctx, c, err)
 			return ConnectResult{}, e
@@ -561,7 +551,40 @@ func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, p
 }
 
 func (s *Service) connectorHandle(c meta.Connector) compute.Handle {
-	return compute.Handle{Provider: s.Compute.Name(), Name: postgres.ReplicaComputeName(c.Name, c.CreatedBy), Port: c.Port, DataDir: c.DataDir}
+	return compute.Handle{
+		Provider: s.Compute.Name(), Name: postgres.ReplicaComputeName(c.Name, c.CreatedBy),
+		Port: c.Port, DataDir: c.DataDir, Engine: c.Engine, Password: c.Password,
+	}
+}
+
+// stopConnectorForWipe stops local compute and waits until the listen port is
+// free so ZFS can unmount/destroy the replica dataset.
+func (s *Service) stopConnectorForWipe(ctx context.Context, c meta.Connector) error {
+	h := s.connectorHandle(c)
+	if engine.IsMongo(c.Engine) {
+		inst := &mongo.Instance{
+			Name: h.Name, DataDir: c.DataDir, Port: c.Port,
+			Bins: mongo.FindOnPath(), Password: c.Password,
+		}
+		_ = inst.Stop()
+		if err := inst.WaitPortFree(20 * time.Second); err != nil {
+			return err
+		}
+		return nil
+	}
+	_ = s.Compute.Stop(ctx, h)
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		running, _ := s.Compute.IsRunning(ctx, h)
+		if !running && !postgres.PortListening(c.Port) {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if postgres.PortListening(c.Port) {
+		return fmt.Errorf("postgres on port %d still running after stop", c.Port)
+	}
+	return nil
 }
 
 const allocPortAttempts = 64
