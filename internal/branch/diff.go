@@ -6,6 +6,10 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/adityaraj/sprout/internal/engine"
+	"github.com/adityaraj/sprout/internal/meta"
+	"github.com/adityaraj/sprout/internal/mongo"
 )
 
 // BranchDiff summarizes schema + row-count changes vs the parent connector/main.
@@ -62,6 +66,10 @@ func (s *Service) DiffBranch(ctx context.Context, projectID, name, from string) 
 		}
 	}
 	_ = parentDir
+
+	if engine.IsMongo(s.sourceEngine(ctx, rec)) {
+		return s.diffMongoBranch(ctx, rec, parentName, parentPort)
+	}
 
 	branchSchema, err := listSchema(ctx, s.Bins.Psql, "127.0.0.1", rec.Port)
 	if err != nil {
@@ -133,6 +141,61 @@ func (s *Service) DiffBranch(ctx context.Context, projectID, name, from string) 
 		Rows:    rows,
 		Summary: summary,
 	}, nil
+}
+
+func (s *Service) diffMongoBranch(ctx context.Context, rec meta.BranchRecord, parentName string, parentPort int) (BranchDiff, error) {
+	_ = ctx
+	bins := mongo.FindOnPath()
+	branchInst := &mongo.Instance{
+		Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy,
+		DataDir: rec.DataDir, Port: rec.Port, Bins: bins, Password: rec.Password,
+	}
+	parentInst := &mongo.Instance{Port: parentPort, Bins: bins, Password: rec.Password}
+	if rec.SourceConnectorID != "" {
+		if c, err := s.Store.GetConnectorByID(context.Background(), rec.SourceConnectorID); err == nil && c.Password != "" {
+			parentInst.Password = c.Password
+		}
+	}
+	branchCols, err := branchInst.CollectionCounts()
+	if err != nil {
+		return BranchDiff{}, fmt.Errorf("branch collections: %w", err)
+	}
+	parentCols, err := parentInst.CollectionCounts()
+	if err != nil {
+		return BranchDiff{}, fmt.Errorf("parent collections: %w", err)
+	}
+	sd := SchemaDiff{Tables: map[string][]string{}}
+	for name := range branchCols {
+		sd.Tables[name] = []string{"document"}
+		if _, ok := parentCols[name]; !ok {
+			sd.OnlyOnBranch = append(sd.OnlyOnBranch, name)
+		}
+	}
+	for name := range parentCols {
+		if _, ok := branchCols[name]; !ok {
+			sd.OnlyOnParent = append(sd.OnlyOnParent, name)
+		}
+	}
+	all := map[string]struct{}{}
+	for n := range branchCols {
+		all[n] = struct{}{}
+	}
+	for n := range parentCols {
+		all[n] = struct{}{}
+	}
+	var rows []TableRowDiff
+	var changed int
+	for n := range all {
+		d := TableRowDiff{Table: n, BranchRows: branchCols[n], ParentRows: parentCols[n], Delta: branchCols[n] - parentCols[n]}
+		if d.Delta != 0 {
+			changed++
+		}
+		rows = append(rows, d)
+	}
+	sortTableRowDiff(rows)
+	summary := fmt.Sprintf("vs %s: +%d collections only on branch, +%d only on parent, %d collections with count delta",
+		parentName, len(sd.OnlyOnBranch), len(sd.OnlyOnParent), changed)
+	return BranchDiff{Branch: rec.Name, Parent: parentName, Schema: sd, Rows: rows, Summary: summary}, nil
 }
 
 func listSchema(ctx context.Context, psql, host string, port int) (map[string][]string, error) {

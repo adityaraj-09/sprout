@@ -57,6 +57,9 @@ func TestPrepareCloneRewritesPortAndDropsLock(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "mongod.lock"), []byte("1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "WiredTiger.lock"), []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "mongod.pid"), []byte("1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -66,6 +69,9 @@ func TestPrepareCloneRewritesPortAndDropsLock(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "mongod.lock")); !os.IsNotExist(err) {
 		t.Fatal("mongod.lock should be removed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "WiredTiger.lock")); !os.IsNotExist(err) {
+		t.Fatal("WiredTiger.lock should be removed")
 	}
 	body, err := os.ReadFile(filepath.Join(dir, "mongod.conf"))
 	if err != nil {

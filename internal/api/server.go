@@ -277,7 +277,7 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_body", `JSON {"name":"...","from":"connector-name"} required`)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 	rec, err := s.Service.Create(ctx, proj.ID, body.Name, body.From)
 	if err != nil {

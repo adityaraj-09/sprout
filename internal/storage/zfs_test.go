@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+func TestSanitizeZFSSnapName(t *testing.T) {
+	if got := sanitizeZFSSnapName("feat-adityaraj-09-mongo"); got != "feat-adityaraj-09-mongo" {
+		t.Fatalf("got %q", got)
+	}
+	if got := sanitizeZFSSnapName("feat/mongo@bad"); got != "feat-mongo-bad" {
+		t.Fatalf("got %q", got)
+	}
+	if got := sanitizeZFSSnapName("@@@"); got != "snap" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestParseZFSListLongestPrefix(t *testing.T) {
 	out := "" +
 		"sprout/data\t/home/u/sprout-data\n" +

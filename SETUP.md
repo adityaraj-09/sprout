@@ -340,6 +340,15 @@ sprout branch create my-feature --from=sup
 #   psql "postgresql://sprout@YOUR_PUBLIC_IP:55434/postgres"
 ```
 
+MongoDB uses the **same ZFS CoW path** (snapshot the replica dataset, clone a branch dataset, start a new `mongod`). Storage must be `SPROUT_STORAGE=zfs` with `SPROUT_ZFS_DATASET` (or `copy` for a full-file clone):
+
+```bash
+sprout connect --name=mongo 'mongodb+srv://USER:PASS@cluster.mongodb.net/test'
+sprout branch create feat --from=mongo
+# mongodb://sprout:<pass>@feat-<github>-mongo.strido.fit:27017/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin
+# mongosh "<that url>"
+```
+
 Useful flags:
 
 | Flag | Meaning |
@@ -379,6 +388,7 @@ sprout connector delete sup --force      # also destroys branches from this conn
 | `database "flagforge" does not exist` spam | `pg_isready` without `-d postgres` | Fixed; pull latest |
 | `Address already in use` / not ready | Leftover postmaster on port | `pg_ctl -D … stop` or `fuser -k PORT/tcp`, then reconnect |
 | `port 55434 already in use` while adding a second connector | Failed mongo/postgres connect left `mongod`/`postgres` listening; allocator used to hand out the busy port | Latest code skips busy ports and stops leftover compute on connect failure. Or `ss -lptn 'sport = :55434'` / `fuser -k 55434/tcp`, then retry |
+| Mongo `branch create` fails / URL hangs | Source `mongod` must be stopped for a consistent ZFS snapshot; leftover error branches blocked retries; SNI hostname is `<branch>-<github>-<connector>.host` | Pull latest: create cold-stops mongod, clones the ZFS dataset, then restarts. Retry the same branch name. Use the printed `mongodb://` URL (tls=true). |
 | Branch URL works remotely? | NSG missing 5432/27017, or proxy not bound | Open `5432` and `27017`; `setcap cap_net_bind_service=+ep ./bin/sprout-server` |
 | Publisher timeouts after sync | Egress / Supabase allowlist | Allow VM egress to primary `5432` |
 

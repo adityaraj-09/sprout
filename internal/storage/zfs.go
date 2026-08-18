@@ -89,6 +89,27 @@ func flattenRel(rel string) string {
 	return strings.ReplaceAll(rel, "/", "-")
 }
 
+func sanitizeZFSSnapName(name string) string {
+	name = strings.TrimSpace(name)
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.', r == ':':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	s := strings.Trim(b.String(), "-.")
+	if s == "" {
+		return "snap"
+	}
+	if len(s) > 200 {
+		return s[:200]
+	}
+	return s
+}
+
 func (z *ZFS) datasetForDir(path string) string {
 	abs := filepath.Clean(path)
 	if a, err := filepath.Abs(abs); err == nil {
@@ -199,7 +220,7 @@ func (z *ZFS) Snapshot(sourceDir, snapshotName string) (string, error) {
 		}
 		ds = z.datasetForDir(sourceDir)
 	}
-	snap := ds + "@" + snapshotName
+	snap := ds + "@" + sanitizeZFSSnapName(snapshotName)
 	if zfsExists(snap) {
 		return "", fmt.Errorf("snapshot already exists: %s", snap)
 	}

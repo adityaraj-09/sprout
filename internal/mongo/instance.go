@@ -1,6 +1,7 @@
 package mongo
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -144,6 +145,7 @@ security:
 func (i *Instance) PrepareClone() error {
 	_ = os.Remove(i.pidFile())
 	_ = os.Remove(i.lockFile())
+	_ = os.Remove(filepath.Join(i.DataDir, "WiredTiger.lock"))
 	return i.writeConfig(true)
 }
 
@@ -182,6 +184,9 @@ func (i *Instance) Start() error {
 }
 
 func (i *Instance) Stop() error {
+	if i.Password != "" {
+		i.auth = true
+	}
 	if !i.IsRunning() {
 		return nil
 	}
@@ -260,12 +265,73 @@ func (i *Instance) ping() error {
 }
 
 func (i *Instance) eval(js string) error {
+	_, err := i.evalOutput(js)
+	return err
+}
+
+func (i *Instance) CollectionCounts() (map[string]int64, error) {
+	if i.Password != "" {
+		i.auth = true
+	}
+	out, err := i.evalOutput(`JSON.stringify(db.adminCommand({listDatabases:1, nameOnly:true}).databases.map(d => d.name))`)
+	if err != nil {
+		return nil, err
+	}
+	names := []string{}
+	raw := strings.TrimSpace(out)
+	raw = strings.Trim(raw, "[]")
+	for _, part := range strings.Split(raw, ",") {
+		n := strings.Trim(strings.TrimSpace(part), `"`)
+		if n == "" || n == "admin" || n == "local" || n == "config" {
+			continue
+		}
+		names = append(names, n)
+	}
+	counts := map[string]int64{}
+	for _, name := range names {
+		esc := strings.ReplaceAll(name, `\`, `\\`)
+		esc = strings.ReplaceAll(esc, `'`, `\'`)
+		js := fmt.Sprintf(`JSON.stringify(db.getSiblingDB('%s').getCollectionNames())`, esc)
+		colOut, err := i.evalOutput(js)
+		if err != nil {
+			return nil, err
+		}
+		colRaw := strings.TrimSpace(colOut)
+		colRaw = strings.Trim(colRaw, "[]")
+		for _, part := range strings.Split(colRaw, ",") {
+			col := strings.Trim(strings.TrimSpace(part), `"`)
+			if col == "" {
+				continue
+			}
+			escCol := strings.ReplaceAll(col, `\`, `\\`)
+			escCol = strings.ReplaceAll(escCol, `'`, `\'`)
+			njs := fmt.Sprintf(`db.getSiblingDB('%s').getCollection('%s').estimatedDocumentCount()`, esc, escCol)
+			nOut, err := i.evalOutput(njs)
+			if err != nil {
+				return nil, err
+			}
+			var n int64
+			_, _ = fmt.Sscan(strings.TrimSpace(nOut), &n)
+			counts[name+"."+col] = n
+		}
+	}
+	return counts, nil
+}
+
+func (i *Instance) evalOutput(js string) (string, error) {
 	shell := i.Bins.Mongosh
 	if shell == "" {
 		shell = i.Bins.Mongo
 	}
 	if shell == "" {
-		return fmt.Errorf("mongosh not in PATH")
+		i.Bins = FindOnPath()
+		shell = i.Bins.Mongosh
+		if shell == "" {
+			shell = i.Bins.Mongo
+		}
+	}
+	if shell == "" {
+		return "", fmt.Errorf("mongosh not in PATH")
 	}
 	args := []string{
 		"--quiet",
@@ -277,12 +343,14 @@ func (i *Instance) eval(js string) error {
 		args = append(args, "-u", postgres.DBUser(), "-p", i.Password, "--authenticationDatabase", "admin")
 	}
 	args = append(args, "--eval", js)
-	cmd := exec.Command(shell, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, shell, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%w (%s)", err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("%w (%s)", err, strings.TrimSpace(string(out)))
 	}
-	return nil
+	return strings.TrimSpace(string(out)), nil
 }
 
 func (i *Instance) EnsureAppRoles() error {
@@ -342,6 +410,18 @@ func (i *Instance) UnlockForSnapshot() error {
 		i.auth = true
 	}
 	return i.eval("db.adminCommand({fsyncUnlock:1})")
+}
+
+// WaitPortFree waits until nothing is accepting TCP on the instance port.
+func (i *Instance) WaitPortFree(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !postgres.PortListening(i.Port) && !i.pidAlive() {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("mongod port %d still in use after %s", i.Port, timeout)
 }
 
 func (i *Instance) FlushForSnapshot() error {

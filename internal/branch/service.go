@@ -182,8 +182,13 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 	unlock := s.lockBranch(postgres.HostLabel(name, srcName, owner))
 	defer unlock()
 
-	if _, err := s.Store.FindBranch(ctx, projectID, name, srcName, owner); err == nil {
-		return meta.BranchRecord{}, fmt.Errorf("branch_exists: %q already exists from %s", name, srcName)
+	if existing, err := s.Store.FindBranch(ctx, projectID, name, srcName, owner); err == nil {
+		if existing.Status != meta.StatusError && existing.Status != meta.StatusCreating {
+			return meta.BranchRecord{}, fmt.Errorf("branch_exists: %q already exists from %s", name, srcName)
+		}
+		if err := s.clearFailedBranch(ctx, existing); err != nil {
+			return meta.BranchRecord{}, err
+		}
 	}
 
 	running, _ := s.Compute.IsRunning(ctx, compute.Handle{Port: srcPort, DataDir: srcDir})
@@ -242,6 +247,18 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 	_, one := advertiseBranch(rec, s.sourceEngine(ctx, rec))
 	fmt.Println("  ", one)
 	return rec, nil
+}
+
+func (s *Service) clearFailedBranch(ctx context.Context, rec meta.BranchRecord) error {
+	h := compute.Handle{Provider: s.Compute.Name(), Name: s.instKey(rec), Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID}
+	_ = s.Compute.Stop(ctx, h)
+	if rec.DataDir != "" {
+		_ = s.Storage.Destroy(rec.DataDir)
+	}
+	if rec.SnapshotRef != "" {
+		_ = s.Storage.Destroy(rec.SnapshotRef)
+	}
+	return s.Store.DeleteBranch(ctx, rec.ID)
 }
 
 // resolveBranchSource picks the parent dataset for CoW.
@@ -443,7 +460,6 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 		Name: srcHandle.Name, DataDir: srcDir, Port: srcPort,
 		LogFile: s.logPath(srcHandle.Name), Bins: mongo.FindOnPath(), Password: srcPass,
 	}
-	mongoLocked := false
 
 	if useReplayPause {
 		fmt.Println("→ Step 0: replica lag check")
@@ -461,16 +477,14 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 		}
 		rec.SourceLSN = st.ReplayLSN
 	} else if engine.IsMongo(eng) {
-		fmt.Println("→ Step 1: fsyncLock mongod (+ cold stop if enabled)")
-		if s.ColdSnap {
-			if err := s.Compute.Stop(ctx, srcHandle); err != nil {
-				return err
-			}
-		} else {
-			if err := srcMongo.LockForSnapshot(); err != nil {
-				return fmt.Errorf("storage_failed: mongo fsyncLock: %w", err)
-			}
-			mongoLocked = true
+		// WiredTiger + ZFS/APFS clones need a clean dbPath. Authenticated
+		// shutdown (not a pid kill) so the snapshot is a consistent standalone.
+		fmt.Println("→ Step 1: stop mongod for CoW snapshot")
+		if err := srcMongo.Stop(); err != nil {
+			return fmt.Errorf("storage_failed: stop mongod: %w", err)
+		}
+		if err := srcMongo.WaitPortFree(20 * time.Second); err != nil {
+			return fmt.Errorf("storage_failed: %w", err)
 		}
 	} else {
 		fmt.Println("→ Step 1: CHECKPOINT (+ cold stop if enabled)")
@@ -487,30 +501,21 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	fmt.Println("→ Step 2: snapshot")
 	snapRef, err := s.Storage.Snapshot(srcDir, s.instKey(*rec))
 	if err != nil {
-		if mongoLocked {
-			_ = srcMongo.UnlockForSnapshot()
-		}
 		if useReplayPause {
 			_ = rm.ResumeReplay(ctx, "127.0.0.1", srcPort)
-		} else if s.ColdSnap {
+		} else if engine.IsMongo(eng) || s.ColdSnap {
 			_, _ = s.Compute.Start(ctx, srcSpec)
 		}
 		return fmt.Errorf("storage_failed: %w", err)
 	}
 	rec.SnapshotRef = snapRef
 
-	if mongoLocked {
-		fmt.Println("→ fsyncUnlock mongod")
-		if err := srcMongo.UnlockForSnapshot(); err != nil {
-			return fmt.Errorf("storage_failed: mongo fsyncUnlock: %w", err)
-		}
-	}
 	if useReplayPause {
 		fmt.Println("→ resume WAL replay on source")
 		if err := rm.ResumeReplay(ctx, "127.0.0.1", srcPort); err != nil {
 			return err
 		}
-	} else if s.ColdSnap {
+	} else if engine.IsMongo(eng) || s.ColdSnap {
 		fmt.Println("→ restart source")
 		if _, err := s.Compute.Start(ctx, srcSpec); err != nil {
 			return err

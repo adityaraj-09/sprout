@@ -14,7 +14,7 @@ Spin up independent database instances that start as near-instant clones of a pa
 
 | Capability | How |
 |------------|-----|
-| **CoW branches** | Snapshot + clone PGDATA (APFS `cp -c` on macOS; ZFS on Linux) |
+| **CoW branches** | Snapshot + clone Postgres PGDATA or Mongo `dbPath` (APFS `cp -c` on macOS; **ZFS** on Linux) |
 | **Control plane** | HTTP API + thin CLI; metadata in `data/control.db` |
 | **Lifecycle** | create / list / get / reset / delete / suspend / resume |
 | **Connectors** | Multiple named remotes; each gets its own local replica + port |

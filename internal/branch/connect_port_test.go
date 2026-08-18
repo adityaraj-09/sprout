@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/adityaraj/sprout/internal/engine"
@@ -67,6 +69,37 @@ func TestPrepareConnectorReallocatesBusyExistingPort(t *testing.T) {
 	}
 	if postgres.PortListening(c.Port) {
 		t.Fatalf("new port %d is listening", c.Port)
+	}
+}
+
+func TestClearFailedBranchAllowsRetry(t *testing.T) {
+	svc, proj := testService(t)
+	ctx := context.Background()
+	dir := filepath.Join(svc.Root, "branches", "feat-mongo")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rec := meta.BranchRecord{
+		ID: "failed", ProjectID: proj.ID, Name: "feat", Role: "branch",
+		Status: meta.StatusError, Port: 55499, DataDir: dir,
+		SourceConnector: "mongo", SourceConnectorID: "c-mongo", CreatedBy: "alice",
+		SnapshotRef: "sprout/data/replica-mongo@feat", ErrorMessage: "storage_failed",
+	}
+	if err := svc.Store.PutBranch(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.clearFailedBranch(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Store.GetBranchByID(ctx, "failed"); err == nil {
+		t.Fatal("failed branch record should be deleted")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal("failed branch datadir should be destroyed")
+	}
+	fc := svc.Compute.(*fakeCompute)
+	if len(fc.stopped) == 0 {
+		t.Fatal("expected leftover compute stop")
 	}
 }
 
