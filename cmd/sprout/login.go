@@ -93,9 +93,12 @@ func runLogout() error {
 func runWhoAmI(c *client) error {
 	file := cliconfig.Load()
 	var who struct {
-		Kind  string `json:"kind"`
-		Login string `json:"login"`
-		ID    int64  `json:"id"`
+		Kind  string    `json:"kind"`
+		Login string    `json:"login"`
+		ID    int64     `json:"id"`
+		Org   string    `json:"org"`
+		OrgID string    `json:"org_id"`
+		Orgs  []metaOrg `json:"orgs"`
 	}
 	if err := c.do("GET", "/v1/whoami", nil, &who); err != nil {
 		if file.GitHubLogin != "" {
@@ -104,8 +107,26 @@ func runWhoAmI(c *client) error {
 		}
 		return err
 	}
-	fmt.Printf("%s %s\n", who.Kind, who.Login)
+	fmt.Printf("%s %s", who.Kind, who.Login)
+	if who.Org != "" {
+		fmt.Printf(" org=%s", who.Org)
+	}
+	fmt.Println()
+	for _, o := range who.Orgs {
+		role := o.Role
+		if role == "" {
+			role = "-"
+		}
+		fmt.Printf("  %-16s %-8s %s\n", o.Name, role, o.ID)
+	}
 	return nil
+}
+
+type metaOrg struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CreatedBy string `json:"created_by"`
+	Role      string `json:"role"`
 }
 
 func fetchGitHubAuthMeta(ctx context.Context, serverURL string) (githubAuthMeta, error) {

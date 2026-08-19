@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/adityaraj/sprout/internal/auth"
+	"github.com/adityaraj/sprout/internal/meta"
 )
 
 func (s *Server) auth(next http.Handler) http.Handler {
@@ -91,9 +92,19 @@ func (s *Server) handleAuthGitHub(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 	a := auth.ActorFrom(r.Context())
+	var orgs []meta.Org
+	if s.Service != nil {
+		orgs, _ = s.Service.ListOrgs(r.Context())
+	}
+	if orgs == nil {
+		orgs = []meta.Org{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"kind":  a.Kind,
-		"login": a.Login,
-		"id":    a.ID,
+		"kind":   a.Kind,
+		"login":  a.Login,
+		"id":     a.ID,
+		"org":    auth.OrgNameFrom(r.Context()),
+		"org_id": auth.OrgIDFrom(r.Context()),
+		"orgs":   orgs,
 	})
 }

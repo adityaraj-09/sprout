@@ -4,6 +4,28 @@ export type Project = {
   created_at: string;
 };
 
+export type Org = {
+  id: string;
+  name: string;
+  created_by: string;
+  created_at: string;
+  role?: string;
+};
+
+export type OrgMember = {
+  org_id: string;
+  login: string;
+  role: string;
+  added_by?: string;
+  created_at: string;
+};
+
+export type OrgList = {
+  orgs: Org[];
+  current_org?: string;
+  current_id?: string;
+};
+
 export type BranchRecord = {
   id: string;
   project_id: string;
@@ -23,6 +45,7 @@ export type BranchRecord = {
   source_connector?: string;
   source_connector_id?: string;
   created_by?: string;
+  org_id?: string;
   created_at: string;
   updated_at: string;
   last_used_at: string;
@@ -42,6 +65,7 @@ export type Connector = {
   last_lsn?: string;
   last_lag_bytes: number;
   created_by?: string;
+  org_id?: string;
   created_at: string;
   updated_at: string;
 };
@@ -97,6 +121,17 @@ export type ReplicationStatus = {
   lag: Record<string, unknown>;
 };
 
+export type WhoAmI = {
+  kind: string;
+  login: string;
+  id?: number;
+  org?: string;
+  org_id?: string;
+  orgs?: Org[];
+};
+
+export type ProgressHandler = (message: string) => void;
+
 export type SproutClientOptions = {
   /**
    * sprout-server API base URL.
@@ -109,6 +144,11 @@ export type SproutClientOptions = {
   token?: string;
   /** Default project path segment (default "default") */
   project?: string;
+  /**
+   * Current org name or id (sent as X-Sprout-Org).
+   * GitHub users default to "default". Machine tokens omit the header unless set.
+   */
+  org?: string;
   /** Request timeout in ms (default 60 minutes for long connects) */
   timeoutMs?: number;
   /** Skip reading ~/.sprout/config.json */

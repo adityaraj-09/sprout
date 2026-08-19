@@ -34,13 +34,19 @@ func New(svc *branch.Service, token string) *Server {
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.auth(s.Mux)
+	return s.auth(s.withOrg(s.Mux))
 }
 
 func (s *Server) routes() {
 	s.Mux.HandleFunc("GET /healthz", s.handleHealth)
 	s.Mux.HandleFunc("GET /v1/auth/github", s.handleAuthGitHub)
 	s.Mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
+	s.Mux.HandleFunc("GET /v1/orgs", s.handleListOrgs)
+	s.Mux.HandleFunc("POST /v1/orgs", s.handleCreateOrg)
+	s.Mux.HandleFunc("DELETE /v1/orgs/{org}", s.handleDeleteOrg)
+	s.Mux.HandleFunc("GET /v1/orgs/{org}/members", s.handleListOrgMembers)
+	s.Mux.HandleFunc("POST /v1/orgs/{org}/members", s.handleAddOrgMember)
+	s.Mux.HandleFunc("DELETE /v1/orgs/{org}/members/{login}", s.handleRemoveOrgMember)
 	s.Mux.HandleFunc("GET /v1/doctor", s.handleDoctor)
 	s.Mux.HandleFunc("POST /v1/init", s.handleInit)
 	s.Mux.HandleFunc("GET /v1/connectors", s.handleListConnectors)
@@ -137,6 +143,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if body.Wipe != nil {
 		wipe = *body.Wipe
 	}
+	r, streamed := withProgress(w, r)
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Minute)
 	defer cancel()
 	res, err := s.Service.Connect(ctx, proj.ID, branch.ConnectOpts{
@@ -144,12 +151,11 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		Wipe: wipe, DryRun: body.DryRun, Tables: body.Tables,
 	})
 	if err != nil {
-		code, status := mapErr(err)
-		writeErr(w, status, code, err.Error())
+		writeProgressErr(w, streamed, err)
 		return
 	}
 	if res.DryRun {
-		writeJSON(w, http.StatusOK, map[string]any{
+		writeProgressResult(w, streamed, http.StatusOK, map[string]any{
 			"dry_run":  true,
 			"estimate": res.Estimate,
 			"project":  proj,
@@ -173,7 +179,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 			out["psql"] = postgres.PsqlOneLiner(res.Connector.Port, res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeProgressResult(w, streamed, http.StatusOK, out)
 }
 
 func (s *Server) handleDeleteConnector(w http.ResponseWriter, r *http.Request) {
@@ -277,12 +283,12 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_body", `JSON {"name":"...","from":"connector-name"} required`)
 		return
 	}
+	r, streamed := withProgress(w, r)
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 	rec, err := s.Service.Create(ctx, proj.ID, body.Name, body.From)
 	if err != nil {
-		code, status := mapErr(err)
-		writeErr(w, status, code, err.Error())
+		writeProgressErr(w, streamed, err)
 		return
 	}
 	out := map[string]any{
@@ -290,14 +296,14 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 		"port": rec.Port, "data_dir": rec.DataDir, "snapshot_ref": rec.SnapshotRef, "container_id": rec.ContainerID,
 		"compute": rec.Compute, "connection_string": rec.ConnString, "error_message": rec.ErrorMessage,
 		"source_lsn": rec.SourceLSN, "source_connector": rec.SourceConnector, "source_connector_id": rec.SourceConnectorID,
-		"created_by": rec.CreatedBy, "created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "last_used_at": rec.LastUsedAt,
+		"created_by": rec.CreatedBy, "org_id": rec.OrgID, "created_at": rec.CreatedAt, "updated_at": rec.UpdatedAt, "last_used_at": rec.LastUsedAt,
 	}
 	if strings.HasPrefix(rec.ConnString, "mongodb") {
 		out["mongosh"] = mongo.MongoshOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
 	} else {
 		out["psql"] = postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
 	}
-	writeJSON(w, http.StatusCreated, out)
+	writeProgressResult(w, streamed, http.StatusCreated, out)
 }
 
 func (s *Server) handleDiffBranch(w http.ResponseWriter, r *http.Request) {
@@ -422,8 +428,14 @@ func mapErr(err error) (code string, status int) {
 		return "connector_required", http.StatusBadRequest
 	case strings.HasPrefix(msg, "connector_has_branches"):
 		return "connector_has_branches", http.StatusConflict
-	case strings.HasPrefix(msg, "connector_exists"):
-		return "connector_exists", http.StatusConflict
+	case strings.HasPrefix(msg, "org_exists"):
+		return "org_exists", http.StatusConflict
+	case strings.HasPrefix(msg, "org_not_found"), strings.HasPrefix(msg, "ambiguous_org"):
+		return "org_not_found", http.StatusNotFound
+	case strings.HasPrefix(msg, "org_has_connectors"):
+		return "org_has_connectors", http.StatusConflict
+	case strings.HasPrefix(msg, "member_not_found"):
+		return "member_not_found", http.StatusNotFound
 	case strings.HasPrefix(msg, "invalid_mode"):
 		return "invalid_mode", http.StatusBadRequest
 	case strings.HasPrefix(msg, "invalid_engine"):

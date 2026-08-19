@@ -44,6 +44,7 @@ type BranchRecord struct {
 	SourceConnectorID string    `json:"source_connector_id,omitempty"`
 	Password          string    `json:"-"`
 	CreatedBy         string    `json:"created_by,omitempty"`
+	OrgID             string    `json:"org_id,omitempty"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 	LastUsedAt        time.Time `json:"last_used_at"`
@@ -71,8 +72,32 @@ type Connector struct {
 	LastLagBytes int64     `json:"last_lag_bytes"`
 	Password     string    `json:"-"`
 	CreatedBy    string    `json:"created_by,omitempty"`
+	OrgID        string    `json:"org_id,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+const (
+	OrgRoleOwner  = "owner"
+	OrgRoleMember = "member"
+	DefaultOrg    = "default"
+)
+
+// Org is a team namespace. Connectors are org-scoped; replica dirs stay creator-owned.
+type Org struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+	Role      string    `json:"role,omitempty"` // membership role for the caller
+}
+
+type OrgMember struct {
+	OrgID     string    `json:"org_id"`
+	Login     string    `json:"login"`
+	Role      string    `json:"role"`
+	AddedBy   string    `json:"added_by,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Store is the control-plane notebook.
@@ -99,6 +124,17 @@ type Store interface {
 	ListConnectorsByProject(ctx context.Context, projectID string) ([]Connector, error)
 	UpdateConnector(ctx context.Context, c Connector) error
 	DeleteConnector(ctx context.Context, id string) error
+	GetConnectorByNameInOrg(ctx context.Context, projectID, name, orgID string) (Connector, error)
+
+	EnsureDefaultOrg(ctx context.Context, login string) (Org, error)
+	CreateOrg(ctx context.Context, login, name string) (Org, error)
+	GetOrg(ctx context.Context, id string) (Org, error)
+	ListOrgs(ctx context.Context, login string) ([]Org, error)
+	DeleteOrg(ctx context.Context, id string) error
+	AddOrgMember(ctx context.Context, m OrgMember) error
+	RemoveOrgMember(ctx context.Context, orgID, login string) error
+	ListOrgMembers(ctx context.Context, orgID string) ([]OrgMember, error)
+	GetOrgMember(ctx context.Context, orgID, login string) (OrgMember, error)
 
 	Close() error
 }

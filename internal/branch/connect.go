@@ -14,6 +14,7 @@ import (
 	"github.com/adityaraj/sprout/internal/meta"
 	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
+	"github.com/adityaraj/sprout/internal/progress"
 	"github.com/adityaraj/sprout/internal/replica"
 	"github.com/google/uuid"
 )
@@ -44,6 +45,9 @@ type ConnectResult struct {
 
 // Connect bootstraps a named local replica from an upstream database.
 func (s *Service) Connect(ctx context.Context, projectID string, opts ConnectOpts) (ConnectResult, error) {
+	if err := s.requireOrgOwner(ctx); err != nil {
+		return ConnectResult{}, err
+	}
 	if opts.Engine == "" {
 		opts.Engine = engine.InferFromURL(opts.URL)
 	}
@@ -113,7 +117,7 @@ func (s *Service) connectPhysical(ctx context.Context, projectID, name, primaryU
 		return meta.Connector{}, replica.Lag{}, err
 	}
 
-	fmt.Println("=== connect physical ===")
+	progress.Println(ctx, "=== connect physical ===")
 	fmt.Printf("  name=%s port=%d dir=%s\n", c.Name, c.Port, c.DataDir)
 	fmt.Printf("  primary: %s:%d user=%s\n", conn.Host, conn.Port, conn.User)
 
@@ -195,7 +199,7 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 	pub := pubName(c)
 	sub := subName(c)
 
-	fmt.Println("=== connect logical ===")
+	progress.Println(ctx, "=== connect logical ===")
 	fmt.Printf("  name=%s port=%d dir=%s pub=%s wipe=%v\n", c.Name, c.Port, c.DataDir, pub, opts.Wipe)
 	fmt.Printf("  primary: %s:%d user=%s sslmode=%s\n", conn.Host, conn.Port, conn.User, conn.SSLMode)
 	if len(opts.Tables) > 0 {
@@ -212,7 +216,7 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 
 	if needBootstrap {
 		if seed, ok := s.findSeedReplica(ctx, projectID, opts.URL, c.ID); ok {
-			fmt.Println("→ cloning existing local replica of this primary (no extra prod slot)")
+			progress.Println(ctx, "→ cloning existing local replica of this primary (no extra prod slot)")
 			cloned, lag, err := s.cloneConnectorFromLocal(ctx, projectID, c, seed, conn)
 			if err != nil {
 				return ConnectResult{}, err
@@ -222,7 +226,7 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 			return ConnectResult{Connector: &cloned, Lag: &lag}, nil
 		}
 
-		fmt.Println("→ ensure publication on primary (hits prod)")
+		progress.Println(ctx, "→ ensure publication on primary (hits prod)")
 		if err := rm.EnsurePublication(ctx, conn, pub, "public", opts.Tables); err != nil {
 			_, _, e := s.failConnector(ctx, c, fmt.Errorf("publication: %w", err))
 			return ConnectResult{}, e
@@ -244,7 +248,7 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 			Name: c.Name, Owner: c.CreatedBy, DataDir: c.DataDir, Port: c.Port,
 			LogFile: s.logPath(postgres.ReplicaComputeName(c.Name, c.CreatedBy)), Bins: s.Bins, Password: c.Password,
 		}
-		fmt.Println("→ initdb local replica (subscriber)")
+		progress.Println(ctx, "→ initdb local replica (subscriber)")
 		if err := inst.Init(); err != nil {
 			_, _, e := s.failConnector(ctx, c, err)
 			return ConnectResult{}, e
@@ -267,7 +271,7 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 			return ConnectResult{}, e
 		}
 	} else {
-		fmt.Println("→ resume existing replica (--no-wipe)")
+		progress.Println(ctx, "→ resume existing replica (--no-wipe)")
 		if err := s.Storage.EnsureVolume(c.DataDir); err != nil {
 			_, _, e := s.failConnector(ctx, c, err)
 			return ConnectResult{}, e
@@ -333,7 +337,7 @@ func (s *Service) connectMongoLogical(ctx context.Context, projectID string, opt
 		return ConnectResult{}, err
 	}
 
-	fmt.Println("=== connect mongodb (dump snapshot, no oplog) ===")
+	progress.Println(ctx, "=== connect mongodb (dump snapshot, no oplog) ===")
 	fmt.Printf("  name=%s port=%d dir=%s wipe=%v\n", c.Name, c.Port, c.DataDir, opts.Wipe)
 	fmt.Printf("  primary: %s:%d user=%s db=%s\n", conn.Host, conn.Port, conn.User, conn.Database)
 	if len(opts.Tables) > 0 {
@@ -365,7 +369,7 @@ func (s *Service) connectMongoLogical(ctx context.Context, projectID string, opt
 			Name: c.Name, Owner: c.CreatedBy, DataDir: c.DataDir, Port: c.Port,
 			LogFile: s.logPath(postgres.ReplicaComputeName(c.Name, c.CreatedBy)), Bins: bins, Password: c.Password,
 		}
-		fmt.Println("→ init local mongod (standalone)")
+		progress.Println(ctx, "→ init local mongod (standalone)")
 		if err := inst.Init(); err != nil {
 			_, _, e := s.failConnector(ctx, c, err)
 			return ConnectResult{}, e
@@ -377,7 +381,7 @@ func (s *Service) connectMongoLogical(ctx context.Context, projectID string, opt
 			_, _, e := s.failConnector(ctx, c, err)
 			return ConnectResult{}, e
 		}
-		fmt.Println("→ mongodump → mongorestore")
+		progress.Println(ctx, "→ mongodump → mongorestore")
 		if err := bins.DumpImport(ctx, conn, inst, opts.Tables); err != nil {
 			_, _, e := s.failConnector(ctx, c, err)
 			return ConnectResult{}, e
@@ -387,7 +391,7 @@ func (s *Service) connectMongoLogical(ctx context.Context, projectID string, opt
 			return ConnectResult{}, e
 		}
 	} else {
-		fmt.Println("→ resume existing replica (--no-wipe)")
+		progress.Println(ctx, "→ resume existing replica (--no-wipe)")
 		if err := s.Storage.EnsureVolume(c.DataDir); err != nil {
 			_, _, e := s.failConnector(ctx, c, err)
 			return ConnectResult{}, e
@@ -527,6 +531,9 @@ func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, p
 		existing.ErrorMessage = ""
 		existing.DataDir = dataDir
 		existing.CreatedBy = owner
+		if existing.OrgID == "" {
+			existing.OrgID = auth.OrgIDFrom(ctx)
+		}
 		if existing.Password == "" {
 			existing.Password = postgres.GeneratePassword()
 		}
@@ -554,6 +561,7 @@ func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, p
 		Status: meta.ConnectorBootstrapping, DataDir: dataDir, Port: port,
 		Password:  postgres.GeneratePassword(),
 		CreatedBy: owner,
+		OrgID:     auth.OrgIDFrom(ctx),
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := s.Store.PutConnector(ctx, c); err != nil {
@@ -754,6 +762,9 @@ func (s *Service) ReplicationStatus(ctx context.Context, projectID, name string)
 // DeleteConnector stops the local replica, drops logical pub/sub when possible, and removes metadata.
 // Child branches block the delete unless force is set (then they are destroyed first).
 func (s *Service) DeleteConnector(ctx context.Context, projectID, name string, force bool) error {
+	if err := s.requireOrgOwner(ctx); err != nil {
+		return err
+	}
 	unlock, err := s.lockBranch(ctx, s.connectorLockKey(name, auth.OwnerFrom(ctx)))
 	if err != nil {
 		return err

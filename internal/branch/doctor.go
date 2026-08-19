@@ -7,8 +7,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/adityaraj/sprout/internal/auth"
+	"github.com/adityaraj/sprout/internal/meta"
 	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
 )
@@ -163,11 +167,7 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 		add(DoctorCheck{Name: "control_plane", OK: true, Level: "info", Detail: "readable"})
 	}
 
-	// Connectors summary
-	if list, err := s.ListConnectors(ctx); err == nil {
-		add(DoctorCheck{Name: "connectors", OK: true, Level: "info",
-			Detail: fmt.Sprintf("%d configured", len(list))})
-	}
+	s.doctorInventory(ctx, add)
 
 	// GitHub device-flow login
 	gh := auth.FromEnv()
@@ -218,4 +218,231 @@ func storageHint(name string) string {
 	default:
 		return ""
 	}
+}
+
+const hungAfter = 10 * time.Minute
+
+func (s *Service) doctorInventory(ctx context.Context, add func(DoctorCheck)) {
+	orgs, err := s.Store.ListOrgs(ctx, auth.OwnerFrom(ctx))
+	if err != nil {
+		add(DoctorCheck{Name: "orgs", OK: false, Level: "warn", Detail: err.Error()})
+	} else {
+		add(DoctorCheck{Name: "orgs", OK: true, Level: "info",
+			Detail: fmt.Sprintf("%d visible", len(orgs))})
+	}
+
+	cons, err := s.ListConnectors(ctx)
+	if err != nil {
+		add(DoctorCheck{Name: "connectors", OK: false, Level: "warn", Detail: err.Error()})
+		cons = nil
+	} else {
+		add(DoctorCheck{Name: "connectors", OK: true, Level: "info",
+			Detail: fmt.Sprintf("%d configured (%s)", len(cons), countByStatus(connectorStatuses(cons)))})
+	}
+
+	allBranches, err := s.Store.ListAllBranches(ctx)
+	if err != nil {
+		add(DoctorCheck{Name: "branches", OK: false, Level: "warn", Detail: err.Error()})
+		allBranches = nil
+	}
+	branches := s.filterBranchesForActor(ctx, allBranches)
+	add(DoctorCheck{Name: "branches", OK: true, Level: "info",
+		Detail: fmt.Sprintf("%d configured (%s)", len(branches), countByStatus(branchStatuses(branches)))})
+
+	hung := hungJobs(cons, branches, hungAfter)
+	if len(hung) == 0 {
+		add(DoctorCheck{Name: "hung_jobs", OK: true, Level: "info", Detail: "none"})
+	} else {
+		add(DoctorCheck{Name: "hung_jobs", OK: false, Level: "warn",
+			Detail: strings.Join(hung, "; "),
+			Hint:   "creating/deleting/bootstrapping older than 10m — inspect logs and retry or delete"})
+	}
+
+	root := s.Root
+	size, newest, walkErr := dirStats(root)
+	if walkErr != nil {
+		add(DoctorCheck{Name: "disk", OK: false, Level: "warn", Detail: walkErr.Error()})
+	} else {
+		add(DoctorCheck{Name: "disk", OK: true, Level: "info",
+			Detail: fmt.Sprintf("%s in %s (newest mtime %s)", humanBytes(size), root, newest.UTC().Format(time.RFC3339))})
+	}
+
+	known := map[string]struct{}{}
+	for _, c := range cons {
+		if c.DataDir != "" {
+			known[filepath.Clean(c.DataDir)] = struct{}{}
+		}
+	}
+	for _, b := range branches {
+		if b.DataDir != "" {
+			known[filepath.Clean(b.DataDir)] = struct{}{}
+		}
+	}
+
+	var missing []string
+	now := time.Now()
+	for _, c := range cons {
+		if c.DataDir == "" {
+			continue
+		}
+		st, err := os.Stat(c.DataDir)
+		if err != nil {
+			missing = append(missing, fmt.Sprintf("connector %s:%s", c.Name, c.DataDir))
+			continue
+		}
+		age := now.Sub(st.ModTime()).Truncate(time.Second)
+		add(DoctorCheck{Name: "data_dir:" + c.Name, OK: true, Level: "info",
+			Detail: fmt.Sprintf("connector %s age=%s status=%s", c.DataDir, age, c.Status)})
+	}
+	for _, b := range branches {
+		if b.DataDir == "" || b.Role != "branch" {
+			continue
+		}
+		st, err := os.Stat(b.DataDir)
+		if err != nil {
+			missing = append(missing, fmt.Sprintf("branch %s:%s", b.Name, b.DataDir))
+			continue
+		}
+		age := now.Sub(st.ModTime()).Truncate(time.Second)
+		add(DoctorCheck{Name: "data_dir:" + b.Name, OK: true, Level: "info",
+			Detail: fmt.Sprintf("branch %s age=%s status=%s", b.DataDir, age, b.Status)})
+	}
+
+	var orphans []string
+	for _, sub := range []string{"replicas", "branches"} {
+		entries, err := os.ReadDir(filepath.Join(root, sub))
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			p := filepath.Clean(filepath.Join(root, sub, e.Name()))
+			if _, ok := known[p]; !ok {
+				orphans = append(orphans, filepath.Join(sub, e.Name()))
+			}
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(orphans)
+	switch {
+	case len(missing) == 0 && len(orphans) == 0:
+		add(DoctorCheck{Name: "disk_mismatch", OK: true, Level: "info", Detail: "control plane matches data dirs"})
+	default:
+		detail := fmt.Sprintf("missing=%d orphan=%d", len(missing), len(orphans))
+		if len(missing) > 0 {
+			detail += "; missing: " + strings.Join(missing, ", ")
+		}
+		if len(orphans) > 0 {
+			detail += "; orphan: " + strings.Join(orphans, ", ")
+		}
+		add(DoctorCheck{Name: "disk_mismatch", OK: true, Level: "warn", Detail: detail,
+			Hint: "orphan dirs are not in control.db; missing dirs were recorded but deleted on disk"})
+	}
+}
+
+func connectorStatuses(list []meta.Connector) []string {
+	out := make([]string, 0, len(list))
+	for _, c := range list {
+		out = append(out, c.Status)
+	}
+	return out
+}
+
+func branchStatuses(list []meta.BranchRecord) []string {
+	out := make([]string, 0, len(list))
+	for _, b := range list {
+		out = append(out, b.Status)
+	}
+	return out
+}
+
+func countByStatus(statuses []string) string {
+	if len(statuses) == 0 {
+		return "none"
+	}
+	n := map[string]int{}
+	var keys []string
+	for _, s := range statuses {
+		if s == "" {
+			s = "unknown"
+		}
+		if n[s] == 0 {
+			keys = append(keys, s)
+		}
+		n[s]++
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", k, n[k]))
+	}
+	return strings.Join(parts, " ")
+}
+
+func hungJobs(cons []meta.Connector, branches []meta.BranchRecord, maxAge time.Duration) []string {
+	now := time.Now()
+	var out []string
+	for _, c := range cons {
+		if !isHungStatus(c.Status) {
+			continue
+		}
+		if now.Sub(c.UpdatedAt) < maxAge || c.UpdatedAt.IsZero() {
+			continue
+		}
+		out = append(out, fmt.Sprintf("connector %s %s for %s", c.Name, c.Status, now.Sub(c.UpdatedAt).Truncate(time.Second)))
+	}
+	for _, b := range branches {
+		if !isHungStatus(b.Status) {
+			continue
+		}
+		if now.Sub(b.UpdatedAt) < maxAge || b.UpdatedAt.IsZero() {
+			continue
+		}
+		out = append(out, fmt.Sprintf("branch %s %s for %s", b.Name, b.Status, now.Sub(b.UpdatedAt).Truncate(time.Second)))
+	}
+	return out
+}
+
+func isHungStatus(status string) bool {
+	switch status {
+	case meta.StatusCreating, meta.StatusDeleting, meta.StatusResetting, meta.ConnectorBootstrapping:
+		return true
+	default:
+		return false
+	}
+}
+
+func dirStats(root string) (size int64, newest time.Time, err error) {
+	err = filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+		if !info.IsDir() {
+			size += info.Size()
+		}
+		return nil
+	})
+	if newest.IsZero() {
+		newest = time.Now()
+	}
+	return size, newest, err
+}
+
+func humanBytes(n int64) string {
+	if n < 1024 {
+		return fmt.Sprintf("%dB", n)
+	}
+	f := float64(n)
+	for _, unit := range []string{"KiB", "MiB", "GiB", "TiB"} {
+		f /= 1024
+		if f < 1024 {
+			return fmt.Sprintf("%.1f%s", f, unit)
+		}
+	}
+	return fmt.Sprintf("%.1fPiB", f/1024)
 }

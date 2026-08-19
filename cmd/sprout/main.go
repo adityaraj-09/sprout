@@ -2,10 +2,8 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,12 +15,16 @@ import (
 )
 
 func main() {
+	orgFlag := peelOrg()
 	cfg := config.CLIDefaults()
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
 	}
-	c := &client{base: strings.TrimRight(cfg.ServerURL, "/"), token: cfg.Token, http: &http.Client{Timeout: 60 * time.Minute}}
+	c := &client{
+		base: strings.TrimRight(cfg.ServerURL, "/"), token: cfg.Token, org: resolveOrg(orgFlag),
+		http: &http.Client{Timeout: 60 * time.Minute},
+	}
 
 	switch os.Args[1] {
 	case "login":
@@ -35,6 +37,10 @@ func main() {
 		}
 	case "whoami":
 		if err := runWhoAmI(c); err != nil {
+			fatal(err)
+		}
+	case "org":
+		if err := runOrg(c, os.Args[2:]); err != nil {
 			fatal(err)
 		}
 	case "init":
@@ -139,7 +145,7 @@ func main() {
 			body["tables"] = tables
 		}
 		var out map[string]any
-		if err := c.do("POST", "/v1/projects/default/connect", body, &out); err != nil {
+		if err := c.doProgress("POST", "/v1/projects/default/connect", body, &out); err != nil {
 			fatal(err)
 		}
 		if dry, _ := out["dry_run"].(bool); dry {
@@ -268,7 +274,7 @@ func main() {
 			if from != "" {
 				body["from"] = from
 			}
-			if err := c.do("POST", "/v1/projects/default/branches", body, &rec); err != nil {
+			if err := c.doProgress("POST", "/v1/projects/default/branches", body, &rec); err != nil {
 				fatal(err)
 			}
 			src, _ := rec["source_connector"].(string)
@@ -390,51 +396,6 @@ func main() {
 	}
 }
 
-type client struct {
-	base, token string
-	http        *http.Client
-}
-
-func (c *client) do(method, path string, body any, out any) error {
-	var rdr io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		rdr = bytes.NewReader(b)
-	}
-	req, err := http.NewRequest(method, c.base+path, rdr)
-	if err != nil {
-		return err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	res, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("server unreachable (%s): %w\nStart it with: ./bin/sprout-server", c.base, err)
-	}
-	defer res.Body.Close()
-	data, _ := io.ReadAll(res.Body)
-	if res.StatusCode >= 400 {
-		var er struct {
-			Error   string `json:"error"`
-			Message string `json:"message"`
-		}
-		_ = json.Unmarshal(data, &er)
-		if er.Message == "" {
-			er.Message = string(data)
-		}
-		return fmt.Errorf("%s: %s", er.Error, er.Message)
-	}
-	if out == nil || res.StatusCode == http.StatusNoContent || len(data) == 0 {
-		return nil
-	}
-	return json.Unmarshal(data, out)
-}
-
 func need(n int) {
 	if len(os.Args) < n {
 		usage()
@@ -464,16 +425,25 @@ func branchURL(name, from, extra string) string {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `sprout — Phase 2/3 CLI (talks to sprout-server)
+	fmt.Fprintf(os.Stderr, `sprout — CLI (talks to sprout-server)
 
 Usage:
+  sprout [--org=<name>] <command> ...
+
   sprout login              GitHub device flow (opens a browser)
   sprout logout
   sprout whoami
   sprout doctor
+  sprout org list
+  sprout org create <name>
+  sprout org use <name-or-id>
+  sprout org delete <name-or-id>
+  sprout org members list [org]
+  sprout org members add <github-login>
+  sprout org members remove <github-login>
   sprout init
   sprout connect [--name=<id>] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
-                                  engine         = infer from URL (mongodb:// → mongodb)
+                                  engine         = infer from URL (mongodb:// / mongodb+srv:// → mongodb)
                                   wipe (default) = destroy local replica and rebootstrap
                                   --no-wipe      = resume existing replica when possible
                                   --dry-run      = estimate tables/rows (logical only)
@@ -496,12 +466,18 @@ Usage:
   sprout branch resume <name> [--from=<connector>]
 
   Same branch name is allowed on two connectors (testdb from lab vs testdb from
-  supabase). Hosts are testdb-lab.<host> vs testdb-supabase.<host>. Pass --from
+  supabase). Hosts are testdb-<github>-<connector>.<host>. Pass --from
   when the name is ambiguous.
+
+  Connectors are org-scoped. GitHub login creates a personal org named default.
+  Add teammates with sprout org members add <login> — they share the same replica
+  dir (no second copy). Owners can connect/wipe/delete connectors; members can
+  create/reset/delete only their own branches.
 
 Env:
   SPROUT_SERVER  default http://127.0.0.1:8080 (or apiUrl in ~/.sprout/config.json)
   SPROUT_TOKEN   overrides the token saved by sprout login
+  SPROUT_ORG     current org (or org in ~/.sprout/config.json / sprout org use)
   SPROUT_CONFIG  path to config.json (default ~/.sprout/config.json)
   SPROUT_DB_USER default sprout (advertised in connection strings)
 

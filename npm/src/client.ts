@@ -4,10 +4,15 @@ import {
   ConnectResult,
   Connector,
   DoctorReport,
+  Org,
+  OrgList,
+  OrgMember,
+  ProgressHandler,
   Project,
   ReplicationStatus,
   SproutClientOptions,
   SproutError,
+  WhoAmI,
 } from "./types.js";
 import { loadConfig } from "./config.js";
 import type { GitHubAuthMeta } from "./github.js";
@@ -16,6 +21,7 @@ export class SproutClient {
   readonly baseUrl: string;
   readonly token: string;
   readonly project: string;
+  readonly org: string;
   readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
 
@@ -29,6 +35,12 @@ export class SproutClient {
     );
     this.token = resolveToken(opts.token ?? process.env.SPROUT_TOKEN ?? file.token, this.baseUrl);
     this.project = opts.project ?? process.env.SPROUT_PROJECT ?? file.project ?? "default";
+    this.org = (
+      opts.org ??
+      process.env.SPROUT_ORG ??
+      file.org ??
+      (file.githubLogin ? "default" : "")
+    ).trim();
     this.timeoutMs = opts.timeoutMs ?? 60 * 60 * 1000;
     this.fetchImpl = opts.fetch ?? fetch;
   }
@@ -45,8 +57,35 @@ export class SproutClient {
     return this.request("GET", "/v1/auth/github");
   }
 
-  async whoami(): Promise<{ kind: string; login: string; id?: number }> {
+  async whoami(): Promise<WhoAmI> {
     return this.request("GET", "/v1/whoami");
+  }
+
+  async listOrgs(): Promise<OrgList> {
+    return this.request("GET", "/v1/orgs");
+  }
+
+  async createOrg(name: string): Promise<Org> {
+    return this.request("POST", "/v1/orgs", { name });
+  }
+
+  async deleteOrg(name: string): Promise<void> {
+    await this.request("DELETE", `/v1/orgs/${encodeURIComponent(name)}`);
+  }
+
+  async listOrgMembers(org = this.org || "default"): Promise<OrgMember[]> {
+    return this.request("GET", `/v1/orgs/${encodeURIComponent(org)}/members`);
+  }
+
+  async addOrgMember(login: string, org = this.org || "default"): Promise<OrgMember> {
+    return this.request("POST", `/v1/orgs/${encodeURIComponent(org)}/members`, { login });
+  }
+
+  async removeOrgMember(login: string, org = this.org || "default"): Promise<void> {
+    await this.request(
+      "DELETE",
+      `/v1/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(login)}`,
+    );
   }
 
   async init(): Promise<Project> {
@@ -69,16 +108,22 @@ export class SproutClient {
     wipe?: boolean;
     dryRun?: boolean;
     tables?: string[];
+    onProgress?: ProgressHandler;
   }): Promise<ConnectResult> {
-    return this.request("POST", `/v1/projects/${this.project}/connect`, {
-      url: opts.url,
-      name: opts.name ?? "primary",
-      engine: opts.engine,
-      mode: opts.mode,
-      wipe: opts.wipe ?? true,
-      dry_run: opts.dryRun ?? false,
-      tables: opts.tables,
-    });
+    return this.request(
+      "POST",
+      `/v1/projects/${this.project}/connect`,
+      {
+        url: opts.url,
+        name: opts.name ?? "primary",
+        engine: opts.engine,
+        mode: opts.mode,
+        wipe: opts.wipe ?? true,
+        dry_run: opts.dryRun ?? false,
+        tables: opts.tables,
+      },
+      { progress: true, onProgress: opts.onProgress },
+    );
   }
 
   async deleteConnector(name: string, opts?: { force?: boolean }): Promise<void> {
@@ -121,10 +166,17 @@ export class SproutClient {
     return this.request("GET", `/v1/projects/${this.project}/replication`);
   }
 
-  async createBranch(name: string, from?: string): Promise<BranchRecord & { psql?: string }> {
+  async createBranch(
+    name: string,
+    from?: string,
+    opts?: { onProgress?: ProgressHandler },
+  ): Promise<BranchRecord & { psql?: string; mongosh?: string }> {
     const body: Record<string, string> = { name };
     if (from) body.from = from;
-    return this.request("POST", `/v1/projects/${this.project}/branches`, body);
+    return this.request("POST", `/v1/projects/${this.project}/branches`, body, {
+      progress: true,
+      onProgress: opts?.onProgress,
+    });
   }
 
   async diffBranch(name: string, from?: string): Promise<BranchDiff> {
@@ -161,21 +213,32 @@ export class SproutClient {
     return path;
   }
 
+  private headers(extra?: Record<string, string>): Record<string, string> {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.token}`,
+      ...extra,
+    };
+    if (this.org) headers["X-Sprout-Org"] = this.org;
+    return headers;
+  }
+
   private async request<T = unknown>(
     method: string,
     path: string,
     body?: unknown,
+    opts?: { progress?: boolean; onProgress?: ProgressHandler },
   ): Promise<T> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
     try {
-      const headers: Record<string, string> = {
-        Authorization: `Bearer ${this.token}`,
-      };
+      const headers = this.headers();
       let payload: string | undefined;
       if (body !== undefined) {
         headers["Content-Type"] = "application/json";
         payload = JSON.stringify(body);
+      }
+      if (opts?.progress) {
+        headers.Accept = "application/x-ndjson";
       }
       const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
         method,
@@ -183,6 +246,9 @@ export class SproutClient {
         body: payload,
         signal: ctrl.signal,
       });
+      if (opts?.progress && (res.headers.get("content-type") || "").includes("ndjson")) {
+        return await readNdjson<T>(res, opts.onProgress);
+      }
       if (res.status === 204) {
         return undefined as T;
       }
@@ -218,6 +284,82 @@ export class SproutClient {
     } finally {
       clearTimeout(timer);
     }
+  }
+}
+
+async function readNdjson<T>(res: Response, onProgress?: ProgressHandler): Promise<T> {
+  if (!res.body) {
+    throw new SproutError("http_error", "empty progress stream", res.status);
+  }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let result: T | undefined;
+  let streamErr: SproutError | undefined;
+  while (true) {
+    const { done, value } = await reader.read();
+    buf += dec.decode(value, { stream: !done });
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const line of lines) {
+      handleNdjsonLine(line, {
+        onProgress,
+        status: res.status,
+        setResult: (v) => {
+          result = v as T;
+        },
+        setError: (e) => {
+          streamErr = e;
+        },
+      });
+    }
+    if (done) break;
+  }
+  if (buf.trim()) {
+    handleNdjsonLine(buf, {
+      onProgress,
+      status: res.status,
+      setResult: (v) => {
+        result = v as T;
+      },
+      setError: (e) => {
+        streamErr = e;
+      },
+    });
+  }
+  if (streamErr) throw streamErr;
+  return result as T;
+}
+
+function handleNdjsonLine(
+  line: string,
+  hooks: {
+    onProgress?: ProgressHandler;
+    status: number;
+    setResult: (v: unknown) => void;
+    setError: (e: SproutError) => void;
+  },
+): void {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  let ev: { type?: string; step?: string; detail?: string; result?: unknown; error?: string; message?: string };
+  try {
+    ev = JSON.parse(trimmed) as typeof ev;
+  } catch {
+    hooks.onProgress?.(trimmed);
+    return;
+  }
+  if (ev.type === "step") {
+    const msg = [ev.step, ev.detail].filter(Boolean).join(" ").trim();
+    if (msg) hooks.onProgress?.(msg);
+    return;
+  }
+  if (ev.type === "result") {
+    hooks.setResult(ev.result);
+    return;
+  }
+  if (ev.type === "error") {
+    hooks.setError(new SproutError(ev.error ?? "error", ev.message ?? trimmed, hooks.status));
   }
 }
 

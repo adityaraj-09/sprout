@@ -1,7 +1,7 @@
 {
   "name": "sproutdb-cli",
-  "version": "0.6.0",
-  "description": "Sprout CLI + SDK — CoW Postgres branching client for sprout-server",
+  "version": "0.7.0",
+  "description": "Sprout CLI + SDK — CoW Postgres and MongoDB branching client for sprout-server",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -28,6 +28,7 @@
     "node": ">=18"
   },
   "keywords": [
+    "mongodb",
     "postgres",
     "postgresql",
     "branching",

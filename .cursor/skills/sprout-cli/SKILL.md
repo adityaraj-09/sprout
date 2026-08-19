@@ -40,27 +40,37 @@ sprout health
 
 One-shot (npm): `sprout --api-url=http://strido.fit:8080 --token=secret health`
 
-Auth is `Authorization: Bearer <token>`. Humans use a **GitHub user token** from `sprout login` and only see their own connectors/branches. `/healthz` and `GET /v1/auth/github` are unauthenticated. The machine `SPROUT_TOKEN` still works for scripts and sees everything. Server must set `SPROUT_GITHUB_CLIENT_ID`. Any GitHub user can sign in unless `SPROUT_GITHUB_USERS` / `SPROUT_GITHUB_ORGS` is set.
+Auth is `Authorization: Bearer <token>`. Optional `X-Sprout-Org: <name-or-id>` (GitHub users default to personal org `default`). Humans use a **GitHub user token** from `sprout login`. Connectors are **org-scoped**: owners can connect/wipe/delete; members can list connectors and mutate only their own branches. `/healthz` and `GET /v1/auth/github` are unauthenticated. The machine `SPROUT_TOKEN` still works for scripts and sees everything. Server must set `SPROUT_GITHUB_CLIENT_ID`. Any GitHub user can sign in unless `SPROUT_GITHUB_USERS` / `SPROUT_GITHUB_ORGS` is set.
 
 ## What to do (typical)
 
-### Hosted server (per-user)
+### Hosted server (orgs)
 
-1. Each GitHub user runs **their own** `sprout connect` (own replica). There is no shared connector or shared `main`.
-2. Confirm only **your** rows:
+1. `sprout login` creates a personal org named **`default`**. Create a team org and add GitHub logins:
+
+```bash
+sprout org create acme
+sprout org use acme
+sprout org members add teammate
+sprout org list
+```
+
+Members share the **same replica row/dir/port** (no second copy). Data dirs stay `<name>-<creator-login>`.
+
+2. An **org owner** runs `sprout connect`. Confirm rows:
 
 ```bash
 sprout connector list
 sprout status supabase
 ```
 
-3. Create a branch from **your** connector (lowercase `[a-z0-9-]`, not `main`):
+3. Create a branch from the org connector (lowercase `[a-z0-9-]`, not `main`):
 
 ```bash
 sprout branch create testdb --from=supabase
 ```
 
-Prints `connection_string` and a `psql` one-liner. Hostnames include your GitHub login (`testdb-alice-supabase.strido.fit`) so two people can both use `testdb`. Use **that URL** in the app.
+Prints `connection_string` and a `psql` / `mongosh` one-liner. Hostnames include the **branch creator** GitHub login (`testdb-alice-supabase.strido.fit`). Use **that URL** in the app.
 
 4. `sprout logout` does not fall back to `SPROUT_TOKEN` / `dev-token` against a remote API. Re-login to keep working. `sprout init` is machine-token only.
 
@@ -81,7 +91,7 @@ Physical (you control WAL / replication):
 sprout connect --name=lab --mode=physical 'postgresql://user@127.0.0.1:55431/postgres'
 ```
 
-MongoDB (dump snapshot into local `mongod`; no oplog, no `:27017` proxy):
+MongoDB (dump snapshot into local `mongod`; no oplog). With DNS host, clients use port **27017** (`tls=true`); SNI selects the instance:
 
 ```bash
 sprout connect --name=atlas 'mongodb+srv://USER:PASS@cluster.mongodb.net/app'
@@ -121,6 +131,8 @@ sprout health
 sprout login
 sprout logout
 sprout whoami
+sprout org list | create <name> | use <name> | delete <name>
+sprout org members list | add <login> | remove <login>
 sprout init
 sprout connect [--name=<id>] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
 sprout status [connector-name]
@@ -140,10 +152,10 @@ sprout branch get|diff|reset|delete|suspend|resume <name> [--from=<connector>]
 npm-only:
 
 ```text
-sprout config set api-url|token|project <value>
+sprout config set api-url|token|project|org <value>
 sprout config get
 sprout config path
-sprout config unset api-url|token|project
+sprout config unset api-url|token|project|org
 ```
 
 ## After create
@@ -174,12 +186,16 @@ Never commit connection strings or tokens. Never dump `~/.sprout/config.json` in
 
 ## HTTP (if shelling without CLI)
 
-Base: `SPROUT_SERVER`. Header: `Authorization: Bearer <token>`. Project path is `default`.
+Base: `SPROUT_SERVER`. Header: `Authorization: Bearer <token>`. Optional `X-Sprout-Org`. Project path is `default`. Long jobs (`connect`, `branch create`) stream NDJSON when `Accept: application/x-ndjson` or `?progress=1`.
 
 - `GET /healthz`
 - `GET /v1/auth/github` (public; client_id + host for device flow)
 - `GET /v1/whoami`
 - `GET /v1/doctor`
+- `GET|POST /v1/orgs`
+- `DELETE /v1/orgs/{org}`
+- `GET|POST /v1/orgs/{org}/members`
+- `DELETE /v1/orgs/{org}/members/{login}`
 - `POST /v1/init`
 - `GET /v1/connectors`
 - `POST /v1/projects/default/connect` body `{"url","name","engine","mode","wipe","dry_run","tables"}`

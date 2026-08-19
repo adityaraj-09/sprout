@@ -22,6 +22,9 @@ type ConnectorLifecycleResult struct {
 // SuspendConnector stops the connector replica compute and all branches from it.
 // Data directories are kept (same idea as branch suspend).
 func (s *Service) SuspendConnector(ctx context.Context, projectID, name string) (ConnectorLifecycleResult, error) {
+	if err := s.requireOrgOwner(ctx); err != nil {
+		return ConnectorLifecycleResult{}, err
+	}
 	unlock, err := s.lockBranch(ctx, s.connectorLockKey(name, auth.OwnerFrom(ctx)))
 	if err != nil {
 		return ConnectorLifecycleResult{}, err
@@ -68,6 +71,9 @@ func (s *Service) SuspendConnector(ctx context.Context, projectID, name string) 
 
 // ResumeConnector starts the connector replica and all idle branches from it.
 func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (ConnectorLifecycleResult, error) {
+	if err := s.requireOrgOwner(ctx); err != nil {
+		return ConnectorLifecycleResult{}, err
+	}
 	unlock, err := s.lockBranch(ctx, s.connectorLockKey(name, auth.OwnerFrom(ctx)))
 	if err != nil {
 		return ConnectorLifecycleResult{}, err

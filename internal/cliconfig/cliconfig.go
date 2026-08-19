@@ -13,6 +13,7 @@ type File struct {
 	Token       string `json:"token,omitempty"`
 	Project     string `json:"project,omitempty"`
 	GitHubLogin string `json:"githubLogin,omitempty"`
+	Org         string `json:"org,omitempty"`
 }
 
 func Path() string {
@@ -58,6 +59,8 @@ func Unset(keys ...string) (File, error) {
 			cur.Project = ""
 		case "githubLogin", "github-login":
 			cur.GitHubLogin = ""
+		case "org":
+			cur.Org = ""
 		}
 	}
 	if err := write(cur); err != nil {
@@ -93,6 +96,9 @@ func merge(base, patch File) File {
 	}
 	if patch.GitHubLogin != "" {
 		base.GitHubLogin = patch.GitHubLogin
+	}
+	if patch.Org != "" {
+		base.Org = strings.ToLower(strings.TrimSpace(patch.Org))
 	}
 	return base
 }

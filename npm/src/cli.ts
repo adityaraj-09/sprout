@@ -13,13 +13,20 @@ function usage(): never {
   console.error(`sprout — CLI (talks to sprout-server)
 
 Usage:
-  sprout [--api-url=<url>] [--token=<token>] <command> ...
+  sprout [--api-url=<url>] [--token=<token>] [--org=<name>] <command> ...
 
 Commands:
   sprout login
   sprout logout
   sprout whoami
   sprout doctor
+  sprout org list
+  sprout org create <name>
+  sprout org use <name-or-id>
+  sprout org delete <name-or-id>
+  sprout org members list [org]
+  sprout org members add <github-login>
+  sprout org members remove <github-login>
   sprout init
   sprout connect [--name=<id>] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
   sprout status [name]
@@ -35,17 +42,20 @@ Config (persisted in ~/.sprout/config.json):
   sprout config set api-url <url>
   sprout config set token <token>
   sprout config set project <name>
+  sprout config set org <name>
   sprout config get
   sprout config path
-  sprout config unset api-url|token|project
+  sprout config unset api-url|token|project|org
 
 Global flags (override saved config for one command):
   --api-url=<url>   also --server=
   --token=<token>
+  --org=<name>      current org (X-Sprout-Org); GitHub users default to "default"
 
 Precedence: flags → env → config file → defaults
   SPROUT_API_URL / SPROUT_SERVER
   SPROUT_TOKEN
+  SPROUT_ORG
   SPROUT_CONFIG   (path to config file)
 `);
   process.exit(2);
@@ -74,11 +84,13 @@ function flag(args: string[], name: string): string | undefined {
 function takeGlobals(argv: string[]): {
   apiUrl?: string;
   token?: string;
+  org?: string;
   rest: string[];
 } {
   const rest: string[] = [];
   let apiUrl: string | undefined;
   let token: string | undefined;
+  let org: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a.startsWith("--api-url=")) {
@@ -105,9 +117,17 @@ function takeGlobals(argv: string[]): {
       token = argv[++i];
       continue;
     }
+    if (a.startsWith("--org=")) {
+      org = a.slice("--org=".length);
+      continue;
+    }
+    if (a === "--org" && argv[i + 1] && !argv[i + 1]!.startsWith("-")) {
+      org = argv[++i];
+      continue;
+    }
     rest.push(a);
   }
-  return { apiUrl, token, rest };
+  return { apiUrl, token, org, rest };
 }
 
 function positional(args: string[]): string[] {
@@ -139,6 +159,7 @@ function handleConfig(argv: string[]): void {
               apiUrl: client.baseUrl,
               token: client.token === "dev-token" ? "dev-token" : "***",
               project: client.project,
+              org: client.org || undefined,
               githubLogin: cfg.githubLogin,
             },
           },
@@ -152,7 +173,7 @@ function handleConfig(argv: string[]): void {
       const key = argv[2];
       const value = argv[3];
       if (!key || value === undefined) {
-        fatal(new Error("usage: sprout config set api-url|token|project <value>"));
+        fatal(new Error("usage: sprout config set api-url|token|project|org <value>"));
       }
       const patch: SproutConfigFile = {};
       if (key === "api-url" || key === "apiUrl" || key === "server") {
@@ -161,8 +182,10 @@ function handleConfig(argv: string[]): void {
         patch.token = value;
       } else if (key === "project") {
         patch.project = value;
+      } else if (key === "org") {
+        patch.org = value;
       } else {
-        fatal(new Error(`unknown config key: ${key} (use api-url, token, project)`));
+        fatal(new Error(`unknown config key: ${key} (use api-url, token, project, org)`));
       }
       const saved = saveConfig(patch);
       console.log(`✓ saved ${configPath()}`);
@@ -173,13 +196,14 @@ function handleConfig(argv: string[]): void {
     }
     case "unset": {
       const key = argv[2];
-      if (!key) fatal(new Error("usage: sprout config unset api-url|token|project"));
+      if (!key) fatal(new Error("usage: sprout config unset api-url|token|project|org"));
       const map: Record<string, keyof SproutConfigFile> = {
         "api-url": "apiUrl",
         apiUrl: "apiUrl",
         server: "apiUrl",
         token: "token",
         project: "project",
+        org: "org",
       };
       const field = map[key];
       if (!field) fatal(new Error(`unknown config key: ${key}`));
@@ -197,7 +221,7 @@ async function main(): Promise<void> {
   const raw = process.argv.slice(2);
   if (raw.length === 0) usage();
 
-  const { apiUrl, token, rest: argv } = takeGlobals(raw);
+  const { apiUrl, token, org, rest: argv } = takeGlobals(raw);
   if (argv.length === 0) usage();
 
   if (argv[0] === "config") {
@@ -219,7 +243,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const client = new SproutClient({ apiUrl, token });
+  const client = new SproutClient({ apiUrl, token, org });
   const cmd = argv[0]!;
 
   try {
@@ -233,6 +257,79 @@ async function main(): Promise<void> {
           if (ch.hint) console.log(`    hint: ${ch.hint}`);
         }
         if (!rep.ok) process.exit(1);
+        break;
+      }
+      case "org": {
+        const sub = argv[1];
+        if (!sub) usage();
+        if (sub === "list") {
+          const out = await client.listOrgs();
+          if (!out.orgs?.length) {
+            console.log("(no orgs)");
+            break;
+          }
+          const cur = out.current_org || client.org;
+          for (const o of out.orgs) {
+            const mark = o.name === cur || o.id === cur || o.id === out.current_id ? "*" : " ";
+            console.log(
+              `${mark} ${o.name.padEnd(16)} ${(o.role || "-").padEnd(8)} owner=${(o.created_by || "").padEnd(16)} ${o.id}`,
+            );
+          }
+          break;
+        }
+        if (sub === "create") {
+          const name = argv[2];
+          if (!name) fatal(new Error("usage: sprout org create <name>"));
+          const orgRec = await client.createOrg(name);
+          console.log(`✓ created org ${orgRec.name} (${orgRec.id})`);
+          break;
+        }
+        if (sub === "use") {
+          const name = argv[2];
+          if (!name) fatal(new Error("usage: sprout org use <name-or-id>"));
+          const saved = saveConfig({ org: name });
+          console.log(`✓ current org ${saved.org} (${configPath()})`);
+          break;
+        }
+        if (sub === "delete") {
+          const name = argv[2];
+          if (!name) fatal(new Error("usage: sprout org delete <name-or-id>"));
+          await client.deleteOrg(name);
+          console.log(`✓ deleted org ${name}`);
+          break;
+        }
+        if (sub === "members") {
+          const action = argv[2];
+          const orgName = client.org || "default";
+          if (action === "list") {
+            const named = argv[3] && !argv[3].startsWith("-") ? argv[3] : orgName;
+            const list = await client.listOrgMembers(named);
+            if (list.length === 0) {
+              console.log("(no members)");
+              break;
+            }
+            for (const m of list) {
+              console.log(`${m.login.padEnd(16)} ${m.role.padEnd(8)} added_by=${m.added_by ?? ""}`);
+            }
+            break;
+          }
+          if (action === "add") {
+            const login = argv[3];
+            if (!login) fatal(new Error("usage: sprout org members add <github-login>"));
+            const m = await client.addOrgMember(login, orgName);
+            console.log(`✓ added ${m.login} as ${m.role}`);
+            console.log(JSON.stringify(m, null, 2));
+            break;
+          }
+          if (action === "remove") {
+            const login = argv[3];
+            if (!login) fatal(new Error("usage: sprout org members remove <github-login>"));
+            await client.removeOrgMember(login, orgName);
+            console.log(`✓ removed ${login} from ${orgName}`);
+            break;
+          }
+        }
+        usage();
         break;
       }
       case "init": {
@@ -264,7 +361,16 @@ async function main(): Promise<void> {
             ),
           );
         }
-        const out = await client.connect({ url, name, engine: engineName, mode: mode || undefined, wipe, dryRun, tables });
+        const out = await client.connect({
+          url,
+          name,
+          engine: engineName,
+          mode: mode || undefined,
+          wipe,
+          dryRun,
+          tables,
+          onProgress: (msg) => console.log(msg),
+        });
         if (out.dry_run) {
           console.log("dry-run estimate (will hit prod once for real bootstrap):");
           console.log(JSON.stringify(out.estimate, null, 2));
@@ -330,7 +436,10 @@ async function main(): Promise<void> {
       }
       case "whoami": {
         const who = await client.whoami();
-        console.log(`${who.kind} ${who.login}`);
+        console.log(`${who.kind} ${who.login}${who.org ? ` org=${who.org}` : ""}`);
+        for (const o of who.orgs ?? []) {
+          console.log(`  ${(o.name || "").padEnd(16)} ${(o.role || "-").padEnd(8)} ${o.id}`);
+        }
         break;
       }
       case "branch": {
@@ -344,7 +453,7 @@ async function main(): Promise<void> {
             if (!name) {
               fatal(new Error("usage: sprout branch create <name> [--from=<connector>]"));
             }
-            const rec = await client.createBranch(name, from);
+            const rec = await client.createBranch(name, from, { onProgress: (msg) => console.log(msg) });
             const src = rec.source_connector || "main";
             console.log(`✓ ${rec.name} [${rec.status}] from=${src}\n  ${rec.connection_string}`);
             if (rec.psql) console.log(`  ${rec.psql}`);
