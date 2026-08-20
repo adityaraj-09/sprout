@@ -70,6 +70,32 @@ func FilterConnectorsByOwner(owner string, list []Connector) []Connector {
 	return out
 }
 
+func FilterConnectorsByOrg(orgID string, list []Connector) []Connector {
+	if orgID == "" {
+		return list
+	}
+	out := make([]Connector, 0, len(list))
+	for _, c := range list {
+		if c.OrgID == orgID {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func FilterBranchesByOrg(orgID string, list []BranchRecord) []BranchRecord {
+	if orgID == "" {
+		return list
+	}
+	out := make([]BranchRecord, 0, len(list))
+	for _, b := range list {
+		if b.OrgID == orgID {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
 func resolveConnector(name, owner string, list []Connector) (Connector, error) {
 	if owner != "" {
 		list = FilterConnectorsByOwner(owner, list)

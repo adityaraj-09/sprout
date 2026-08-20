@@ -3,6 +3,12 @@ package auth
 import "context"
 
 type ctxKey struct{}
+type orgKey struct{}
+
+type orgRef struct {
+	ID   string
+	Name string
+}
 
 const (
 	KindGitHub = "github"
@@ -37,4 +43,18 @@ func OwnerFrom(ctx context.Context) string {
 // IsUser is true when the caller signed in with GitHub (not SPROUT_TOKEN).
 func IsUser(ctx context.Context) bool {
 	return ActorFrom(ctx).Kind == KindGitHub
+}
+
+func WithOrg(ctx context.Context, id, name string) context.Context {
+	return context.WithValue(ctx, orgKey{}, orgRef{ID: id, Name: name})
+}
+
+func OrgIDFrom(ctx context.Context) string {
+	o, _ := ctx.Value(orgKey{}).(orgRef)
+	return o.ID
+}
+
+func OrgNameFrom(ctx context.Context) string {
+	o, _ := ctx.Value(orgKey{}).(orgRef)
+	return o.Name
 }

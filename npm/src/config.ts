@@ -7,6 +7,7 @@ export type SproutConfigFile = {
   token?: string;
   project?: string;
   githubLogin?: string;
+  org?: string;
 };
 
 /** ~/.sprout/config.json (override with SPROUT_CONFIG) */

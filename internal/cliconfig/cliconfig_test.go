@@ -9,11 +9,11 @@ import (
 func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("SPROUT_CONFIG", filepath.Join(dir, "config.json"))
-	if _, err := Save(File{APIUrl: "http://strido.fit:8080/", Token: "gho_x", GitHubLogin: "alice"}); err != nil {
+	if _, err := Save(File{APIUrl: "http://strido.fit:8080/", Token: "gho_x", GitHubLogin: "alice", Org: "acme"}); err != nil {
 		t.Fatal(err)
 	}
 	got := Load()
-	if got.APIUrl != "http://strido.fit:8080" || got.Token != "gho_x" || got.GitHubLogin != "alice" {
+	if got.APIUrl != "http://strido.fit:8080" || got.Token != "gho_x" || got.GitHubLogin != "alice" || got.Org != "acme" {
 		t.Fatalf("%+v", got)
 	}
 	st, err := os.Stat(Path())

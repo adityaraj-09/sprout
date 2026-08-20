@@ -24,6 +24,8 @@ type fileData struct {
 	Projects   map[string]Project      `json:"projects"`
 	Branches   map[string]BranchRecord `json:"branches"`   // keyed by id
 	Connectors map[string]Connector    `json:"connectors"` // keyed by connector id
+	Orgs       map[string]Org          `json:"orgs"`
+	OrgMembers []OrgMember             `json:"org_members"`
 }
 
 func OpenFile(path string) (*FileStore, error) {
@@ -31,6 +33,8 @@ func OpenFile(path string) (*FileStore, error) {
 	s.data.Projects = map[string]Project{}
 	s.data.Branches = map[string]BranchRecord{}
 	s.data.Connectors = map[string]Connector{}
+	s.data.Orgs = map[string]Org{}
+	s.data.OrgMembers = nil
 	s.data.NextPort = 55433
 	b, err := os.ReadFile(path)
 	if err == nil {
@@ -45,6 +49,9 @@ func OpenFile(path string) (*FileStore, error) {
 		}
 		if s.data.Connectors == nil {
 			s.data.Connectors = map[string]Connector{}
+		}
+		if s.data.Orgs == nil {
+			s.data.Orgs = map[string]Org{}
 		}
 		if s.data.NextPort == 0 {
 			s.data.NextPort = 55433
@@ -265,9 +272,12 @@ func (s *FileStore) PutConnector(ctx context.Context, c Connector) error {
 	if s.data.Connectors == nil {
 		s.data.Connectors = map[string]Connector{}
 	}
-	// Enforce unique (project_id, name, created_by)
+	// Enforce unique (project_id, name, created_by) and (project_id, org_id, name) when org set
 	for id, existing := range s.data.Connectors {
 		if existing.ProjectID == c.ProjectID && existing.Name == c.Name && existing.CreatedBy == c.CreatedBy && id != c.ID {
+			return fmt.Errorf("connector_exists: %q", c.Name)
+		}
+		if c.OrgID != "" && existing.OrgID == c.OrgID && existing.ProjectID == c.ProjectID && existing.Name == c.Name && id != c.ID {
 			return fmt.Errorf("connector_exists: %q", c.Name)
 		}
 	}

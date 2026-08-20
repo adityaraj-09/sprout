@@ -124,6 +124,9 @@ CREATE TABLE IF NOT EXISTS connectors (
 	if err := s.ensureOwnedUniques(); err != nil {
 		return err
 	}
+	if err := s.ensureOrgSchema(); err != nil {
+		return err
+	}
 	var n int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM meta WHERE key = 'next_port'`).Scan(&n); err != nil {
 		return err
@@ -441,19 +444,19 @@ func putBranchTx(tx *sql.Tx, b BranchRecord) error {
 INSERT INTO branches(
   id, project_id, name, role, status, port, data_dir, snapshot_ref, container_id, compute,
   conn_string, error_message, source_lsn, source_connector, source_connector_id, password,
-  created_by, created_at, updated_at, last_used_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  created_by, org_id, created_at, updated_at, last_used_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   project_id=excluded.project_id, name=excluded.name, role=excluded.role, status=excluded.status,
   port=excluded.port, data_dir=excluded.data_dir, snapshot_ref=excluded.snapshot_ref,
   container_id=excluded.container_id, compute=excluded.compute, conn_string=excluded.conn_string,
   error_message=excluded.error_message, source_lsn=excluded.source_lsn,
   source_connector=excluded.source_connector, source_connector_id=excluded.source_connector_id,
-  password=excluded.password, created_by=excluded.created_by,
+  password=excluded.password, created_by=excluded.created_by, org_id=excluded.org_id,
   updated_at=excluded.updated_at, last_used_at=excluded.last_used_at
 `, b.ID, b.ProjectID, b.Name, b.Role, b.Status, b.Port, b.DataDir, b.SnapshotRef, b.ContainerID, b.Compute,
 		b.ConnString, b.ErrorMessage, b.SourceLSN, b.SourceConnector, b.SourceConnectorID, b.Password,
-		b.CreatedBy, formatTime(b.CreatedAt), formatTime(b.UpdatedAt), formatTime(b.LastUsedAt))
+		b.CreatedBy, b.OrgID, formatTime(b.CreatedAt), formatTime(b.UpdatedAt), formatTime(b.LastUsedAt))
 	return err
 }
 
@@ -473,19 +476,19 @@ func (s *SQLiteStore) PutBranch(ctx context.Context, b BranchRecord) error {
 INSERT INTO branches(
   id, project_id, name, role, status, port, data_dir, snapshot_ref, container_id, compute,
   conn_string, error_message, source_lsn, source_connector, source_connector_id, password,
-  created_by, created_at, updated_at, last_used_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  created_by, org_id, created_at, updated_at, last_used_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   project_id=excluded.project_id, name=excluded.name, role=excluded.role, status=excluded.status,
   port=excluded.port, data_dir=excluded.data_dir, snapshot_ref=excluded.snapshot_ref,
   container_id=excluded.container_id, compute=excluded.compute, conn_string=excluded.conn_string,
   error_message=excluded.error_message, source_lsn=excluded.source_lsn,
   source_connector=excluded.source_connector, source_connector_id=excluded.source_connector_id,
-  password=excluded.password, created_by=excluded.created_by,
+  password=excluded.password, created_by=excluded.created_by, org_id=excluded.org_id,
   updated_at=excluded.updated_at, last_used_at=excluded.last_used_at
 `, b.ID, b.ProjectID, b.Name, b.Role, b.Status, b.Port, b.DataDir, b.SnapshotRef, b.ContainerID, b.Compute,
 		b.ConnString, b.ErrorMessage, b.SourceLSN, b.SourceConnector, b.SourceConnectorID, b.Password,
-		b.CreatedBy, formatTime(b.CreatedAt), formatTime(b.UpdatedAt), formatTime(b.LastUsedAt))
+		b.CreatedBy, b.OrgID, formatTime(b.CreatedAt), formatTime(b.UpdatedAt), formatTime(b.LastUsedAt))
 	return err
 }
 
@@ -495,11 +498,11 @@ func (s *SQLiteStore) UpdateBranch(ctx context.Context, b BranchRecord) error {
 UPDATE branches SET
   project_id=?, name=?, role=?, status=?, port=?, data_dir=?, snapshot_ref=?, container_id=?, compute=?,
   conn_string=?, error_message=?, source_lsn=?, source_connector=?, source_connector_id=?, password=?,
-  created_by=?, updated_at=?, last_used_at=?
+  created_by=?, org_id=?, updated_at=?, last_used_at=?
 WHERE id=?`,
 		b.ProjectID, b.Name, b.Role, b.Status, b.Port, b.DataDir, b.SnapshotRef, b.ContainerID, b.Compute,
 		b.ConnString, b.ErrorMessage, b.SourceLSN, b.SourceConnector, b.SourceConnectorID, b.Password,
-		b.CreatedBy, formatTime(b.UpdatedAt), formatTime(b.LastUsedAt), b.ID)
+		b.CreatedBy, b.OrgID, formatTime(b.UpdatedAt), formatTime(b.LastUsedAt), b.ID)
 	if err != nil {
 		return err
 	}
@@ -511,7 +514,7 @@ WHERE id=?`,
 }
 
 const branchCols = `id, project_id, name, role, status, port, data_dir, snapshot_ref, container_id, compute,
-  conn_string, error_message, source_lsn, source_connector, source_connector_id, password, created_by,
+  conn_string, error_message, source_lsn, source_connector, source_connector_id, password, created_by, org_id,
   created_at, updated_at, last_used_at`
 
 func scanBranch(scanner interface {
@@ -521,7 +524,7 @@ func scanBranch(scanner interface {
 	var created, updated, lastUsed string
 	err := scanner.Scan(
 		&b.ID, &b.ProjectID, &b.Name, &b.Role, &b.Status, &b.Port, &b.DataDir, &b.SnapshotRef, &b.ContainerID, &b.Compute,
-		&b.ConnString, &b.ErrorMessage, &b.SourceLSN, &b.SourceConnector, &b.SourceConnectorID, &b.Password, &b.CreatedBy,
+		&b.ConnString, &b.ErrorMessage, &b.SourceLSN, &b.SourceConnector, &b.SourceConnectorID, &b.Password, &b.CreatedBy, &b.OrgID,
 		&created, &updated, &lastUsed,
 	)
 	if err != nil {
@@ -595,15 +598,15 @@ func putConnectorTx(tx *sql.Tx, c Connector) error {
 	c.UpdatedAt = now
 	_, err := tx.Exec(`
 INSERT INTO connectors(
-  id, project_id, name, primary_url, engine, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, password, created_by, created_at, updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  id, project_id, name, primary_url, engine, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, password, created_by, org_id, created_at, updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   project_id=excluded.project_id, name=excluded.name, primary_url=excluded.primary_url, engine=excluded.engine, mode=excluded.mode,
   status=excluded.status, data_dir=excluded.data_dir, port=excluded.port, error_message=excluded.error_message,
   last_lsn=excluded.last_lsn, last_lag_bytes=excluded.last_lag_bytes, password=excluded.password,
-  created_by=excluded.created_by, updated_at=excluded.updated_at
+  created_by=excluded.created_by, org_id=excluded.org_id, updated_at=excluded.updated_at
 `, c.ID, c.ProjectID, c.Name, c.PrimaryURL, connectorEngine(c), c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes, c.Password,
-		c.CreatedBy, formatTime(c.CreatedAt), formatTime(c.UpdatedAt))
+		c.CreatedBy, c.OrgID, formatTime(c.CreatedAt), formatTime(c.UpdatedAt))
 	return err
 }
 
@@ -619,8 +622,8 @@ func (s *SQLiteStore) PutConnector(ctx context.Context, c Connector) error {
 
 	var existingID string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id FROM connectors WHERE project_id = ? AND name = ? AND created_by = ? AND id != ?`,
-		c.ProjectID, c.Name, c.CreatedBy, c.ID).
+		`SELECT id FROM connectors WHERE project_id = ? AND name = ? AND org_id = ? AND created_by = ? AND id != ?`,
+		c.ProjectID, c.Name, c.OrgID, c.CreatedBy, c.ID).
 		Scan(&existingID)
 	if err == nil {
 		return fmt.Errorf("connector_exists: %q", c.Name)
@@ -628,18 +631,29 @@ func (s *SQLiteStore) PutConnector(ctx context.Context, c Connector) error {
 	if err != sql.ErrNoRows {
 		return err
 	}
+	if c.OrgID != "" {
+		err = s.db.QueryRowContext(ctx,
+			`SELECT id FROM connectors WHERE project_id = ? AND name = ? AND org_id = ? AND id != ?`,
+			c.ProjectID, c.Name, c.OrgID, c.ID).Scan(&existingID)
+		if err == nil {
+			return fmt.Errorf("connector_exists: %q", c.Name)
+		}
+		if err != sql.ErrNoRows {
+			return err
+		}
+	}
 
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO connectors(
-  id, project_id, name, primary_url, engine, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, password, created_by, created_at, updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  id, project_id, name, primary_url, engine, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, password, created_by, org_id, created_at, updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   project_id=excluded.project_id, name=excluded.name, primary_url=excluded.primary_url, engine=excluded.engine, mode=excluded.mode,
   status=excluded.status, data_dir=excluded.data_dir, port=excluded.port, error_message=excluded.error_message,
   last_lsn=excluded.last_lsn, last_lag_bytes=excluded.last_lag_bytes, password=excluded.password,
-  created_by=excluded.created_by, updated_at=excluded.updated_at
+  created_by=excluded.created_by, org_id=excluded.org_id, updated_at=excluded.updated_at
 `, c.ID, c.ProjectID, c.Name, c.PrimaryURL, connectorEngine(c), c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes, c.Password,
-		c.CreatedBy, formatTime(c.CreatedAt), formatTime(c.UpdatedAt))
+		c.CreatedBy, c.OrgID, formatTime(c.CreatedAt), formatTime(c.UpdatedAt))
 	return err
 }
 
@@ -650,7 +664,7 @@ func connectorEngine(c Connector) string {
 	return c.Engine
 }
 
-const connectorCols = `id, project_id, name, primary_url, engine, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, password, created_by, created_at, updated_at`
+const connectorCols = `id, project_id, name, primary_url, engine, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, password, created_by, org_id, created_at, updated_at`
 
 func scanConnector(scanner interface {
 	Scan(dest ...any) error
@@ -659,7 +673,7 @@ func scanConnector(scanner interface {
 	var created, updated string
 	err := scanner.Scan(
 		&c.ID, &c.ProjectID, &c.Name, &c.PrimaryURL, &c.Engine, &c.Mode, &c.Status, &c.DataDir, &c.Port,
-		&c.ErrorMessage, &c.LastLSN, &c.LastLagBytes, &c.Password, &c.CreatedBy, &created, &updated,
+		&c.ErrorMessage, &c.LastLSN, &c.LastLagBytes, &c.Password, &c.CreatedBy, &c.OrgID, &created, &updated,
 	)
 	if err != nil {
 		return Connector{}, err
@@ -715,10 +729,10 @@ func (s *SQLiteStore) UpdateConnector(ctx context.Context, c Connector) error {
 	c.UpdatedAt = time.Now().UTC()
 	res, err := s.db.ExecContext(ctx, `
 UPDATE connectors SET
-  project_id=?, name=?, primary_url=?, engine=?, mode=?, status=?, data_dir=?, port=?, error_message=?, last_lsn=?, last_lag_bytes=?, password=?, created_by=?, updated_at=?
+  project_id=?, name=?, primary_url=?, engine=?, mode=?, status=?, data_dir=?, port=?, error_message=?, last_lsn=?, last_lag_bytes=?, password=?, created_by=?, org_id=?, updated_at=?
 WHERE id=?`,
 		c.ProjectID, c.Name, c.PrimaryURL, connectorEngine(c), c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes, c.Password,
-		c.CreatedBy, formatTime(c.UpdatedAt), c.ID)
+		c.CreatedBy, c.OrgID, formatTime(c.UpdatedAt), c.ID)
 	if err != nil {
 		return err
 	}

@@ -188,3 +188,41 @@ func TestConnectorOwnerIsolation(t *testing.T) {
 		t.Fatal("expected unique (project, name, created_by)")
 	}
 }
+
+func TestSQLiteBackfillDefaultOrg(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "control.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proj, err := store.EnsureProject(ctx, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutConnector(ctx, Connector{
+		ID: "c1", ProjectID: proj.ID, Name: "sup", Mode: "logical",
+		Status: ConnectorReplicating, Port: 55434, CreatedBy: "alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	c, err := store.GetConnectorByName(ctx, proj.ID, "sup", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.OrgID == "" {
+		t.Fatal("expected org_id backfill")
+	}
+	orgs, err := store.ListOrgs(ctx, "alice")
+	if err != nil || len(orgs) != 1 || orgs[0].Name != DefaultOrg || orgs[0].ID != c.OrgID {
+		t.Fatalf("orgs=%+v org_id=%s err=%v", orgs, c.OrgID, err)
+	}
+}

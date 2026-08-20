@@ -16,6 +16,7 @@ import (
 	"github.com/adityaraj/sprout/internal/meta"
 	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
+	"github.com/adityaraj/sprout/internal/progress"
 	"github.com/adityaraj/sprout/internal/replica"
 	"github.com/adityaraj/sprout/internal/storage"
 	"github.com/google/uuid"
@@ -64,7 +65,17 @@ func (s *Service) instKey(rec meta.BranchRecord) string {
 
 func (s *Service) lookupBranch(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error) {
 	name, from = trimIdent(name), trimIdent(from)
-	rec, err := s.Store.FindBranch(ctx, projectID, name, from, auth.OwnerFrom(ctx))
+	list, err := s.Store.ListBranches(ctx, projectID)
+	if err != nil {
+		return meta.BranchRecord{}, err
+	}
+	var matches []meta.BranchRecord
+	for _, b := range s.filterBranchesForActor(ctx, list) {
+		if b.Name == name {
+			matches = append(matches, b)
+		}
+	}
+	rec, err := meta.ResolveBranch(name, from, matches)
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "ambiguous_branch") {
 			return meta.BranchRecord{}, err
@@ -82,6 +93,13 @@ func trimIdent(s string) string {
 }
 
 func (s *Service) lookupConnector(ctx context.Context, projectID, name string) (meta.Connector, error) {
+	if orgID := auth.OrgIDFrom(ctx); orgID != "" {
+		c, err := s.Store.GetConnectorByNameInOrg(ctx, projectID, name, orgID)
+		if err != nil {
+			return meta.Connector{}, fmt.Errorf("connector_not_found: %s", name)
+		}
+		return c, nil
+	}
 	c, err := s.Store.GetConnectorByName(ctx, projectID, name, auth.OwnerFrom(ctx))
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "ambiguous_connector") {
@@ -245,7 +263,7 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 		Status: meta.StatusCreating, Port: port, DataDir: s.BranchDir(name, srcName, owner),
 		Compute:         s.Compute.Name(),
 		SourceConnector: srcName, SourceConnectorID: srcID,
-		Password: password, CreatedBy: owner,
+		Password: password, CreatedBy: owner, OrgID: auth.OrgIDFrom(ctx),
 	}
 	if err := s.Store.PutBranch(ctx, rec); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -254,8 +272,18 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 		return meta.BranchRecord{}, err
 	}
 
+	if rec.SourceConnectorID != "" {
+		if c, err := s.Store.GetConnectorByID(ctx, rec.SourceConnectorID); err == nil && c.OrgID != "" {
+			rec.OrgID = c.OrgID
+		}
+	}
+	if rec.OrgID == "" {
+		rec.OrgID = auth.OrgIDFrom(ctx)
+	}
+	_ = s.Store.UpdateBranch(ctx, rec)
+
 	total := time.Now()
-	fmt.Printf("\n=== branch create %q from %q (storage=%s) ===\n", name, srcName, s.Storage.Name())
+	progress.Printf(ctx, "\n=== branch create %q from %q (storage=%s) ===", name, srcName, s.Storage.Name())
 
 	if err := s.createPipeline(ctx, &rec, srcDir, srcPort, srcName); err != nil {
 		rec.Status = meta.StatusError
@@ -337,7 +365,7 @@ func (s *Service) visibleConnectors(ctx context.Context, projectID string) ([]me
 	if err != nil {
 		return nil, err
 	}
-	return meta.FilterConnectorsByOwner(auth.OwnerFrom(ctx), list), nil
+	return s.filterConnectorsForActor(ctx, list), nil
 }
 
 func (s *Service) ListConnectors(ctx context.Context) ([]meta.Connector, error) {
@@ -345,7 +373,7 @@ func (s *Service) ListConnectors(ctx context.Context) ([]meta.Connector, error) 
 	if err != nil {
 		return nil, err
 	}
-	return meta.FilterConnectorsByOwner(auth.OwnerFrom(ctx), list), nil
+	return s.filterConnectorsForActor(ctx, list), nil
 }
 
 // connectorSource maps a connector to its local PGDATA (legacy connectors used data/main).
@@ -514,12 +542,12 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	}
 
 	if useReplayPause {
-		fmt.Println("→ Step 0: replica lag check")
+		progress.Println(ctx, "→ Step 0: replica lag check")
 		if st.LagBytes > s.maxLagBytes() {
 			return fmt.Errorf("replica_lag: lag_bytes=%d exceeds max=%d — wait for catch-up", st.LagBytes, s.maxLagBytes())
 		}
-		fmt.Printf("  lag_bytes=%d replay_lsn=%s\n", st.LagBytes, st.ReplayLSN)
-		fmt.Println("→ Step 1: pause WAL replay + CHECKPOINT")
+		progress.Printf(ctx, "  lag_bytes=%d replay_lsn=%s", st.LagBytes, st.ReplayLSN)
+		progress.Println(ctx, "→ Step 1: pause WAL replay + CHECKPOINT")
 		if err := rm.PauseReplay(ctx, "127.0.0.1", srcPort); err != nil {
 			return fmt.Errorf("storage_failed: pause replay: %w", err)
 		}
@@ -529,9 +557,7 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 		}
 		rec.SourceLSN = st.ReplayLSN
 	} else if engine.IsMongo(eng) {
-		// WiredTiger + ZFS/APFS clones need a clean dbPath. mongod --shutdown
-		// (pidfile) is a consistent stop without hanging mongosh/TLS eval.
-		fmt.Println("→ Step 1: stop mongod for CoW snapshot")
+		progress.Println(ctx, "→ Step 1: stop mongod for CoW snapshot")
 		if err := srcMongo.Stop(); err != nil {
 			return fmt.Errorf("storage_failed: stop mongod: %w", err)
 		}
@@ -539,7 +565,7 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 			return fmt.Errorf("storage_failed: %w", err)
 		}
 	} else {
-		fmt.Println("→ Step 1: CHECKPOINT (+ cold stop if enabled)")
+		progress.Println(ctx, "→ Step 1: CHECKPOINT (+ cold stop if enabled)")
 		if err := srcInst.Checkpoint(); err != nil {
 			return fmt.Errorf("storage_failed: checkpoint: %w", err)
 		}
@@ -550,7 +576,7 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 		}
 	}
 
-	fmt.Println("→ Step 2: snapshot")
+	progress.Println(ctx, "→ Step 2: snapshot")
 	snapRef, err := s.Storage.Snapshot(srcDir, s.instKey(*rec))
 	if err != nil {
 		if useReplayPause {
@@ -563,25 +589,25 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	rec.SnapshotRef = snapRef
 
 	if useReplayPause {
-		fmt.Println("→ resume WAL replay on source")
+		progress.Println(ctx, "→ resume WAL replay on source")
 		if err := rm.ResumeReplay(ctx, "127.0.0.1", srcPort); err != nil {
 			return err
 		}
 	} else if engine.IsMongo(eng) || s.ColdSnap {
-		fmt.Println("→ restart source")
+		progress.Println(ctx, "→ restart source")
 		if _, err := s.Compute.Start(ctx, srcSpec); err != nil {
 			return err
 		}
 	}
 
-	fmt.Println("→ Step 3: clone")
+	progress.Println(ctx, "→ Step 3: clone")
 	if err := s.Storage.Clone(snapRef, rec.DataDir); err != nil {
 		_ = s.Storage.Destroy(snapRef)
 		return fmt.Errorf("storage_failed: %w", err)
 	}
 
-	fmt.Println("→ Step 4: PrepareClone (promote branch to independent primary)")
-	fmt.Println("→ Step 5: start compute")
+	progress.Println(ctx, "→ Step 4: PrepareClone (promote branch to independent primary)")
+	progress.Println(ctx, "→ Step 5: start compute")
 	var h compute.Handle
 	if engine.IsMongo(eng) {
 		h, err = s.startMongoClone(ctx, *rec, s.instKey(*rec))
@@ -626,6 +652,9 @@ func (s *Service) Reset(ctx context.Context, projectID, name, from string) (meta
 	}
 	if rec.Role != "branch" {
 		return meta.BranchRecord{}, fmt.Errorf("invalid_state: cannot reset main")
+	}
+	if err := s.canMutateBranch(ctx, rec); err != nil {
+		return meta.BranchRecord{}, err
 	}
 	if rec.Status != meta.StatusActive && rec.Status != meta.StatusIdle && rec.Status != meta.StatusError {
 		return meta.BranchRecord{}, fmt.Errorf("invalid_state: status=%s", rec.Status)
@@ -695,6 +724,9 @@ func (s *Service) Delete(ctx context.Context, projectID, name, from string) erro
 	}
 	if rec.Role != "branch" {
 		return fmt.Errorf("invalid_state: cannot delete main via branch API")
+	}
+	if err := s.canMutateBranch(ctx, rec); err != nil {
+		return err
 	}
 	rec.Status = meta.StatusDeleting
 	_ = s.Store.UpdateBranch(ctx, rec)
@@ -794,6 +826,9 @@ func (s *Service) Suspend(ctx context.Context, projectID, name, from string) (me
 	if rec.Status != meta.StatusActive {
 		return meta.BranchRecord{}, fmt.Errorf("invalid_state: status=%s", rec.Status)
 	}
+	if err := s.canMutateBranch(ctx, rec); err != nil {
+		return meta.BranchRecord{}, err
+	}
 	key := s.instKey(rec)
 	h := compute.Handle{Provider: s.Compute.Name(), Name: key, Port: rec.Port, DataDir: rec.DataDir, ContainerID: rec.ContainerID, Engine: s.sourceEngine(ctx, rec), Password: rec.Password}
 	if err := s.Compute.Stop(ctx, h); err != nil {
@@ -821,6 +856,9 @@ func (s *Service) Resume(ctx context.Context, projectID, name, from string) (met
 	}
 	if rec.Status != meta.StatusIdle && rec.Status != meta.StatusCrashed {
 		return meta.BranchRecord{}, fmt.Errorf("invalid_state: status=%s", rec.Status)
+	}
+	if err := s.canMutateBranch(ctx, rec); err != nil {
+		return meta.BranchRecord{}, err
 	}
 	key := s.instKey(rec)
 	eng := s.sourceEngine(ctx, rec)
@@ -851,18 +889,7 @@ func (s *Service) List(ctx context.Context, projectID string) ([]meta.BranchReco
 	if err != nil {
 		return nil, err
 	}
-	owner := auth.OwnerFrom(ctx)
-	if owner == "" {
-		return list, nil
-	}
-	out := make([]meta.BranchRecord, 0, len(list))
-	for _, b := range list {
-		if b.CreatedBy != owner {
-			continue
-		}
-		out = append(out, b)
-	}
-	return out, nil
+	return s.filterBranchesForActor(ctx, list), nil
 }
 
 func (s *Service) Get(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error) {
