@@ -54,6 +54,8 @@ func (s *Server) routes() {
 	s.Mux.HandleFunc("DELETE /v1/projects/{project}/connectors/{name}", s.handleDeleteConnector)
 	s.Mux.HandleFunc("POST /v1/projects/{project}/connectors/{name}/suspend", s.handleSuspendConnector)
 	s.Mux.HandleFunc("POST /v1/projects/{project}/connectors/{name}/resume", s.handleResumeConnector)
+	s.Mux.HandleFunc("POST /v1/projects/{project}/connectors/{name}/sync", s.handleSyncConnector)
+	s.Mux.HandleFunc("POST /v1/projects/{project}/sync", s.handleSyncProject)
 	s.Mux.HandleFunc("GET /v1/projects/{project}/replication", s.handleReplication)
 	s.Mux.HandleFunc("GET /v1/projects/{project}/connectors/{name}/replication", s.handleReplicationNamed)
 	s.Mux.HandleFunc("GET /v1/projects", s.handleListProjects)
@@ -205,6 +207,32 @@ func (s *Server) handleSuspendConnector(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleResumeConnector(w http.ResponseWriter, r *http.Request) {
 	s.mutateConnector(w, r, s.Service.ResumeConnector)
+}
+
+func (s *Server) handleSyncConnector(w http.ResponseWriter, r *http.Request) {
+	s.writeSync(w, r, r.PathValue("name"))
+}
+
+func (s *Server) handleSyncProject(w http.ResponseWriter, r *http.Request) {
+	s.writeSync(w, r, r.URL.Query().Get("name"))
+}
+
+func (s *Server) writeSync(w http.ResponseWriter, r *http.Request, name string) {
+	proj, err := s.resolveProject(r)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "project_not_found", err.Error())
+		return
+	}
+	r, streamed := withProgress(w, r)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
+	defer cancel()
+	res, err := s.Service.Sync(ctx, proj.ID, name)
+	if err != nil {
+		writeProgressErr(w, streamed, err)
+		return
+	}
+	res.Connector.PrimaryURL = redactURL(res.Connector.PrimaryURL)
+	writeProgressResult(w, streamed, http.StatusOK, res)
 }
 
 type connectorMutator func(ctx context.Context, projectID, name string) (branch.ConnectorLifecycleResult, error)
@@ -446,6 +474,12 @@ func mapErr(err error) (code string, status int) {
 		return "invalid_body", http.StatusBadRequest
 	case strings.HasPrefix(msg, "logical_sync_stuck"):
 		return "logical_sync_stuck", http.StatusConflict
+	case strings.HasPrefix(msg, "logical_catchup_timeout"):
+		return "logical_catchup_timeout", http.StatusGatewayTimeout
+	case strings.HasPrefix(msg, "no_subscription"):
+		return "no_subscription", http.StatusConflict
+	case strings.HasPrefix(msg, "unsupported"):
+		return "unsupported", http.StatusBadRequest
 	case strings.HasPrefix(msg, "replica_lag"):
 		return "replica_lag", http.StatusConflict
 	case strings.HasPrefix(msg, "compute_failed"):

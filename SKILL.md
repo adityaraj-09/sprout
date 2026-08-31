@@ -120,7 +120,7 @@ sprout branch create alice --from=main
 - Port **5432** is the Postgres SNI proxy. Hostname selects the instance. Clients need TLS (`sslmode=require` or libpq `prefer`). Self-signed cert is normal; `verify-full` may fail.
 - Localhost / raw IP: unique ports, no subdomain (`localhost:55440`).
 - MongoDB: same hostname labels. With a DNS host, URLs are `mongodb://sprout:<pass>@<host>:27017/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin`. Port **27017** is the SNI passthrough (`SPROUT_MONGO_PROXY=false` keeps unique ports).
-- A branch is an **independent primary**. It does not keep replicating from prod. The **connector replica** does. `sprout branch create` detaches any cloned logical subscription so the branch cannot steal the connector's WAL slot.
+- A branch is an **independent primary**. It does not keep replicating from prod. A **logical connector** keeps one prod slot but **pauses apply** after connect; `sprout sync` or `SPROUT_SYNC_INTERVAL` (default 1h) applies queued WAL then pauses again. `sprout branch create` detaches any cloned logical subscription so the branch cannot steal the connector's WAL slot.
 - Do **not** `sprout connect` using a branch URL as the upstream unless the user explicitly wants a replica-of-a-branch. Day-to-day testing = `psql` / app DSN to the branch URL.
 
 ## Commands
@@ -136,6 +136,7 @@ sprout org members list | add <login> | remove <login>
 sprout init
 sprout connect [--name=<id>] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
 sprout status [connector-name]
+sprout sync [connector-name]
 sprout connector list
 sprout connector delete <name> [--force]
 sprout connector suspend <name>
@@ -200,6 +201,7 @@ Base: `SPROUT_SERVER`. Header: `Authorization: Bearer <token>`. Optional `X-Spro
 - `GET /v1/connectors`
 - `POST /v1/projects/default/connect` body `{"url","name","engine","mode","wipe","dry_run","tables"}`
 - `GET /v1/projects/default/replication` and `/v1/projects/default/connectors/{name}/replication`
+- `POST /v1/projects/default/sync` and `/v1/projects/default/connectors/{name}/sync`
 - `DELETE /v1/projects/default/connectors/{name}?force=true`
 - `POST /v1/projects/default/connectors/{name}/suspend|resume`
 - `POST /v1/projects/default/branches` body `{"name","from"}`

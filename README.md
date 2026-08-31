@@ -226,7 +226,9 @@ internal/
 Same CoW path, but parent is a normal primary (checkpoint ± optional cold stop).
 The clone inherits `pg_subscription`; Sprout detaches it so the branch is a
 frozen snapshot and does not reuse the connector's prod replication slot.
-Live changes keep flowing only on the **connector** (`sprout status <name>`).
+The logical connector **keeps the prod slot** but **pauses apply** after the
+initial copy. `sprout sync` or `SPROUT_SYNC_INTERVAL` (default 1h) applies
+queued WAL, then pauses again. Branches never attach to that slot.
 
 ---
 
@@ -258,6 +260,7 @@ Connectors and branches each get an allocated port; in-use listeners are skipped
 | `sprout init` | Ensure default project + local `main` + seed demo |
 | `sprout connect [--name=id] [--engine=postgres\|mongodb] [--mode=physical\|logical] <url>` | Bootstrap named replica |
 | `sprout status [name]` | Replication lag / logical sync for a connector |
+| `sprout sync [name]` | Apply queued logical WAL now, then pause apply (slot kept) |
 | `sprout connector list` | List connectors (password redacted) |
 | `sprout connector delete <name> [--force]` | Drop local replica + remote pub; `--force` also deletes child branches |
 | `sprout health` | `GET /healthz` |
@@ -356,6 +359,7 @@ MongoDB connect is a **point-in-time snapshot**, not continuous replication. `--
 | `SPROUT_TRUST_REMOTE` | unset | Set `true` to keep trust auth for remote TCP (lab only). Default remote auth is SCRAM-SHA-256 |
 | `SPROUT_DB_PASSWORD` | random | Shared DB password for advertised roles; otherwise generated per instance |
 | `SPROUT_AUTO_RESUME` | unset | Set `true` to restart crashed connectors/branches |
+| `SPROUT_SYNC_INTERVAL` | `1h` | How often to apply queued logical WAL then pause again. `off` / `0` disables the ticker (`sprout sync` still works) |
 | `SPROUT_COMPUTE` | `auto` | Compute provider (`local` / `docker` / `auto`) |
 | `SPROUT_COLD_SNAP` | `true` | Cold-stop parent for non-standby snapshots (`false` to skip) |
 

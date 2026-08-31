@@ -22,6 +22,7 @@ type LogicalStatus struct {
 	TableTotal   int    `json:"table_total"`
 	TableReady   int    `json:"table_ready"`
 	ReceivedLSN  string `json:"received_lsn"`
+	LatestEndLSN string `json:"latest_end_lsn,omitempty"`
 	LastMsg      string `json:"last_msg_time,omitempty"`
 	RelStates    string `json:"rel_states,omitempty"` // e.g. i:27 or d:2;r:25
 }
@@ -252,6 +253,10 @@ func (m *Manager) LogicalSyncStatus(ctx context.Context, localHost string, local
 	if len(parts) >= 5 {
 		states = parts[4]
 	}
+	latest := ""
+	if len(parts) >= 6 {
+		latest = parts[5]
+	}
 	return LogicalStatus{
 		Subscription: subName,
 		TableTotal:   total,
@@ -259,6 +264,7 @@ func (m *Manager) LogicalSyncStatus(ctx context.Context, localHost string, local
 		ReceivedLSN:  parts[2],
 		Enabled:      pgBool(parts[3]),
 		RelStates:    states,
+		LatestEndLSN: latest,
 	}, nil
 }
 
@@ -282,8 +288,22 @@ SELECT
       WHERE s.subname = %s
       GROUP BY sr.srsubstate
     ) x
-  ), '');
-`, quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName))
+  ), ''),
+  COALESCE((SELECT latest_end_lsn::text FROM pg_stat_subscription WHERE subname = %s LIMIT 1), '');
+`, quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName), quoteLiteral(subName))
+}
+
+func logicalCaughtUp(st LogicalStatus) bool {
+	if !st.Enabled {
+		return false
+	}
+	if st.TableTotal > 0 && st.TableReady < st.TableTotal {
+		return false
+	}
+	if st.ReceivedLSN == "" || st.LatestEndLSN == "" {
+		return false
+	}
+	return st.ReceivedLSN == st.LatestEndLSN
 }
 
 func pgBool(v string) bool {
@@ -376,6 +396,61 @@ func initializingOnly(states string) bool {
 		}
 	}
 	return true
+}
+
+func (m *Manager) WaitLogicalCatchUp(ctx context.Context, localHost string, localPort int, subName string, timeout time.Duration) (LogicalStatus, error) {
+	deadline := time.Now().Add(timeout)
+	var last LogicalStatus
+	stable := 0
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return last, ctx.Err()
+		default:
+		}
+		st, err := m.LogicalSyncStatus(ctx, localHost, localPort, subName)
+		if err != nil {
+			return last, err
+		}
+		last = st
+		if logicalCaughtUp(st) {
+			stable++
+			if stable >= 2 {
+				return st, nil
+			}
+		} else {
+			stable = 0
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return last, fmt.Errorf("logical_catchup_timeout: enabled=%v ready=%d/%d received=%s latest=%s", last.Enabled, last.TableReady, last.TableTotal, last.ReceivedLSN, last.LatestEndLSN)
+}
+
+func (m *Manager) HasLocalSubscription(ctx context.Context, localHost string, localPort int, subName string) (bool, error) {
+	sql := fmt.Sprintf(`SELECT count(*) FROM pg_subscription WHERE subname = %s`, quoteLiteral(subName))
+	cmd := exec.CommandContext(ctx, m.Bins.Psql,
+		"-h", localHost, "-p", strconv.Itoa(localPort), "-d", "postgres",
+		"-t", "-A", "-c", sql,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("list subscription: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(string(out)))
+	return n > 0, nil
+}
+
+func (m *Manager) SetSubscriptionEnabled(ctx context.Context, localHost string, localPort int, subName string, enabled bool) error {
+	ident := quoteIdent(subName)
+	verb := "DISABLE"
+	if enabled {
+		verb = "ENABLE"
+	}
+	if err := m.psqlLocal(ctx, localHost, localPort, fmt.Sprintf(`ALTER SUBSCRIPTION %s %s`, ident, verb)); err != nil {
+		return fmt.Errorf("%s subscription %s: %w", strings.ToLower(verb), subName, err)
+	}
+	fmt.Fprintf(os.Stderr, "  subscription %s %s (publisher slot kept)\n", subName, strings.ToLower(verb))
+	return nil
 }
 
 func (m *Manager) psqlLocal(ctx context.Context, localHost string, localPort int, sql string) error {

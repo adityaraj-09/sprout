@@ -167,12 +167,14 @@ sequenceDiagram
     API->>ST: EnsureVolume replicas/name
     API->>CMP: initdb + start writable primary
     API->>R: pg_dump schema + CREATE SUBSCRIPTION
+    API->>R: wait until tables ready
+    API->>R: ALTER SUBSCRIPTION DISABLE (slot stays on prod)
   end
   API->>API: alloc port, write control.db
   API-->>CLI: connection_string
 ```
 
-Physical replicas stay standbys (WAL replay). Logical replicas are writable primaries; branches still CoW that directory.
+Physical replicas stay standbys (WAL replay). Logical replicas keep **one publisher slot** but **pause apply** after the initial copy. `sprout sync` or `SPROUT_SYNC_INTERVAL` (default 1h) enables the subscription, applies queued WAL, then disables apply again. Branches still CoW that directory and detach any cloned subscription.
 
 MongoDB connectors (`mongodb://` / `mongodb+srv://`) skip this Postgres path: `mongodump` into a local standalone `mongod`, then the same CoW snapshot/clone. There is no oplog follow. Clients use `mongodb://sprout:<pass>@<host>:27017/?tls=true` when the SNI passthrough is on (`SPROUT_MONGO_PROXY=false` keeps unique ports).
 

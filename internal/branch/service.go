@@ -29,13 +29,14 @@ var nameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
 // Service is the Phase 2/3 control-plane orchestrator.
 type Service struct {
-	Root        string
-	Store       meta.Store
-	Storage     storage.Provider
-	Compute     compute.Provider
-	Bins        postgres.Binaries
-	ColdSnap    bool
-	MaxLagBytes int64
+	Root         string
+	Store        meta.Store
+	Storage      storage.Provider
+	Compute      compute.Provider
+	Bins         postgres.Binaries
+	ColdSnap     bool
+	MaxLagBytes  int64
+	SyncInterval time.Duration // 0 = no hourly ticker; sprout sync still works
 
 	opsMu sync.Map // per-branch / per-connector locks
 }

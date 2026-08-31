@@ -295,8 +295,16 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 		return ConnectResult{}, e
 	}
 
+	progress.Println(ctx, "→ pause apply (keep publisher slot; hourly/sprout sync will resume)")
+	if err := rm.SetSubscriptionEnabled(ctx, "127.0.0.1", c.Port, sub, false); err != nil {
+		_, _, e := s.failConnector(ctx, c, err)
+		return ConnectResult{}, e
+	}
+	c.LastSyncedAt = time.Now().UTC()
+	c.ApplyPaused = true
+
 	lag := replica.Lag{ReceiveLSN: st.ReceivedLSN, ReplayLSN: st.ReceivedLSN}
-	fmt.Printf("✓ logical sync ready  tables=%d/%d lsn=%s\n", st.TableReady, st.TableTotal, st.ReceivedLSN)
+	fmt.Printf("✓ logical sync ready  tables=%d/%d lsn=%s apply_paused=true\n", st.TableReady, st.TableTotal, st.ReceivedLSN)
 	c, lag, err = s.finishConnector(ctx, projectID, c, lag)
 	if err != nil {
 		return ConnectResult{}, err
@@ -515,6 +523,7 @@ func (s *Service) cloneConnectorFromLocal(ctx context.Context, projectID string,
 	_ = rm.DropPublication(ctx, primary, pubName(dest))
 
 	lag := replica.Lag{ReceiveLSN: seed.LastLSN, ReplayLSN: seed.LastLSN}
+	dest.LastSyncedAt = seed.LastSyncedAt
 	fmt.Printf("✓ cloned local replica of this primary (independent copy, not a new Supabase slot)\n")
 	return s.finishConnector(ctx, projectID, dest, lag)
 }
@@ -684,6 +693,9 @@ func (s *Service) finishConnector(ctx context.Context, projectID string, c meta.
 		c.LastLSN = lag.ReceiveLSN
 	}
 	c.LastLagBytes = lag.LagBytes
+	if c.LastSyncedAt.IsZero() && (c.Mode != ModeLogical || engine.IsMongo(c.Engine)) {
+		c.LastSyncedAt = time.Now().UTC()
+	}
 	_ = s.Store.UpdateConnector(ctx, c)
 	_ = s.Store.PutBranch(ctx, meta.BranchRecord{
 		ID: "replica-" + c.ID, ProjectID: projectID, Name: "replica-" + c.Name, Role: "replica",
@@ -740,6 +752,7 @@ func (s *Service) ReplicationStatus(ctx context.Context, projectID, name string)
 		if st.ReceivedLSN != "" {
 			c.LastLSN = st.ReceivedLSN
 		}
+		c.ApplyPaused = !st.Enabled
 		if st.TableTotal > 0 && st.TableReady >= st.TableTotal {
 			c.Status = meta.ConnectorReplicating
 		}

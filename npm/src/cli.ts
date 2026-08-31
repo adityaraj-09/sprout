@@ -30,6 +30,7 @@ Commands:
   sprout init
   sprout connect [--name=<id>] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
   sprout status [name]
+  sprout sync [name]
   sprout connector list
   sprout connector delete <name> [--force]
   sprout connector suspend|resume <name>
@@ -388,6 +389,14 @@ async function main(): Promise<void> {
       case "status": {
         const name = positional(argv.slice(1))[0];
         const out = await client.replication(name);
+        console.log(JSON.stringify(out, null, 2));
+        break;
+      }
+      case "sync": {
+        const name = positional(argv.slice(1))[0];
+        const out = await client.sync(name, { onProgress: (msg) => console.log(msg) });
+        console.log("✓ synced");
+        if (out.message) console.log(`  ${out.message}`);
         console.log(JSON.stringify(out, null, 2));
         break;
       }
