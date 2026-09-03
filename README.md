@@ -1,99 +1,105 @@
-# sprout
+# Sprout
 
-Open-source **Postgres CoW branching** (plus MongoDB dump-restore connectors): near-instant database branches plus production sync via named connectors.
+Copy-on-write database branches for Postgres and MongoDB, with named connectors that sync from production.
 
-Spin up independent database instances that start as near-instant clones of a parent dataset (local demo or a replica of production), then diverge freely.
+Create isolated, writable databases in seconds from a local replica of prod. Branches never talk to production. One connector keeps a single replication slot; apply runs on a schedule or on demand.
 
-**VM / Azure from scratch:** see [`SETUP.md`](SETUP.md) (ZFS disk, Postgres 17 tools, firewall, connect + branch).  
-**System diagrams:** [`ARCHITECTURE.md`](ARCHITECTURE.md).  
-**LLM / agent skill:** [`SKILL.md`](SKILL.md) — how to drive the Sprout CLI against a hosted server.
+[Setup](SETUP.md) · [Architecture](ARCHITECTURE.md) · [CLI skill](SKILL.md) · [npm client](https://www.npmjs.com/package/sproutdb-cli)
+
+[![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![npm](https://img.shields.io/npm/v/sproutdb-cli)](https://www.npmjs.com/package/sproutdb-cli)
 
 ---
 
-## What it does
-
-| Capability | How |
-|------------|-----|
-| **CoW branches** | Snapshot + clone Postgres PGDATA or Mongo `dbPath` (APFS `cp -c` on macOS; **ZFS** on Linux) |
-| **Control plane** | HTTP API + thin CLI; metadata in `data/control.db` |
-| **Lifecycle** | create / list / get / reset / delete / suspend / resume |
-| **Connectors** | Multiple named remotes; each gets its own local replica + port |
-| **Physical sync** | `pg_basebackup` → hot standby → branch with replay pause |
-| **Logical sync** | Publication + schema dump + subscription (e.g. Supabase) |
-| **MongoDB (v1)** | `mongodump` snapshot into local `mongod`; CoW branches; `:27017` SNI passthrough; no oplog |
+## Overview
 
 ```text
-upstream(s)  ──connect --name──►  data/replicas/<name>/
-                                        │
-                              branch create --from <name>
-                                        ▼
-                               data/branches/<branch>/   (independent primary)
+production / lab
+        │  sprout connect --name=<connector>
+        ▼
+data/replicas/<connector>/     local replica (one slot on prod)
+        │  sprout branch create <name> --from=<connector>
+        ▼
+data/branches/<name>/          independent primary — CoW clone, no prod traffic
 ```
 
-`sprout init` still creates a local demo primary at `data/main` (port **55432**). Use `--from=main` to branch from it.
+`sprout init` still provisions a local demo cluster at `data/main` (port **55432**). Branch it with `--from=main`.
 
-### Node client (npm)
-
-```bash
-npm install -g sproutdb-cli
-# or from this repo:
-make npm-link
-```
-
-Package: **[`sproutdb-cli`](https://www.npmjs.com/package/sproutdb-cli)** — installs the `sprout` binary + `SproutClient` SDK. Still needs `./bin/sprout-server` running.  
-Docs: [`npm/README.md`](npm/README.md) · Repo: [github.com/adityaraj-09/sprout](https://github.com/adityaraj-09/sprout)
+| | |
+|---|---|
+| **Branches** | Filesystem snapshot + clone of PGDATA or Mongo `dbPath` (ZFS on Linux, APFS `cp -c` on macOS, full copy as fallback) |
+| **Connectors** | Named remotes. Each gets its own local replica, port, and metadata row |
+| **Physical Postgres** | `pg_basebackup` → hot standby → branch with WAL replay paused for a consistent snapshot |
+| **Logical Postgres** | Publication + schema dump + subscription (Supabase and other managed hosts). Slot kept; apply paused between syncs |
+| **MongoDB** | Point-in-time `mongodump` into local `mongod`. No oplog follow. CoW branches from that snapshot |
+| **Control plane** | `sprout-server` HTTP API + thin CLI. State in SQLite (`data/control.db`) |
 
 ---
 
 ## Requirements
 
-- **Go** 1.24+
-- **Postgres client/server tools** on `PATH` (`initdb`, `pg_ctl`, `psql`, `pg_basebackup`, `pg_dump`)
-  - For remote PG 17 (e.g. Supabase), prefer matching client bits:  
-    `export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"`
-- **macOS**: APFS volume (CoW via `cp -c`)
-- **Linux**: ZFS preferred when available; otherwise detection falls through to APFS-style paths only if appropriate
-- Auth token for API (default `dev-token`)
+- **Go 1.24+**
+- Postgres tools on `PATH`: `initdb`, `pg_ctl`, `psql`, `pg_basebackup`, `pg_dump`
+  - Match the upstream major version (Supabase PG 17): `export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"`
+- **macOS:** APFS volume for CoW clones
+- **Linux:** ZFS when `SPROUT_ZFS_DATASET` is set; otherwise full copy
+- API token (`dev-token` locally; set `SPROUT_TOKEN` when the API is public)
+
+---
+
+## Install
+
+```bash
+git clone https://github.com/adityaraj-09/sprout.git
+cd sprout
+make build          # bin/sprout + bin/sprout-server
+```
+
+CLI against a hosted server (no local server required):
+
+```bash
+npm install -g sproutdb-cli
+sprout config set api-url http://strido.fit:8080
+sprout login
+```
+
+The npm package is **[`sproutdb-cli`](https://www.npmjs.com/package/sproutdb-cli)** (`sprout` on PATH + `SproutClient` SDK). From this repo: `make npm-link`. See [`npm/README.md`](npm/README.md).
+
+A production-style VM (ZFS, firewall, Postgres 17) is documented in [`SETUP.md`](SETUP.md).
 
 ---
 
 ## Quick start
 
 ```bash
-export PATH="/opt/homebrew/bin:$PATH"   # or postgresql@17 bin as needed
+export PATH="/opt/homebrew/bin:$PATH"
 make build
 ```
 
-### Option A — local demo (no remote)
+### Local demo
 
 ```bash
-# terminal 1
-./bin/sprout-server
+./bin/sprout-server                 # terminal 1
 
-# terminal 2
-./bin/sprout init
+./bin/sprout init                   # terminal 2
 ./bin/sprout branch create alice --from=main
 ./bin/sprout branch list
 psql postgresql://localhost:<port>/postgres
 ```
 
-### Option B — lab “production” + named connector
+### Lab primary + connector
 
 ```bash
-make lab-primary          # fake prod on :55431 (wal_level=logical)
-
-# terminal 1
+make lab-primary                    # fake prod on :55431 (wal_level=logical)
 ./bin/sprout-server
 
-# terminal 2
 ./bin/sprout connect --name=lab \
   "postgresql://$(whoami)@127.0.0.1:55431/postgres"
 ./bin/sprout status lab
 ./bin/sprout branch create from-lab --from=lab
-psql postgresql://localhost:<port>/postgres -c 'SELECT count(*) FROM products;'
 ```
 
-### Option C — multiple connectors
+### Several remotes
 
 ```bash
 ./bin/sprout connect --name=lab --mode=physical \
@@ -107,50 +113,104 @@ psql postgresql://localhost:<port>/postgres -c 'SELECT count(*) FROM products;'
 ./bin/sprout branch create feat-b --from=supabase
 ```
 
-If **one** connector exists, `--from` is optional. With **multiple**, `--from` is required.
+`--from` is optional when exactly one connector exists. With more than one, it is required.
 
 ---
 
-## Team use (one hosted server)
+## Hosted teams
 
-One VM, one project (`default`). Anyone with a GitHub account can `sprout login`. GitHub users are isolated: each person only sees **their** connectors and **their** branches. Pre-GitHub / unowned rows stay visible to the machine `SPROUT_TOKEN` only.
+One VM, one project (`default`). Anyone with a GitHub account can `sprout login`. Each GitHub user sees only their connectors and branches. Unowned / pre-GitHub rows are visible to the machine `SPROUT_TOKEN` only.
 
-**Server (once):** create a GitHub OAuth App, enable **Device Flow**, then:
+**Server (once)** — GitHub OAuth App with Device Flow enabled:
 
 ```bash
 export SPROUT_GITHUB_CLIENT_ID=Iv1.xxxxxxxx
-# optional lock-down later:
-# export SPROUT_GITHUB_USERS=alice,bob
+# export SPROUT_GITHUB_USERS=alice,bob     # omit = any GitHub user
 # export SPROUT_GITHUB_ORGS=my-org
-# keep a strong SPROUT_TOKEN as a machine/break-glass token
+# keep a strong SPROUT_TOKEN as break-glass
 ```
 
 **Each person:**
 
 ```bash
 sprout config set api-url http://strido.fit:8080
-sprout login          # opens GitHub in the browser; saves ~/.sprout/config.json
+sprout login
 sprout whoami
-sprout connect --name=supabase --mode=logical 'postgresql://…'   # your replica
+sprout connect --name=supabase --mode=logical 'postgresql://…'
 sprout branch create testdb --from=supabase
 ```
 
-A later `sprout connect` to the **same** Supabase URL clones a local replica (no extra WAL sender). Only the first live replica of that database opens a logical slot on prod.
+A second `sprout connect` to the **same** host:port/database clones an existing local replica (no extra prod slot). Only the first live replica of that URL opens a logical slot on production.
 
-Use **your** URLs (GitHub login is in the hostname so alice and bob can both have `testdb` / `supabase`):
+Hostnames include the GitHub login so two people can both use `testdb` / `supabase`:
 
-- connector: `postgresql://sprout:<pass>@supabase-alice.strido.fit:5432/postgres`
-- branch: `postgresql://sprout:<pass>@testdb-alice-supabase.strido.fit:5432/postgres`
+| Role | Example |
+|------|---------|
+| Connector | `postgresql://sprout:<pass>@supabase-alice.strido.fit:5432/postgres` |
+| Branch | `postgresql://sprout:<pass>@testdb-alice-supabase.strido.fit:5432/postgres` |
 
-`sprout connector list` / `sprout branch list` only show your rows. `sprout logout` drops the GitHub token and does **not** fall back to the shared machine token. Shared `main` (`sprout init`) is machine-token only.
+`/postgres` is the database **inside** the instance, not the branch name.
 
-Keep `SPROUT_TOKEN` for scripts and ops (sees everything, including leftover unowned connectors).
+`sprout logout` drops the GitHub token and does not fall back to the shared machine token. `sprout init` (shared `main`) is machine-token only.
+
+---
+
+## Connect modes
+
+| Mode | When | What it does |
+|------|------|----------------|
+| **physical** | You control WAL / replication | `pg_basebackup -R` into `data/replicas/<name>/`, streaming hot standby |
+| **logical** | Managed Postgres / Supabase | Publication on prod → local `initdb` → schema dump → subscription. **Slot stays; apply pauses** after the initial copy |
+| **mongodb** | Atlas / `mongodb://` | `mongodump` → local `mongod`. Snapshot only — no oplog |
+
+Logical publications target `public` schema tables (or `--tables=`). Slot names are per connector (`sprout_pub_<name>`, `sprout_sub_<name>`).
+
+After logical connect, queued WAL is applied by:
+
+- **`sprout sync [name]`** — apply now, then pause again
+- **`SPROUT_SYNC_INTERVAL`** — default `1h`; set `off` / `0` to disable the ticker
+
+Branches CoW the replica directory and **detach** any cloned subscription so they cannot steal the connector’s slot.
+
+Mongo `--tables=` is a collection allowlist and requires a database in the URL. With a DNS `SPROUT_PUBLIC_HOST`, Mongo URLs use port **27017** and `tls=true` (SNI selects the instance). `SPROUT_MONGO_PROXY=false` keeps unique ports.
+
+---
+
+## Public Postgres (and Mongo) URLs
+
+On a VPS, branches are ordinary database processes. The control plane is HTTP; SQL goes through an SNI proxy when the public host is a DNS name.
+
+```bash
+export SPROUT_LISTEN=0.0.0.0:8080
+export SPROUT_PUBLIC_HOST=strido.fit
+export SPROUT_TOKEN=some-secret
+export SPROUT_SAFE=true
+./bin/sprout-server
+```
+
+```text
+postgresql://sprout:<pass>@testdb-lab.strido.fit:5432/postgres
+mongodb://sprout:<pass>@feat-alice-atlas.strido.fit:27017/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin
+```
+
+Point `*.strido.fit` (and the apex) at the VM. Open **8080** (API), **5432** (Postgres SNI), and **27017** (Mongo SNI). Localhost and raw IPs skip the proxy and use unique ports (`localhost:55440`).
+
+Clients need TLS so SNI is visible (`sslmode=require` or libpq `prefer`; Mongo `tls=true`). A self-signed `*.host` cert is written under `$SPROUT_DATA/tls` unless you set `SPROUT_TLS_CERT` / `SPROUT_TLS_KEY`. Binding 5432/27017 needs root or `setcap cap_net_bind_service=+ep ./bin/sprout-server`.
+
+Remote auth through the proxy is **SCRAM-SHA-256** (loopback `127.0.0.1` stays trust for the control plane). `SPROUT_PG_PROXY=false` / `SPROUT_MONGO_PROXY=false` advertise unique ports instead. `SPROUT_TRUST_REMOTE=true` is lab-only open trust.
+
+```bash
+sprout config set api-url http://strido.fit:8080
+sprout config set token some-secret
+sprout branch create testdb --from=lab
+psql "postgresql://sprout:<pass>@testdb-lab.strido.fit:5432/postgres"
+```
 
 ---
 
 ## Architecture
 
-Full diagrams (context, SNI routing, connect, CoW branch create, reconciler): [`ARCHITECTURE.md`](ARCHITECTURE.md).
+Full diagrams: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ```mermaid
 flowchart TB
@@ -159,7 +219,7 @@ flowchart TB
     PSQL["psql / apps"]
   end
 
-  subgraph vm ["sprout-server on the VM"]
+  subgraph vm ["sprout-server"]
     API["HTTP API :8080"]
     PX["TLS SNI proxy :5432"]
     ORCH["branch orchestrator"]
@@ -168,67 +228,45 @@ flowchart TB
     CMP["compute pg_ctl"]
   end
 
-  subgraph data [PGDATA]
-    RX["replicas/x :55434"]
-    RY["replicas/y :55435"]
-    BX["branches/test-x :55440"]
-    BY["branches/test-y :55441"]
+  subgraph data [Data dirs]
+    RX["replicas/x"]
+    BX["branches/test-x"]
   end
 
   subgraph up [Upstreams]
     U1["prod / Supabase"]
-    U2["lab primary"]
   end
 
-  CLI -->|REST Bearer| API
+  CLI -->|Bearer REST| API
   API --> ORCH
   ORCH --> META
   ORCH --> ST
   ORCH --> CMP
-  ORCH --> RX
-  ORCH --> RY
-  ORCH --> BX
-  ORCH --> BY
-  PX -->|"SNI test-x.host"| BX
-  PX -->|"SNI test-y.host"| BY
   PSQL --> PX
+  PX -->|SNI hostname| BX
   RX -.->|physical or logical| U1
-  RY -.->|physical or logical| U2
 ```
+
+**Physical branch create:** lag gate → pause WAL replay → checkpoint → CoW snapshot/clone → resume replay → `PrepareClone` (strip `standby.signal`) → start as primary.
+
+**Logical / main branch create:** checkpoint (± cold stop) → same CoW path → detach cloned subscriptions so the branch never uses the connector’s prod slot.
 
 ```text
-cmd/sprout          thin HTTP client (CLI)
-cmd/sprout-server   control plane + reconciler + SNI proxy
+cmd/sprout          HTTP CLI
+cmd/sprout-server   control plane, reconciler, SNI proxies
 
 internal/
-  api/        HTTP routes, Bearer auth
-  branch/     orchestrate init / connect / create / lifecycle
-  replica/    pg_basebackup, standby, logical pub/sub
-  storage/    APFS / ZFS CoW provider
+  api/        HTTP + Bearer auth
+  branch/     init, connect, create, sync, lifecycle
+  replica/    basebackup, standby, logical pub/sub
+  storage/    ZFS / APFS / copy
   compute/    local pg_ctl (Docker stub)
-  postgres/   initdb, checkpoint, PrepareClone, seed
-  pgproxy/    TLS SNI router on :5432
-  meta/       SQLite → data/control.db (imports legacy control.json once)
-  reconcile/  keep compute vs metadata aligned
+  postgres/   initdb, PrepareClone, advertised URLs
+  pgproxy/    TLS SNI on :5432
+  meta/       SQLite control.db
+  reconcile/  compute vs metadata
   config/     env defaults
 ```
-
-**Branch create (physical standby parent)**
-
-1. Lag gate  
-2. `pg_wal_replay_pause` + `CHECKPOINT`  
-3. CoW snapshot → clone into `data/branches/<name>/`  
-4. Resume replay on the replica  
-5. `PrepareClone` (strip standby signals) → start as primary  
-
-**Branch create (logical replica / local main)**
-
-Same CoW path, but parent is a normal primary (checkpoint ± optional cold stop).
-The clone inherits `pg_subscription`; Sprout detaches it so the branch is a
-frozen snapshot and does not reuse the connector's prod replication slot.
-The logical connector **keeps the prod slot** but **pauses apply** after the
-initial copy. `sprout sync` or `SPROUT_SYNC_INTERVAL` (default 1h) applies
-queued WAL, then pauses again. Branches never attach to that slot.
 
 ---
 
@@ -236,184 +274,108 @@ queued WAL, then pauses again. Branches never attach to that slot.
 
 ```text
 data/
-  control.db                # SQLite control plane (projects, branches, connectors)
-  control.json              # legacy; auto-imported into control.db on first open
-  main/                     # optional local demo (sprout init) — :55432
-  lab-primary/              # scripts/lab-primary.sh — :55431
-  replicas/<connector>/     # one PGDATA + port per connector
-  branches/<name>/          # branch PGDATA
-  snapshots/<name>/         # CoW snapshot refs (APFS)
+  control.db              SQLite control plane
+  control.json            legacy; imported once if present
+  main/                   optional demo (sprout init) — :55432
+  lab-primary/            scripts/lab-primary.sh — :55431
+  replicas/<connector>/   one PGDATA or dbPath per connector
+  branches/<name>/        branch data directory
+  snapshots/<name>/       APFS snapshot refs
   logs/*.log
 ```
 
-Default port allocator starts at **55433** (`next_port` in `control.db`).  
-Connectors and branches each get an allocated port; in-use listeners are skipped so a leftover `mongod` cannot block the next Postgres connector.
-
-`data/` is gitignored — never commit it (URLs may contain passwords).
+Ports start at **55433**. In-use listeners are skipped so a leftover `mongod` cannot block the next Postgres instance. `data/` is gitignored — it can contain connection secrets.
 
 ---
 
-## CLI reference
+## CLI
 
-| Command | Description |
-|---------|-------------|
-| `sprout init` | Ensure default project + local `main` + seed demo |
-| `sprout connect [--name=id] [--engine=postgres\|mongodb] [--mode=physical\|logical] <url>` | Bootstrap named replica |
-| `sprout status [name]` | Replication lag / logical sync for a connector |
-| `sprout sync [name]` | Apply queued logical WAL now, then pause apply (slot kept) |
-| `sprout connector list` | List connectors (password redacted) |
-| `sprout connector delete <name> [--force]` | Drop local replica + remote pub; `--force` also deletes child branches |
-| `sprout health` | `GET /healthz` |
-| `sprout login` | GitHub device flow; saves token to `~/.sprout/config.json` |
-| `sprout logout` | Drop the saved GitHub token |
-| `sprout whoami` | Identity the server accepted |
-| `sprout branch create <name> [--from=<connector\|main>]` | CoW branch |
-| `sprout branch list` | Branches + replicas + main |
-| `sprout branch get <name> [--from]` | JSON record |
-| `sprout branch reset <name> [--from]` | Re-clone from stored snapshot |
-| `sprout branch delete <name> [--from]` | Stop + destroy |
-| `sprout branch suspend <name> [--from]` | Stop compute (`idle`) |
-| `sprout branch resume <name> [--from]` | Start again |
-| `sprout connector suspend <name>` | Stop connector replica **and** all its branches |
-| `sprout connector resume <name>` | Start connector + idle branches again |
+| Command | Purpose |
+|---------|---------|
+| `sprout init` | Local demo project + `main` |
+| `sprout connect [--name=] [--engine=] [--mode=] [--wipe\|--no-wipe] [--dry-run] [--tables=] <url>` | Bootstrap a named replica |
+| `sprout status [name]` | Connector lag / logical status |
+| `sprout sync [name]` | Apply queued logical WAL now, then pause (slot kept) |
+| `sprout connector list \| delete [--force] \| suspend \| resume <name>` | Connector lifecycle |
+| `sprout branch create <name> [--from=]` | CoW branch |
+| `sprout branch list \| get \| diff \| reset \| delete \| suspend \| resume` | Branch lifecycle (`--from` if the name is shared) |
+| `sprout login \| logout \| whoami` | GitHub device flow |
+| `sprout org …` | Orgs and members |
+| `sprout doctor \| health` | Diagnostics |
 
-Defaults:
-
-- `--name=primary` if omitted on connect  
-- `--engine` inferred from URL (`mongodb://` / `mongodb+srv://` → mongodb, else postgres)  
-- `--mode=physical` if omitted for Postgres; MongoDB is always `logical` (dump snapshot) 
+Defaults: `--name=primary`; `--engine` from URL scheme; Postgres `--mode=physical`; Mongo is always dump-snapshot logical. `connector delete --force` also deletes child branches.
 
 ---
 
 ## HTTP API
 
-Base URL: `http://127.0.0.1:8080`  
-Auth: `Authorization: Bearer <token>` (GitHub user token from `sprout login`, or `SPROUT_TOKEN`). `/healthz` and `/v1/auth/github` are open.
+Base: `http://127.0.0.1:8080`. Header: `Authorization: Bearer <token>` (GitHub user token or `SPROUT_TOKEN`). `/healthz` and `/v1/auth/github` are unauthenticated. Project path is usually `default`.
 
-| Method | Path | Body / notes |
-|--------|------|----------------|
+<details>
+<summary>Route table</summary>
+
+| Method | Path | Notes |
+|--------|------|--------|
 | `GET` | `/healthz` | `{ "status": "ok" }` |
-| `GET` | `/v1/auth/github` | public: `{client_id, host, scope, ready}` for device flow |
-| `GET` | `/v1/whoami` | `{kind, login, id}` |
-| `POST` | `/v1/init` | create/start local main |
-| `GET` | `/v1/projects` | list projects |
-| `GET` | `/v1/connectors` | all connectors (URL passwords redacted) |
-| `POST` | `/v1/projects/{project}/connect` | `{"url","engine","mode","name"}` |
-| `DELETE` | `/v1/projects/{project}/connectors/{name}` | delete replica; `?force=true` also deletes child branches |
-| `GET` | `/v1/projects/{project}/replication?name=` | lag (name optional if sole connector) |
-| `GET` | `/v1/projects/{project}/connectors/{name}/replication` | lag for one connector |
+| `GET` | `/v1/auth/github` | Device-flow metadata |
+| `GET` | `/v1/whoami` | `{kind, login, id, org}` |
+| `POST` | `/v1/init` | Local `main` (machine token) |
+| `GET` | `/v1/connectors` | Passwords redacted |
+| `POST` | `/v1/projects/{project}/connect` | `url`, `engine`, `mode`, `name`, `wipe`, `dry_run`, `tables` |
+| `POST` | `/v1/projects/{project}/sync` | Optional `?name=` |
+| `POST` | `/v1/projects/{project}/connectors/{name}/sync` | Apply logical WAL now |
+| `DELETE` | `/v1/projects/{project}/connectors/{name}` | `?force=true` deletes child branches |
+| `GET` | `/v1/projects/{project}/replication` | `?name=` if several connectors |
+| `GET` | `/v1/projects/{project}/connectors/{name}/replication` | One connector |
+| `POST` | `/v1/projects/{project}/connectors/{name}/suspend\|resume` | Replica + child branches |
 | `POST` | `/v1/projects/{project}/branches` | `{"name","from"}` |
-| `GET` | `/v1/projects/{project}/branches` | list |
-| `GET` | `/v1/projects/{project}/branches/{name}` | get |
-| `DELETE` | `/v1/projects/{project}/branches/{name}` | delete |
-| `POST` | `.../branches/{name}/reset` | reset |
-| `POST` | `.../branches/{name}/suspend` | suspend |
-| `POST` | `.../branches/{name}/resume` | resume |
-| `POST` | `.../connectors/{name}/suspend` | suspend connector + branches |
-| `POST` | `.../connectors/{name}/resume` | resume connector + branches |
+| `GET` | `/v1/projects/{project}/branches` | List |
+| `GET` / `DELETE` | `/v1/projects/{project}/branches/{name}` | `?from=` if ambiguous |
+| `GET` | `.../branches/{name}/diff` | vs parent |
+| `POST` | `.../branches/{name}/reset\|suspend\|resume` | |
 
-Use `project` = `default` (resolved by name) or a project UUID.
+Long jobs (`connect`, `branch create`, `sync`) stream NDJSON when `Accept: application/x-ndjson` or `?progress=1`.
+
+</details>
 
 ---
 
-## Connect modes
+## Configuration
 
-| Mode | Command | Behavior |
-|------|---------|----------|
-| **physical** | `connect --name=x URL` | Postgres: `pg_basebackup -R` into `data/replicas/x/`, streaming hot standby |
-| **logical** | `connect --name=x --mode=logical URL` | Postgres: publication → init local PGDATA → `pg_dump --schema-only` → `CREATE SUBSCRIPTION` |
-| **mongodb** | `connect --name=x 'mongodb://…'` | `mongodump` → local standalone `mongod`. No oplog follow, no Docker Mongo. With a DNS host, URLs use `:27017` (SNI passthrough) |
-
-Logical is for hosts that block physical replication (common on managed Postgres / Supabase). Publication/subscription names are scoped per connector (`sprout_pub_<name>`, `sprout_sub_<name>`). Logical publications are limited to `public` schema tables where applicable.
-
-MongoDB connect is a **point-in-time snapshot**, not continuous replication. `--tables=` is a collection allowlist and requires a database in the URL. Branches CoW the local `dbPath` and start as independent standalones. With a DNS `SPROUT_PUBLIC_HOST`, connection strings use `:27017` and `tls=true` (SNI selects the instance). Localhost / IP still use the unique allocated port. `SPROUT_MONGO_PROXY=false` keeps unique ports.
-
-**Physical** branch create can pause WAL replay for a consistent snapshot.  
-**Logical** local datasets are writable primaries; branches still CoW that directory.
-
----
-
-## Environment
-
-### Server (`sprout-server`)
+### Server
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `SPROUT_DATA` | `./data` | Data root |
 | `SPROUT_LISTEN` | `127.0.0.1:8080` | API bind (`0.0.0.0:8080` to expose) |
-| `SPROUT_TOKEN` | `dev-token` | Bearer token (machine / break-glass; humans should `sprout login`) |
-| `SPROUT_GITHUB_CLIENT_ID` | unset | GitHub OAuth App client ID (enable Device Flow on the app) |
-| `SPROUT_GITHUB_USERS` | unset | Optional GitHub logins; omit to allow **any** GitHub user |
-| `SPROUT_GITHUB_ORGS` | unset | Optional orgs; omit to allow **any** GitHub user |
-| `SPROUT_GITHUB_HOST` | `https://github.com` | GitHub or GitHub Enterprise |
-| `SPROUT_GITHUB_API` | `https://api.github.com` | GitHub API base |
-| `SPROUT_PUBLIC_HOST` | `localhost` | Hostname in branch connection strings |
-| `SPROUT_BRANCH_SUBDOMAIN` | auto | `true`/`false`. Auto-on when public host is a DNS name: URLs become `<name>-<owner>-<connector>.<host>:5432` |
-| `SPROUT_PG_PROXY` | auto | SNI proxy on `:5432` when subdomains are on. `false` advertises unique ports instead |
-| `SPROUT_PG_PROXY_PORT` | `5432` | Public Postgres port for the SNI proxy |
-| `SPROUT_MONGO_PROXY` | auto | SNI passthrough on `:27017` when subdomains are on. `false` advertises unique Mongo ports |
-| `SPROUT_MONGO_PROXY_PORT` | `27017` | Public Mongo port for the SNI passthrough |
-| `SPROUT_TLS_CERT` / `SPROUT_TLS_KEY` | auto | TLS cert for the proxy; otherwise a self-signed wildcard is written to `$SPROUT_DATA/tls` |
-| `SPROUT_PG_LISTEN` | auto | Postgres `listen_addresses` (`*` when public host is set) |
-| `SPROUT_SAFE` | unset | Set `true` to keep fsync on (recommended when exposing) |
-| `SPROUT_TRUST_REMOTE` | unset | Set `true` to keep trust auth for remote TCP (lab only). Default remote auth is SCRAM-SHA-256 |
-| `SPROUT_DB_PASSWORD` | random | Shared DB password for advertised roles; otherwise generated per instance |
-| `SPROUT_AUTO_RESUME` | unset | Set `true` to restart crashed connectors/branches |
-| `SPROUT_SYNC_INTERVAL` | `1h` | How often to apply queued logical WAL then pause again. `off` / `0` disables the ticker (`sprout sync` still works) |
-| `SPROUT_COMPUTE` | `auto` | Compute provider (`local` / `docker` / `auto`) |
-| `SPROUT_COLD_SNAP` | `true` | Cold-stop parent for non-standby snapshots (`false` to skip) |
+| `SPROUT_TOKEN` | `dev-token` | Machine / break-glass Bearer token |
+| `SPROUT_GITHUB_CLIENT_ID` | unset | OAuth App client ID (Device Flow) |
+| `SPROUT_GITHUB_USERS` / `SPROUT_GITHUB_ORGS` | unset | Optional allowlists; omit = any GitHub user |
+| `SPROUT_GITHUB_HOST` / `SPROUT_GITHUB_API` | github.com / api.github.com | GitHub or GHE |
+| `SPROUT_PUBLIC_HOST` | `localhost` | Hostname in advertised URLs |
+| `SPROUT_BRANCH_SUBDOMAIN` | auto | `true` when public host is a DNS name |
+| `SPROUT_PG_PROXY` / `SPROUT_PG_PROXY_PORT` | auto / `5432` | Postgres SNI proxy |
+| `SPROUT_MONGO_PROXY` / `SPROUT_MONGO_PROXY_PORT` | auto / `27017` | Mongo SNI passthrough |
+| `SPROUT_TLS_CERT` / `SPROUT_TLS_KEY` | auto | Else self-signed wildcard under `$SPROUT_DATA/tls` |
+| `SPROUT_PG_LISTEN` | auto | `listen_addresses` (`*` when public host is set) |
+| `SPROUT_SAFE` | unset | `true` keeps fsync on when public |
+| `SPROUT_TRUST_REMOTE` | unset | `true` = remote trust (lab only). Default remote auth is SCRAM |
+| `SPROUT_DB_PASSWORD` | random | Shared advertised password; else per instance |
+| `SPROUT_AUTO_RESUME` | unset | `true` restarts crashed connectors/branches |
+| `SPROUT_SYNC_INTERVAL` | `1h` | Logical apply cadence. `off` / `0` disables ticker (`sprout sync` still works) |
+| `SPROUT_COMPUTE` | `auto` | `local` / `docker` / `auto` |
+| `SPROUT_COLD_SNAP` | `true` | Cold-stop parent for non-standby snapshots |
 
-### CLI (`sprout`)
+### CLI
 
 | Variable | Default |
 |----------|---------|
-| `SPROUT_SERVER` | `http://127.0.0.1:8080` (or `apiUrl` in `~/.sprout/config.json`) |
-| `SPROUT_TOKEN` | overrides the token saved by `sprout login` |
-| `SPROUT_CONFIG` | path to `config.json` |
+| `SPROUT_SERVER` | `http://127.0.0.1:8080` or `apiUrl` in `~/.sprout/config.json` |
+| `SPROUT_TOKEN` | Overrides the token from `sprout login` |
+| `SPROUT_ORG` | Current org (`sprout org use`) |
+| `SPROUT_CONFIG` | Path to `config.json` |
 
-### Lab
-
-| Variable | Default |
-|----------|---------|
-| `LAB_PRIMARY_PORT` | `55431` |
-| `SPROUT_DATA` | repo `data/` (also used by lab script) |
-
----
-
-## Host like a normal Postgres server
-
-Branches are regular Postgres instances. On a VPS:
-
-```bash
-export SPROUT_LISTEN=0.0.0.0:8080
-export SPROUT_PUBLIC_HOST=strido.fit       # or a raw IP / db.example.com
-export SPROUT_TOKEN=some-secret
-export SPROUT_SAFE=true                    # keep durable writes when public
-./bin/sprout-server
-```
-
-When `SPROUT_PUBLIC_HOST` is a DNS name, Sprout runs a TLS SNI proxy on **5432** (Postgres) and a TLS SNI passthrough on **27017** (Mongo). The hostname selects the process (`test-x` vs `test-y`); you do not put the unique backend port in the URL:
-
-```text
-postgresql://sprout:<pass>@testdb-lab.strido.fit:5432/postgres
-mongodb://sprout:<pass>@feat-alice-atlas.strido.fit:27017/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin
-```
-
-Point a wildcard record `*.strido.fit` (and `strido.fit`) at the VM. Open firewall **5432**, **27017**, and **8080** (API). Localhost and raw IPs stay as-is (`localhost:55440`) with no proxy. `/postgres` is the database inside the instance, not the branch name.
-
-Clients use TLS so SNI is visible (`sslmode=require` or libpq's default `prefer`; Mongo `tls=true`). A self-signed `*.strido.fit` cert is created under `$SPROUT_DATA/tls` unless you set `SPROUT_TLS_CERT` / `SPROUT_TLS_KEY`. Binding `:5432` / `:27017` needs root or `setcap cap_net_bind_service=+ep ./bin/sprout-server`.
-
-Then:
-
-```bash
-sprout config set api-url http://strido.fit:8080
-sprout config set token some-secret
-sprout branch create testdb --from=lab
-# connection_string → postgresql://sprout:<pass>@testdb-lab.strido.fit:5432/postgres
-psql "postgresql://sprout:<pass>@testdb-lab.strido.fit:5432/postgres"
-```
-
-Remote auth through the proxy is **SCRAM-SHA-256** (loopback `127.0.0.1` stays trust so the control plane can still connect). Connection strings include the generated password. `SPROUT_PG_PROXY=false` restores unique Postgres ports and skips the Postgres proxy. `SPROUT_MONGO_PROXY=false` does the same for Mongo. `SPROUT_TRUST_REMOTE=true` restores the old open-trust lab behavior when unique ports are public.
+Lab: `LAB_PRIMARY_PORT` defaults to `55431`.
 
 ---
 
@@ -423,47 +385,46 @@ Remote auth through the proxy is **SCRAM-SHA-256** (loopback `127.0.0.1` stays t
 make build              # bin/sprout + bin/sprout-server
 make test               # go test ./...
 make server             # build + run server
-make lab-primary        # start lab Postgres on :55431
+make lab-primary        # lab Postgres on :55431
 make lab-primary-stop
 make clean              # stop main / lab / replicas / branches
-make reset-data         # clean + wipe main, replicas, branches, snapshots, control.db
+make reset-data         # clean + wipe data dirs and control.db
 ```
 
 ---
 
-## Typical ports
+## Ports
 
 | Port | Role |
 |------|------|
-| `5432` | Public Postgres SNI proxy when `SPROUT_PUBLIC_HOST` is a DNS name |
-| `27017` | Public Mongo SNI passthrough (same hostnames; `mongod` stays on loopback) |
-| `55431` | Lab primary (`scripts/lab-primary.sh`) |
-| `55432` | Local demo `main` (`sprout init`) |
-| `55433+` | Internal connector/branch ports (loopback when the proxy is on) |
+| `5432` | Public Postgres SNI proxy (DNS `SPROUT_PUBLIC_HOST`) |
+| `27017` | Public Mongo SNI passthrough |
+| `55431` | Lab primary |
+| `55432` | Local `main` |
+| `55433+` | Internal connector and branch ports (loopback when the proxy is on) |
 
-Exact ports for connectors/branches are stored in `data/control.db` and shown by `connector list` / `branch list`.
-
----
-
-## Security notes
-
-- Connector URLs can contain credentials and are stored in `data/control.db`. Keep `data/` out of git (already ignored).
-- List APIs redact passwords in URLs; rotate any secret that was pasted into a shell history or chat.
-- Default token `dev-token` is for local use only — set `SPROUT_TOKEN` if you expose the listen address.
-- Remote Postgres uses SCRAM unless `SPROUT_TRUST_REMOTE=true`. `sprout doctor` fails if remote trust is on without `SPROUT_SAFE=true`.
+Exact allocations live in `control.db` and in `connector list` / `branch list`.
 
 ---
 
-## Status / limitations
+## Security
 
-- **macOS + Homebrew Postgres** is the primary tested path (APFS CoW).
-- **ZFS** provider creates a child dataset per main/replica/branch (not a single `main` snapshot). Docker compute is stubbed.
-- Supabase **physical** replication typically fails (`pg_hba` / replication privileges) — use **logical**.
-- Metadata is SQLite (`data/control.db`, WAL); legacy `control.json` is imported once if present.
-- Reconciler aligns compute with branch **and** connector state. Unexpected downtime is `crashed` (not user `idle`); set `SPROUT_AUTO_RESUME=true` to restart.
+- Connector URLs (including passwords) are stored in `data/control.db`. Do not commit `data/`.
+- List APIs redact URL passwords. Rotate anything pasted into a shell or chat.
+- `dev-token` is local-only. Set `SPROUT_TOKEN` before exposing `:8080`.
+- Remote Postgres is SCRAM unless `SPROUT_TRUST_REMOTE=true`. `sprout doctor` fails if remote trust is on without `SPROUT_SAFE=true`.
 
 ---
 
-## License / intent
+## Limitations
 
-Experimental OSS for CoW Postgres branches plus production connectors. Local-first; not a hosted SaaS.
+- Primary test path is **macOS + Homebrew Postgres** (APFS CoW).
+- **ZFS** uses a child dataset per main/replica/branch. Docker compute is a stub.
+- Supabase **physical** replication usually fails (`pg_hba` / privileges) — use **logical**.
+- Unexpected compute loss is `crashed`, not user `idle`. Set `SPROUT_AUTO_RESUME=true` to restart.
+
+---
+
+## License
+
+Experimental open source. Local-first control plane — not a hosted SaaS. The npm client is MIT; see [`npm/package.json`](npm/package.json).
