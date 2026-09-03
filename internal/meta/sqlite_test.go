@@ -18,9 +18,11 @@ func TestSQLitePasswordRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	synced := parseTime("2026-09-01T04:00:00Z")
 	if err := store.PutConnector(ctx, Connector{
 		ID: "c1", ProjectID: proj.ID, Name: "sup", Mode: "logical",
 		Status: ConnectorReplicating, Port: 55434, Password: "secret-conn",
+		LastSyncedAt: synced,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -39,6 +41,9 @@ func TestSQLitePasswordRoundTrip(t *testing.T) {
 	}
 	if c.Engine != "postgres" {
 		t.Fatalf("default engine=%q", c.Engine)
+	}
+	if !c.LastSyncedAt.Equal(synced) {
+		t.Fatalf("last_synced_at=%v want %v", c.LastSyncedAt, synced)
 	}
 	if err := store.UpdateConnector(ctx, Connector{
 		ID: c.ID, ProjectID: proj.ID, Name: "sup", Engine: "mongodb", Mode: "logical",

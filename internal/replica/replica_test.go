@@ -68,6 +68,21 @@ func TestCreateSubscriptionUsesPrecreatedSlot(t *testing.T) {
 	}
 }
 
+func TestLogicalCaughtUp(t *testing.T) {
+	if logicalCaughtUp(LogicalStatus{Enabled: false, ReceivedLSN: "A", LatestEndLSN: "A"}) {
+		t.Fatal("disabled is not caught up")
+	}
+	if logicalCaughtUp(LogicalStatus{Enabled: true, TableTotal: 2, TableReady: 1, ReceivedLSN: "A", LatestEndLSN: "A"}) {
+		t.Fatal("tables still copying")
+	}
+	if logicalCaughtUp(LogicalStatus{Enabled: true, ReceivedLSN: "A", LatestEndLSN: "B"}) {
+		t.Fatal("LSN mismatch")
+	}
+	if !logicalCaughtUp(LogicalStatus{Enabled: true, TableTotal: 2, TableReady: 2, ReceivedLSN: "A", LatestEndLSN: "A"}) {
+		t.Fatal("expected caught up")
+	}
+}
+
 func TestLogicalStatusCastsInternalCharState(t *testing.T) {
 	sql := logicalSyncStatusSQL("sprout_sub_alice")
 	if !strings.Contains(sql, "srsubstate::text || ':' || cnt") {

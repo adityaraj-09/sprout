@@ -64,6 +64,8 @@ export type Connector = {
   error_message?: string;
   last_lsn?: string;
   last_lag_bytes: number;
+  last_synced_at?: string;
+  apply_paused?: boolean;
   created_by?: string;
   org_id?: string;
   created_at: string;
@@ -119,6 +121,13 @@ export type BranchDiff = {
 export type ReplicationStatus = {
   connector: Connector;
   lag: Record<string, unknown>;
+};
+
+export type SyncResult = {
+  connector: Connector;
+  lag: Record<string, unknown>;
+  reason?: string;
+  message?: string;
 };
 
 export type WhoAmI = {

@@ -64,6 +64,7 @@ sprout connect --name=atlas --engine=mongodb 'mongodb+srv://USER:PASS@cluster.mo
 # or mongodb://...  (--engine=mongodb is optional when the URL scheme is mongodb)
 
 sprout status prod
+sprout sync prod                  # apply queued WAL now; apply stays paused between syncs
 sprout status atlas
 
 # branch from a connector
@@ -193,6 +194,7 @@ sprout init
 sprout org list | create | use | delete | members ...
 sprout connect [--name=...] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
 sprout status [name]
+sprout sync [name]
 sprout connector list | delete [--force] | suspend | resume <name>
 sprout health
 sprout login

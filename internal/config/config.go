@@ -4,20 +4,22 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/adityaraj/sprout/internal/cliconfig"
 )
 
 type Config struct {
-	DataRoot   string
-	Listen     string
-	Token      string
-	Compute    string // local|docker|auto
-	ColdSnap   bool
-	AutoResume bool
-	PublicHost string
-	MetaDB     string
-	ServerURL  string // CLI only
+	DataRoot     string
+	Listen       string
+	Token        string
+	Compute      string // local|docker|auto
+	ColdSnap     bool
+	AutoResume   bool
+	PublicHost   string
+	MetaDB       string
+	ServerURL    string        // CLI only
+	SyncInterval time.Duration // logical apply cadence; 0 disables the ticker
 }
 
 func ServerDefaults() Config {
@@ -27,15 +29,34 @@ func ServerDefaults() Config {
 		root = filepath.Join(wd, "data")
 	}
 	return Config{
-		DataRoot:   root,
-		Listen:     envOr("SPROUT_LISTEN", "127.0.0.1:8080"),
-		Token:      envOr("SPROUT_TOKEN", "dev-token"),
-		Compute:    envOr("SPROUT_COMPUTE", "auto"),
-		ColdSnap:   envOr("SPROUT_COLD_SNAP", "true") != "false",
-		AutoResume: envOr("SPROUT_AUTO_RESUME", "") == "true",
-		PublicHost: envOr("SPROUT_PUBLIC_HOST", "localhost"),
-		MetaDB:     "",
+		DataRoot:     root,
+		Listen:       envOr("SPROUT_LISTEN", "127.0.0.1:8080"),
+		Token:        envOr("SPROUT_TOKEN", "dev-token"),
+		Compute:      envOr("SPROUT_COMPUTE", "auto"),
+		ColdSnap:     envOr("SPROUT_COLD_SNAP", "true") != "false",
+		AutoResume:   envOr("SPROUT_AUTO_RESUME", "") == "true",
+		PublicHost:   envOr("SPROUT_PUBLIC_HOST", "localhost"),
+		MetaDB:       "",
+		SyncInterval: ParseSyncInterval(os.Getenv("SPROUT_SYNC_INTERVAL")),
 	}
+}
+
+// ParseSyncInterval reads SPROUT_SYNC_INTERVAL.
+// Empty defaults to 1h. 0 / off / false / none disables scheduled apply.
+func ParseSyncInterval(raw string) time.Duration {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" {
+		return time.Hour
+	}
+	switch s {
+	case "0", "off", "false", "none", "disable", "disabled":
+		return 0
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return time.Hour
+	}
+	return d
 }
 
 func (c Config) MetaPath() string {

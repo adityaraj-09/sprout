@@ -70,6 +70,8 @@ type Connector struct {
 	ErrorMessage string    `json:"error_message,omitempty"`
 	LastLSN      string    `json:"last_lsn,omitempty"`
 	LastLagBytes int64     `json:"last_lag_bytes"`
+	LastSyncedAt time.Time `json:"last_synced_at,omitempty"`
+	ApplyPaused  bool      `json:"apply_paused,omitempty"` // not persisted; set from pg_subscription
 	Password     string    `json:"-"`
 	CreatedBy    string    `json:"created_by,omitempty"`
 	OrgID        string    `json:"org_id,omitempty"`

@@ -13,6 +13,7 @@ export type {
   Project,
   ReplicationStatus,
   SproutClientOptions,
+  SyncResult,
   WhoAmI,
 } from "./types.js";
 export { SproutError } from "./types.js";

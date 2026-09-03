@@ -48,12 +48,13 @@ func main() {
 	defer store.Close()
 
 	svc := &branch.Service{
-		Root:     cfg.DataRoot,
-		Store:    store,
-		Storage:  stor,
-		Compute:  comp,
-		Bins:     bins,
-		ColdSnap: cfg.ColdSnap,
+		Root:         cfg.DataRoot,
+		Store:        store,
+		Storage:      stor,
+		Compute:      comp,
+		Bins:         bins,
+		ColdSnap:     cfg.ColdSnap,
+		SyncInterval: cfg.SyncInterval,
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -64,6 +65,7 @@ func main() {
 		Root: cfg.DataRoot, AutoResume: cfg.AutoResume,
 	}
 	go rec.Loop(ctx, 30*time.Second)
+	go svc.SyncLoop(ctx)
 
 	if postgres.ProxyEnabled() {
 		tlsCfg, err := pgproxy.LoadTLSConfig(cfg.DataRoot)
@@ -117,6 +119,11 @@ func main() {
 	fmt.Printf("sprout-server listening on http://%s\n", cfg.Listen)
 	fmt.Printf("  data_root: %s\n", cfg.DataRoot)
 	fmt.Printf("  storage:   %s\n", stor.Name())
+	if cfg.SyncInterval > 0 {
+		fmt.Printf("  sync:      logical apply every %s (sprout sync for now; SPROUT_SYNC_INTERVAL=off to disable ticker)\n", cfg.SyncInterval)
+	} else {
+		fmt.Println("  sync:      scheduled apply off (sprout sync still works)")
+	}
 	fmt.Printf("  compute:   %s\n", comp.Name())
 	fmt.Printf("  meta:      %s\n", cfg.MetaPath())
 	if cfg.Token == "dev-token" {

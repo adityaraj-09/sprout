@@ -249,6 +249,7 @@ export SPROUT_DB_USER=sprout                     # login role in connection stri
 # export SPROUT_MONGO_PROXY=false                # advertise unique Mongo ports; skip the :27017 SNI passthrough
 # export SPROUT_TRUST_REMOTE=true                # lab-only: remote trust instead of SCRAM
 # export SPROUT_AUTO_RESUME=true                 # restart crashed connectors/branches
+# export SPROUT_SYNC_INTERVAL=1h                 # logical apply cadence (off/0 disables ticker)
 ```
 
 Persist in `~/.bashrc` or a systemd unit (below).

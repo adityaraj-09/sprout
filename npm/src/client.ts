@@ -11,6 +11,7 @@ import {
   Project,
   ReplicationStatus,
   SproutClientOptions,
+  SyncResult,
   SproutError,
   WhoAmI,
 } from "./types.js";
@@ -154,6 +155,21 @@ export class SproutClient {
       "POST",
       `/v1/projects/${this.project}/connectors/${encodeURIComponent(name)}/resume`,
     );
+  }
+
+  async sync(name?: string, opts?: { onProgress?: ProgressHandler }): Promise<SyncResult> {
+    if (name) {
+      return this.request(
+        "POST",
+        `/v1/projects/${this.project}/connectors/${encodeURIComponent(name)}/sync`,
+        {},
+        { progress: true, onProgress: opts?.onProgress },
+      );
+    }
+    return this.request("POST", `/v1/projects/${this.project}/sync`, {}, {
+      progress: true,
+      onProgress: opts?.onProgress,
+    });
   }
 
   async replication(name?: string): Promise<ReplicationStatus> {

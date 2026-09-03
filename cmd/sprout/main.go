@@ -177,6 +177,25 @@ func main() {
 		}
 		b, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(b))
+	case "sync":
+		name := ""
+		if len(os.Args) >= 3 && !strings.HasPrefix(os.Args[2], "-") {
+			name = os.Args[2]
+		}
+		path := "/v1/projects/default/sync"
+		if name != "" {
+			path = "/v1/projects/default/connectors/" + name + "/sync"
+		}
+		var out map[string]any
+		if err := c.doProgress("POST", path, map[string]any{}, &out); err != nil {
+			fatal(err)
+		}
+		fmt.Println("✓ synced")
+		if msg, _ := out["message"].(string); msg != "" {
+			fmt.Println(" ", msg)
+		}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
 	case "connector":
 		if len(os.Args) < 3 {
 			usage()
@@ -449,6 +468,7 @@ Usage:
                                   --dry-run      = estimate tables/rows (logical only)
                                   --tables=...   = allowlist for logical sync (Postgres tables / Mongo collections)
   sprout status [name]
+  sprout sync [name]              apply queued WAL now (logical); then pause apply again
   sprout connector list
   sprout connector delete <name> [--force]
                                   drops local replica + remote publication (logical)
