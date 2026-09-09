@@ -79,7 +79,7 @@ func main() {
 			os.Exit(1)
 		}
 	case "connect":
-		// sprout connect [--name=...] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
+		// sprout connect [--name=...] [--engine=postgres|mongodb|qdrant] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
 		mode := ""
 		engineName := ""
 		name := "primary"
@@ -135,7 +135,7 @@ func main() {
 			}
 		}
 		if url == "" {
-			fatal(fmt.Errorf("usage: sprout connect [--name=<id>] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>"))
+			fatal(fmt.Errorf("usage: sprout connect [--name=<id>] [--engine=postgres|mongodb|qdrant] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>"))
 		}
 		body := map[string]any{"url": url, "mode": mode, "name": name, "wipe": wipe, "dry_run": dryRun}
 		if engineName != "" {
@@ -162,6 +162,9 @@ func main() {
 			}
 			if sh, _ := out["mongosh"].(string); sh != "" {
 				fmt.Println(" ", sh)
+			}
+			if curl, _ := out["curl"].(string); curl != "" {
+				fmt.Println(" ", curl)
 			}
 		}
 		b, _ := json.MarshalIndent(out, "", "  ")
@@ -303,6 +306,7 @@ func main() {
 			cs, _ := rec["connection_string"].(string)
 			psql, _ := rec["psql"].(string)
 			mongosh, _ := rec["mongosh"].(string)
+			curl, _ := rec["curl"].(string)
 			status, _ := rec["status"].(string)
 			bname, _ := rec["name"].(string)
 			fmt.Printf("✓ %s [%s] from=%s\n  %s\n", bname, status, src, cs)
@@ -311,6 +315,9 @@ func main() {
 			}
 			if mongosh != "" {
 				fmt.Println(" ", mongosh)
+			}
+			if curl != "" {
+				fmt.Println(" ", curl)
 			}
 		case "list":
 			var list []meta.BranchRecord
@@ -461,12 +468,12 @@ Usage:
   sprout org members add <github-login>
   sprout org members remove <github-login>
   sprout init
-  sprout connect [--name=<id>] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
-                                  engine         = infer from URL (mongodb:// / mongodb+srv:// → mongodb)
+  sprout connect [--name=<id>] [--engine=postgres|mongodb|qdrant] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
+                                  engine         = infer from URL (mongodb:// → mongodb, qdrant:// / :6333 → qdrant)
                                   wipe (default) = destroy local replica and rebootstrap
                                   --no-wipe      = resume existing replica when possible
-                                  --dry-run      = estimate tables/rows (logical only)
-                                  --tables=...   = allowlist for logical sync (Postgres tables / Mongo collections)
+                                  --dry-run      = estimate tables/rows/collections (logical only)
+                                  --tables=...   = allowlist (Postgres tables / Mongo collections / Qdrant collections)
   sprout status [name]
   sprout sync [name]              apply queued WAL now (logical); then pause apply again
   sprout connector list

@@ -15,6 +15,7 @@ import (
 	"github.com/adityaraj/sprout/internal/meta"
 	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
+	"github.com/adityaraj/sprout/internal/qdrant"
 )
 
 // DoctorCheck is one health/DX check result.
@@ -69,6 +70,13 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 		}
 		add(DoctorCheck{Name: "bin:" + name, OK: true, Level: "info", Detail: p})
 	}
+	if p, err := exec.LookPath("qdrant"); err != nil {
+		add(DoctorCheck{Name: "bin:qdrant", OK: true, Level: "info",
+			Detail: "not found (optional; needed for --engine=qdrant)",
+			Hint:   "install the Qdrant server binary and put it on PATH"})
+	} else {
+		add(DoctorCheck{Name: "bin:qdrant", OK: true, Level: "info", Detail: p})
+	}
 
 	// Storage / compute
 	add(DoctorCheck{Name: "storage", OK: true, Level: "info", Detail: s.Storage.Name(),
@@ -97,13 +105,16 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 	add(DoctorCheck{Name: "public_host", OK: true, Level: "info",
 		Detail: fmt.Sprintf("SPROUT_PUBLIC_HOST=%s listen_addresses=%s db_user=%s subdomain=%v", host, listen, postgres.DBUser(), postgres.BranchSubdomain())})
 	if postgres.BranchSubdomain() {
-		if postgres.ProxyEnabled() || mongo.ProxyEnabled() {
+		if postgres.ProxyEnabled() || mongo.ProxyEnabled() || qdrant.ProxyEnabled() {
 			detail := fmt.Sprintf("hostnames are <name>-<owner>-<connector>.%s", host)
 			if postgres.ProxyEnabled() {
 				detail += fmt.Sprintf("; Postgres :%d", postgres.ProxyPort())
 			}
 			if mongo.ProxyEnabled() {
 				detail += fmt.Sprintf("; Mongo :%d", mongo.ProxyPort())
+			}
+			if qdrant.ProxyEnabled() {
+				detail += fmt.Sprintf("; Qdrant :%d", qdrant.ProxyPort())
 			}
 			add(DoctorCheck{Name: "dns", OK: true, Level: "warn",
 				Detail: detail,
@@ -124,13 +135,21 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 			Detail: fmt.Sprintf("Mongo SNI passthrough :%d → %s:<instance port>", mongo.ProxyPort(), mongo.ProxyBackendHost()),
 			Hint:   "clients connect on 27017 with tls=true; hostname selects the mongod. Unique ports stay on loopback"})
 	}
-	if postgres.ProxyEnabled() || mongo.ProxyEnabled() {
+	if qdrant.ProxyEnabled() {
+		add(DoctorCheck{Name: "qdrant_proxy", OK: true, Level: "info",
+			Detail: fmt.Sprintf("Qdrant SNI passthrough :%d → %s:<instance port>", qdrant.ProxyPort(), qdrant.ProxyBackendHost()),
+			Hint:   "clients connect on 6333 with TLS; hostname selects the qdrant. Unique ports stay on loopback"})
+	}
+	if postgres.ProxyEnabled() || mongo.ProxyEnabled() || qdrant.ProxyEnabled() {
 		hint := "open NSG/security group for 8080 (API)"
 		if postgres.ProxyEnabled() {
 			hint += ", 5432 (Postgres)"
 		}
 		if mongo.ProxyEnabled() {
 			hint += ", 27017 (Mongo)"
+		}
+		if qdrant.ProxyEnabled() {
+			hint += ", 6333 (Qdrant)"
 		}
 		add(DoctorCheck{Name: "firewall", OK: true, Level: "warn",
 			Detail: "public database ports are SNI proxies; instance ports stay on loopback",

@@ -186,7 +186,7 @@ export class SproutClient {
     name: string,
     from?: string,
     opts?: { onProgress?: ProgressHandler },
-  ): Promise<BranchRecord & { psql?: string; mongosh?: string }> {
+  ): Promise<BranchRecord & { psql?: string; mongosh?: string; curl?: string }> {
     const body: Record<string, string> = { name };
     if (from) body.from = from;
     return this.request("POST", `/v1/projects/${this.project}/branches`, body, {

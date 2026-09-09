@@ -28,7 +28,7 @@ Commands:
   sprout org members add <github-login>
   sprout org members remove <github-login>
   sprout init
-  sprout connect [--name=<id>] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
+  sprout connect [--name=<id>] [--engine=postgres|mongodb|qdrant] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
   sprout status [name]
   sprout sync [name]
   sprout connector list
@@ -358,7 +358,7 @@ async function main(): Promise<void> {
         if (!url) {
           fatal(
             new Error(
-              "usage: sprout connect [--name=<id>] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>",
+              "usage: sprout connect [--name=<id>] [--engine=postgres|mongodb|qdrant] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>",
             ),
           );
         }
@@ -382,6 +382,7 @@ async function main(): Promise<void> {
           console.log(`  ${out.connection_string}`);
           if (out.psql) console.log(`  ${out.psql}`);
           if (out.mongosh) console.log(`  ${out.mongosh}`);
+          if (out.curl) console.log(`  ${out.curl}`);
         }
         console.log(JSON.stringify(out, null, 2));
         break;
@@ -467,6 +468,7 @@ async function main(): Promise<void> {
             console.log(`✓ ${rec.name} [${rec.status}] from=${src}\n  ${rec.connection_string}`);
             if (rec.psql) console.log(`  ${rec.psql}`);
             if (rec.mongosh) console.log(`  ${rec.mongosh}`);
+            if (rec.curl) console.log(`  ${rec.curl}`);
             break;
           }
           case "list": {

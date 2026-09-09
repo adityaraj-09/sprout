@@ -1,6 +1,6 @@
 # sproutdb-cli
 
-Node.js **CLI + SDK** for [Sprout](https://github.com/adityaraj-09/sprout) — talks to `sprout-server` over HTTP so you can connect production **Postgres** or **MongoDB**, branch databases, and copy ready-to-use connection strings.
+Node.js **CLI + SDK** for [Sprout](https://github.com/adityaraj-09/sprout) — talks to `sprout-server` over HTTP so you can connect production **Postgres**, **MongoDB**, or **Qdrant**, branch databases, and copy ready-to-use connection strings.
 
 Installs the **`sprout`** binary on your PATH.
 
@@ -63,6 +63,10 @@ sprout connect --name=prod --mode=logical 'postgresql://...'
 sprout connect --name=atlas --engine=mongodb 'mongodb+srv://USER:PASS@cluster.mongodb.net/app'
 # or mongodb://...  (--engine=mongodb is optional when the URL scheme is mongodb)
 
+# Qdrant — collection snapshot into local qdrant (no continuous sync).
+sprout connect --name=vectors 'https://YOUR-CLUSTER.cloud.qdrant.io:6333?api-key=KEY'
+# or --engine=qdrant on a generic http://host:6333 URL
+
 sprout status prod
 sprout sync prod                  # apply queued WAL now; apply stays paused between syncs
 sprout status atlas
@@ -77,6 +81,11 @@ sprout branch create mongo-feat --from=atlas
 # prints:
 #   mongodb://sprout@<name>-<github>-<connector>.host:27017/?tls=true
 #   mongosh "mongodb://..."
+
+sprout branch create q-feat --from=vectors
+# prints:
+#   https://<name>-<github>-<connector>.host:6333/?api-key=...
+#   curl -sk -H 'api-key: ...' https://.../collections
 
 sprout branch list
 sprout branch get my-feature --from=prod
@@ -95,11 +104,11 @@ sprout connector resume prod
 
 | Flag | Meaning |
 |------|---------|
-| `--engine=postgres\|mongodb` | Override URL inference (`mongodb://` / `mongodb+srv://` → mongodb) |
-| `--mode=logical\|physical` | Postgres: logical pub/sub or physical basebackup. Mongo is logical (dump snapshot) only |
+| `--engine=postgres\|mongodb\|qdrant` | Override URL inference (`mongodb://` → mongodb, `qdrant://` / `:6333` → qdrant) |
+| `--mode=logical\|physical` | Postgres: logical pub/sub or physical basebackup. Mongo and Qdrant are logical (snapshot) only |
 | `--wipe` / `--no-wipe` | Rebootstrap (default) or resume existing replica |
-| `--dry-run` | Estimate tables/rows without copying (Postgres logical) |
-| `--tables=a,b` | Postgres table / Mongo collection allowlist |
+| `--dry-run` | Estimate tables/rows/collections without copying |
+| `--tables=a,b` | Postgres table / Mongo or Qdrant collection allowlist |
 
 ### Hosted URLs
 
@@ -107,6 +116,7 @@ With subdomain + SNI proxy enabled on the server:
 
 - Postgres `5432`: `<branch>-<github-login>-<connector>.<SPROUT_PUBLIC_HOST>`
 - Mongo `27017` with `tls=true`: same hostname pattern
+- Qdrant `6333` with HTTPS + `api-key`: same hostname pattern
 
 Replica/branch **data dirs stay creator-owned** (`data/replicas/<connector>-<login>`, `data/branches/<branch>-<login>-<connector>`). Sharing an org does **not** copy the dataset.
 
@@ -192,7 +202,7 @@ console.log(diff.summary);
 sprout doctor
 sprout init
 sprout org list | create | use | delete | members ...
-sprout connect [--name=...] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
+sprout connect [--name=...] [--engine=postgres|mongodb|qdrant] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
 sprout status [name]
 sprout sync [name]
 sprout connector list | delete [--force] | suspend | resume <name>

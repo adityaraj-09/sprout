@@ -19,6 +19,8 @@ import (
 	"github.com/adityaraj/sprout/internal/mongoproxy"
 	"github.com/adityaraj/sprout/internal/pgproxy"
 	"github.com/adityaraj/sprout/internal/postgres"
+	"github.com/adityaraj/sprout/internal/qdrant"
+	"github.com/adityaraj/sprout/internal/qdrantproxy"
 	"github.com/adityaraj/sprout/internal/reconcile"
 	"github.com/adityaraj/sprout/internal/storage"
 )
@@ -106,6 +108,23 @@ func main() {
 		}()
 	}
 
+	if qdrant.ProxyEnabled() {
+		qproxy := &qdrantproxy.Server{
+			Addr:    qdrant.ListenAddr(),
+			Resolve: qdrantproxy.StoreResolver(store),
+		}
+		if err := qproxy.Listen(); err != nil {
+			fatal(err)
+		}
+		go func() {
+			_ = qproxy.Serve()
+		}()
+		go func() {
+			<-ctx.Done()
+			_ = qproxy.Close()
+		}()
+	}
+
 	srv := api.New(svc, cfg.Token)
 	httpSrv := &http.Server{Addr: cfg.Listen, Handler: srv.Handler()}
 
@@ -148,6 +167,9 @@ func main() {
 		}
 		if mongo.ProxyEnabled() {
 			fmt.Printf("  mongo:     URLs use :%d (SNI passthrough); mongod stays on loopback\n", mongo.ProxyPort())
+		}
+		if qdrant.ProxyEnabled() {
+			fmt.Printf("  qdrant:    URLs use :%d (SNI passthrough); qdrant stays on loopback\n", qdrant.ProxyPort())
 		}
 	}
 	if postgres.RemoteAccess() {

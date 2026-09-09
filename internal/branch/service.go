@@ -17,6 +17,7 @@ import (
 	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
 	"github.com/adityaraj/sprout/internal/progress"
+	"github.com/adityaraj/sprout/internal/qdrant"
 	"github.com/adityaraj/sprout/internal/replica"
 	"github.com/adityaraj/sprout/internal/storage"
 	"github.com/google/uuid"
@@ -253,8 +254,8 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 
 	password := postgres.GeneratePassword()
 	if srcID != "" {
-		if c, err := s.Store.GetConnectorByID(ctx, srcID); err == nil && engine.IsMongo(c.Engine) && c.Password != "" {
-			// CoW clones keep the connector's sprout user; mongod has no local-trust ALTER USER.
+		if c, err := s.Store.GetConnectorByID(ctx, srcID); err == nil && engine.IsDumpSnapshot(c.Engine) && c.Password != "" {
+			// CoW clones keep the connector's API key / sprout user.
 			password = c.Password
 		}
 	}
@@ -411,7 +412,7 @@ func (s *Service) ensureSourceReadyForBranch(ctx context.Context, projectID, src
 		}
 		return fmt.Errorf("source_not_ready: connector %q is in error (%s)", c.Name, msg)
 	}
-	if engine.IsMongo(c.Engine) {
+	if engine.IsDumpSnapshot(c.Engine) {
 		return nil
 	}
 	rm := &replica.Manager{Bins: s.Bins}
@@ -456,6 +457,9 @@ func (s *Service) startDetachedClone(ctx context.Context, inst *postgres.Instanc
 func (s *Service) sourceEngine(ctx context.Context, rec meta.BranchRecord) string {
 	if rec.SourceConnectorID != "" {
 		if c, err := s.Store.GetConnectorByID(ctx, rec.SourceConnectorID); err == nil {
+			if engine.IsQdrant(c.Engine) || qdrant.HasDataDir(c.DataDir) {
+				return engine.Qdrant
+			}
 			if engine.IsMongo(c.Engine) || mongo.HasDataDir(c.DataDir) {
 				return engine.Mongo
 			}
@@ -466,6 +470,9 @@ func (s *Service) sourceEngine(ctx context.Context, rec meta.BranchRecord) strin
 }
 
 func (s *Service) dirEngine(dir string) string {
+	if qdrant.HasDataDir(dir) {
+		return engine.Qdrant
+	}
 	if mongo.HasDataDir(dir) {
 		return engine.Mongo
 	}
@@ -490,9 +497,29 @@ func (s *Service) startMongoClone(ctx context.Context, rec meta.BranchRecord, co
 	return h, nil
 }
 
+func (s *Service) startQdrantClone(ctx context.Context, rec meta.BranchRecord, computeName string) (compute.Handle, error) {
+	inst := &qdrant.Instance{
+		Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port,
+		LogFile: s.logPath(computeName), Bins: qdrant.FindOnPath(), Password: rec.Password,
+	}
+	if err := inst.PrepareClone(); err != nil {
+		return compute.Handle{}, err
+	}
+	h, err := s.Compute.Start(ctx, compute.Spec{
+		Name: computeName, DataDir: rec.DataDir, Port: rec.Port, LogFile: inst.LogFile, Engine: engine.Qdrant,
+	})
+	if err != nil {
+		return compute.Handle{}, fmt.Errorf("compute_failed: %w", err)
+	}
+	_ = inst.EnsureAppRoles()
+	return h, nil
+}
+
 func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, srcDir string, srcPort int, srcName string) error {
 	eng := s.sourceEngine(ctx, *rec)
-	if mongo.HasDataDir(srcDir) {
+	if qdrant.HasDataDir(srcDir) {
+		eng = engine.Qdrant
+	} else if mongo.HasDataDir(srcDir) {
 		eng = engine.Mongo
 	}
 	rm := &replica.Manager{Bins: s.Bins}
@@ -511,7 +538,10 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 			if c.Password != "" {
 				srcPass = c.Password
 			}
-			if engine.IsMongo(c.Engine) {
+			if engine.IsQdrant(c.Engine) {
+				eng = engine.Qdrant
+				srcHandle.Engine = engine.Qdrant
+			} else if engine.IsMongo(c.Engine) {
 				eng = engine.Mongo
 				srcHandle.Engine = engine.Mongo
 			}
@@ -529,17 +559,21 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	}
 	defer unlock()
 
-	// Never psql a mongod listen port — libpq waits for a Postgres handshake
-	// until the HTTP timeout, holding the branch lock so delete looks stuck.
+	// Never probe a mongo/qdrant listen port with psql — libpq waits for a
+	// Postgres handshake until the HTTP timeout, holding the branch lock.
 	var st replica.Lag
 	var stErr error
-	if !engine.IsMongo(eng) {
+	if !engine.IsDumpSnapshot(eng) {
 		st, stErr = rm.Status(ctx, "127.0.0.1", srcPort)
 	}
-	useReplayPause := !engine.IsMongo(eng) && stErr == nil && st.IsStandby
+	useReplayPause := !engine.IsDumpSnapshot(eng) && stErr == nil && st.IsStandby
 	srcMongo := &mongo.Instance{
 		Name: srcHandle.Name, DataDir: srcDir, Port: srcPort,
 		LogFile: s.logPath(srcHandle.Name), Bins: mongo.FindOnPath(), Password: srcPass,
+	}
+	srcQdrant := &qdrant.Instance{
+		Name: srcHandle.Name, DataDir: srcDir, Port: srcPort,
+		LogFile: s.logPath(srcHandle.Name), Bins: qdrant.FindOnPath(), Password: srcPass,
 	}
 
 	if useReplayPause {
@@ -565,6 +599,14 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 		if err := srcMongo.WaitPortFree(20 * time.Second); err != nil {
 			return fmt.Errorf("storage_failed: %w", err)
 		}
+	} else if engine.IsQdrant(eng) {
+		progress.Println(ctx, "→ Step 1: stop qdrant for CoW snapshot")
+		if err := srcQdrant.Stop(); err != nil {
+			return fmt.Errorf("storage_failed: stop qdrant: %w", err)
+		}
+		if err := srcQdrant.WaitPortFree(20 * time.Second); err != nil {
+			return fmt.Errorf("storage_failed: %w", err)
+		}
 	} else {
 		progress.Println(ctx, "→ Step 1: CHECKPOINT (+ cold stop if enabled)")
 		if err := srcInst.Checkpoint(); err != nil {
@@ -582,7 +624,7 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	if err != nil {
 		if useReplayPause {
 			_ = rm.ResumeReplay(ctx, "127.0.0.1", srcPort)
-		} else if engine.IsMongo(eng) || s.ColdSnap {
+		} else if engine.IsDumpSnapshot(eng) || s.ColdSnap {
 			_, _ = s.Compute.Start(ctx, srcSpec)
 		}
 		return fmt.Errorf("storage_failed: %w", err)
@@ -594,7 +636,7 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 		if err := rm.ResumeReplay(ctx, "127.0.0.1", srcPort); err != nil {
 			return err
 		}
-	} else if engine.IsMongo(eng) || s.ColdSnap {
+	} else if engine.IsDumpSnapshot(eng) || s.ColdSnap {
 		progress.Println(ctx, "→ restart source")
 		if _, err := s.Compute.Start(ctx, srcSpec); err != nil {
 			return err
@@ -610,12 +652,18 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	progress.Println(ctx, "→ Step 4: PrepareClone (promote branch to independent primary)")
 	progress.Println(ctx, "→ Step 5: start compute")
 	var h compute.Handle
-	if engine.IsMongo(eng) {
+	switch {
+	case engine.IsMongo(eng):
 		h, err = s.startMongoClone(ctx, *rec, s.instKey(*rec))
 		if err == nil {
 			rec.ConnString, _ = advertiseBranch(*rec, engine.Mongo)
 		}
-	} else {
+	case engine.IsQdrant(eng):
+		h, err = s.startQdrantClone(ctx, *rec, s.instKey(*rec))
+		if err == nil {
+			rec.ConnString, _ = advertiseBranch(*rec, engine.Qdrant)
+		}
+	default:
 		inst := &postgres.Instance{
 			Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port,
 			LogFile: s.logPath(s.instKey(*rec)), Bins: s.Bins, Password: rec.Password,
@@ -628,7 +676,7 @@ func (s *Service) createPipeline(ctx context.Context, rec *meta.BranchRecord, sr
 	if err != nil {
 		_ = s.Storage.Destroy(rec.DataDir)
 		_ = s.Storage.Destroy(snapRef)
-		if strings.Contains(err.Error(), "pg_ctl start") || strings.Contains(err.Error(), "mongod") || strings.HasPrefix(err.Error(), "compute_failed") {
+		if strings.Contains(err.Error(), "pg_ctl start") || strings.Contains(err.Error(), "mongod") || strings.Contains(err.Error(), "qdrant") || strings.HasPrefix(err.Error(), "compute_failed") {
 			return fmt.Errorf("compute_failed: %w", err)
 		}
 		return err
@@ -677,12 +725,18 @@ func (s *Service) Reset(ctx context.Context, projectID, name, from string) (meta
 	}
 	eng := s.sourceEngine(ctx, rec)
 	var started compute.Handle
-	if engine.IsMongo(eng) {
+	switch {
+	case engine.IsMongo(eng):
 		started, err = s.startMongoClone(ctx, rec, key)
 		if err == nil {
 			rec.ConnString, _ = advertiseBranch(rec, engine.Mongo)
 		}
-	} else {
+	case engine.IsQdrant(eng):
+		started, err = s.startQdrantClone(ctx, rec, key)
+		if err == nil {
+			rec.ConnString, _ = advertiseBranch(rec, engine.Qdrant)
+		}
+	default:
 		inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
 		started, err = s.startDetachedClone(ctx, inst, key)
 		if err == nil {
@@ -874,10 +928,14 @@ func (s *Service) Resume(ctx context.Context, projectID, name, from string) (met
 	rec.ErrorMessage = ""
 	rec.LastUsedAt = time.Now().UTC()
 	rec.ConnString, _ = advertiseBranch(rec, eng)
-	if engine.IsMongo(eng) {
+	switch {
+	case engine.IsMongo(eng):
 		inst := &mongo.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: mongo.FindOnPath(), Password: rec.Password}
 		_ = inst.EnsureAppRoles()
-	} else {
+	case engine.IsQdrant(eng):
+		inst := &qdrant.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: qdrant.FindOnPath(), Password: rec.Password}
+		_ = inst.EnsureAppRoles()
+	default:
 		inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
 		_ = inst.EnsureAppRoles()
 	}

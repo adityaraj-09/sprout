@@ -73,8 +73,8 @@ func (d *Docker) containerName(spec Spec) string {
 }
 
 func (d *Docker) Start(ctx context.Context, spec Spec) (Handle, error) {
-	if specEngine(spec) == engine.Mongo {
-		return Handle{}, fmt.Errorf("mongodb requires SPROUT_COMPUTE=local in this version")
+	if engine.IsDumpSnapshot(spec.Engine) {
+		return Handle{}, fmt.Errorf("%s requires SPROUT_COMPUTE=local in this version", engine.Normalize(spec.Engine))
 	}
 	name := d.containerName(spec)
 	_ = exec.CommandContext(ctx, "docker", "rm", "-f", name).Run()

@@ -40,6 +40,7 @@ export type BranchRecord = {
   connection_string: string;
   psql?: string;
   mongosh?: string;
+  curl?: string;
   error_message?: string;
   source_lsn?: string;
   source_connector?: string;
@@ -79,6 +80,7 @@ export type ConnectResult = {
   connection_string?: string;
   psql?: string;
   mongosh?: string;
+  curl?: string;
   dry_run?: boolean;
   estimate?: Record<string, unknown>;
 };

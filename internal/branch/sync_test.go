@@ -45,4 +45,10 @@ func TestDueForScheduledApply(t *testing.T) {
 	if dueForScheduledApply(mongo, now, interval) {
 		t.Fatal("mongo has no incremental apply")
 	}
+
+	qd := live
+	qd.Engine = "qdrant"
+	if dueForScheduledApply(qd, now, interval) {
+		t.Fatal("qdrant has no incremental apply")
+	}
 }

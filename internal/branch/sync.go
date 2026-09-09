@@ -54,8 +54,9 @@ func (s *Service) applyConnector(ctx context.Context, c meta.Connector, reason s
 		c = fresh
 	}
 
-	if engine.IsMongo(c.Engine) {
-		return SyncResult{}, fmt.Errorf("unsupported: mongodb has no incremental apply — reconnect with --wipe to refresh the snapshot")
+	if engine.IsDumpSnapshot(c.Engine) {
+		name := engine.Normalize(c.Engine)
+		return SyncResult{}, fmt.Errorf("unsupported: %s has no incremental apply — reconnect with --wipe to refresh the snapshot", name)
 	}
 
 	switch c.Status {
@@ -142,7 +143,7 @@ func dueForScheduledApply(c meta.Connector, now time.Time, interval time.Duratio
 	if interval <= 0 {
 		return false
 	}
-	if c.Mode != ModeLogical || engine.IsMongo(c.Engine) {
+	if c.Mode != ModeLogical || engine.IsDumpSnapshot(c.Engine) {
 		return false
 	}
 	switch c.Status {

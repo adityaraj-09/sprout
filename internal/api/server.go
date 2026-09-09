@@ -13,6 +13,7 @@ import (
 	"github.com/adityaraj/sprout/internal/meta"
 	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
+	"github.com/adityaraj/sprout/internal/qdrant"
 )
 
 type Server struct {
@@ -138,7 +139,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.URL == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_body",
-			`JSON {"url":"postgresql://... or mongodb://...","engine":"postgres|mongodb","mode":"logical|physical","name":"...","wipe":true,"dry_run":false,"tables":["t"]} required`)
+			`JSON {"url":"postgresql://... or mongodb://... or qdrant://...","engine":"postgres|mongodb|qdrant","mode":"logical|physical","name":"...","wipe":true,"dry_run":false,"tables":["t"]} required`)
 		return
 	}
 	wipe := true
@@ -176,6 +177,9 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		if engine.IsMongo(res.Connector.Engine) {
 			out["connection_string"] = mongo.FormatConnString(res.Connector.Port, "", res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
 			out["mongosh"] = mongo.MongoshOneLiner(res.Connector.Port, res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
+		} else if engine.IsQdrant(res.Connector.Engine) {
+			out["connection_string"] = qdrant.FormatConnString(res.Connector.Port, res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
+			out["curl"] = qdrant.CurlOneLiner(res.Connector.Port, res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
 		} else {
 			out["connection_string"] = postgres.FormatConnString(res.Connector.Port, "postgres", res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
 			out["psql"] = postgres.PsqlOneLiner(res.Connector.Port, res.Connector.Password, res.Connector.Name, "", res.Connector.CreatedBy)
@@ -328,6 +332,8 @@ func (s *Server) handleCreateBranch(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasPrefix(rec.ConnString, "mongodb") {
 		out["mongosh"] = mongo.MongoshOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
+	} else if strings.HasPrefix(rec.ConnString, "http://") || strings.HasPrefix(rec.ConnString, "https://") {
+		out["curl"] = qdrant.CurlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
 	} else {
 		out["psql"] = postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
 	}

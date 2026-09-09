@@ -62,7 +62,7 @@ type Connector struct {
 	ProjectID    string    `json:"project_id"`
 	Name         string    `json:"name"` // unique per project+owner (e.g. supabase)
 	PrimaryURL   string    `json:"primary_url"`
-	Engine       string    `json:"engine,omitempty"` // postgres (default) | mongodb
+	Engine       string    `json:"engine,omitempty"` // postgres (default) | mongodb | qdrant
 	Mode         string    `json:"mode"`             // physical | logical
 	Status       string    `json:"status"`
 	DataDir      string    `json:"data_dir"`

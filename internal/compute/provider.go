@@ -12,6 +12,7 @@ import (
 	"github.com/adityaraj/sprout/internal/engine"
 	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
+	"github.com/adityaraj/sprout/internal/qdrant"
 )
 
 // Spec describes one database workload to run.
@@ -20,18 +21,26 @@ type Spec struct {
 	DataDir string // host path to data dir (already prepared)
 	Port    int    // host port clients connect to
 	LogFile string // used by local provider
-	Engine  string // postgres (default) | mongodb
+	Engine  string // postgres (default) | mongodb | qdrant
 }
 
 func specEngine(spec Spec) string {
-	if engine.IsMongo(spec.Engine) || mongo.HasDataDir(spec.DataDir) {
-		return engine.Mongo
-	}
-	return engine.Postgres
+	return detectEngine(spec.Engine, spec.DataDir)
 }
 
 func handleEngine(h Handle) string {
-	if engine.IsMongo(h.Engine) || mongo.HasDataDir(h.DataDir) {
+	return detectEngine(h.Engine, h.DataDir)
+}
+
+func detectEngine(tag, dataDir string) string {
+	n := engine.Normalize(tag)
+	if n == engine.Mongo || n == engine.Qdrant {
+		return n
+	}
+	if qdrant.HasDataDir(dataDir) {
+		return engine.Qdrant
+	}
+	if mongo.HasDataDir(dataDir) {
 		return engine.Mongo
 	}
 	return engine.Postgres
@@ -80,10 +89,20 @@ func (l *Local) instance(spec Spec) *postgres.Instance {
 func (l *Local) Start(ctx context.Context, spec Spec) (Handle, error) {
 	_ = ctx
 	h := Handle{Provider: "local", Name: spec.Name, Port: spec.Port, DataDir: spec.DataDir, Engine: spec.Engine}
-	if specEngine(spec) == engine.Mongo {
+	switch specEngine(spec) {
+	case engine.Mongo:
 		inst := &mongo.Instance{
 			Name: spec.Name, DataDir: spec.DataDir, Port: spec.Port, LogFile: spec.LogFile,
 			Bins: mongo.FindOnPath(),
+		}
+		if err := inst.Start(); err != nil {
+			return Handle{}, err
+		}
+		return h, nil
+	case engine.Qdrant:
+		inst := &qdrant.Instance{
+			Name: spec.Name, DataDir: spec.DataDir, Port: spec.Port, LogFile: spec.LogFile,
+			Bins: qdrant.FindOnPath(),
 		}
 		if err := inst.Start(); err != nil {
 			return Handle{}, err
@@ -102,8 +121,12 @@ func (l *Local) Start(ctx context.Context, spec Spec) (Handle, error) {
 
 func (l *Local) Stop(ctx context.Context, h Handle) error {
 	_ = ctx
-	if handleEngine(h) == engine.Mongo {
+	switch handleEngine(h) {
+	case engine.Mongo:
 		inst := &mongo.Instance{Name: h.Name, DataDir: h.DataDir, Port: h.Port, Bins: mongo.FindOnPath(), Password: h.Password}
+		return inst.Stop()
+	case engine.Qdrant:
+		inst := &qdrant.Instance{Name: h.Name, DataDir: h.DataDir, Port: h.Port, Bins: qdrant.FindOnPath(), Password: h.Password}
 		return inst.Stop()
 	}
 	inst := &postgres.Instance{
@@ -115,8 +138,12 @@ func (l *Local) Stop(ctx context.Context, h Handle) error {
 
 func (l *Local) IsRunning(ctx context.Context, h Handle) (bool, error) {
 	_ = ctx
-	if handleEngine(h) == engine.Mongo {
+	switch handleEngine(h) {
+	case engine.Mongo:
 		inst := &mongo.Instance{Port: h.Port, DataDir: h.DataDir, Bins: mongo.FindOnPath(), Password: h.Password}
+		return inst.IsRunning(), nil
+	case engine.Qdrant:
+		inst := &qdrant.Instance{Port: h.Port, DataDir: h.DataDir, Bins: qdrant.FindOnPath(), Password: h.Password}
 		return inst.IsRunning(), nil
 	}
 	inst := &postgres.Instance{Port: h.Port, DataDir: h.DataDir, Bins: l.Bins}

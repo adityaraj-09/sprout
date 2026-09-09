@@ -10,6 +10,7 @@ import (
 	"github.com/adityaraj/sprout/internal/engine"
 	"github.com/adityaraj/sprout/internal/meta"
 	"github.com/adityaraj/sprout/internal/mongo"
+	"github.com/adityaraj/sprout/internal/qdrant"
 )
 
 // BranchDiff summarizes schema + row-count changes vs the parent connector/main.
@@ -67,8 +68,12 @@ func (s *Service) DiffBranch(ctx context.Context, projectID, name, from string) 
 	}
 	_ = parentDir
 
-	if engine.IsMongo(s.sourceEngine(ctx, rec)) {
+	eng := s.sourceEngine(ctx, rec)
+	if engine.IsMongo(eng) {
 		return s.diffMongoBranch(ctx, rec, parentName, parentPort)
+	}
+	if engine.IsQdrant(eng) {
+		return s.diffQdrantBranch(ctx, rec, parentName, parentPort)
 	}
 
 	branchSchema, err := listSchema(ctx, s.Bins.Psql, "127.0.0.1", rec.Port)
@@ -167,6 +172,59 @@ func (s *Service) diffMongoBranch(ctx context.Context, rec meta.BranchRecord, pa
 	sd := SchemaDiff{Tables: map[string][]string{}}
 	for name := range branchCols {
 		sd.Tables[name] = []string{"document"}
+		if _, ok := parentCols[name]; !ok {
+			sd.OnlyOnBranch = append(sd.OnlyOnBranch, name)
+		}
+	}
+	for name := range parentCols {
+		if _, ok := branchCols[name]; !ok {
+			sd.OnlyOnParent = append(sd.OnlyOnParent, name)
+		}
+	}
+	all := map[string]struct{}{}
+	for n := range branchCols {
+		all[n] = struct{}{}
+	}
+	for n := range parentCols {
+		all[n] = struct{}{}
+	}
+	var rows []TableRowDiff
+	var changed int
+	for n := range all {
+		d := TableRowDiff{Table: n, BranchRows: branchCols[n], ParentRows: parentCols[n], Delta: branchCols[n] - parentCols[n]}
+		if d.Delta != 0 {
+			changed++
+		}
+		rows = append(rows, d)
+	}
+	sortTableRowDiff(rows)
+	summary := fmt.Sprintf("vs %s: +%d collections only on branch, +%d only on parent, %d collections with count delta",
+		parentName, len(sd.OnlyOnBranch), len(sd.OnlyOnParent), changed)
+	return BranchDiff{Branch: rec.Name, Parent: parentName, Schema: sd, Rows: rows, Summary: summary}, nil
+}
+
+func (s *Service) diffQdrantBranch(ctx context.Context, rec meta.BranchRecord, parentName string, parentPort int) (BranchDiff, error) {
+	branchInst := &qdrant.Instance{
+		Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy,
+		DataDir: rec.DataDir, Port: rec.Port, Password: rec.Password,
+	}
+	parentInst := &qdrant.Instance{Port: parentPort, Password: rec.Password}
+	if rec.SourceConnectorID != "" {
+		if c, err := s.Store.GetConnectorByID(ctx, rec.SourceConnectorID); err == nil && c.Password != "" {
+			parentInst.Password = c.Password
+		}
+	}
+	branchCols, err := branchInst.CollectionCounts(ctx)
+	if err != nil {
+		return BranchDiff{}, fmt.Errorf("branch collections: %w", err)
+	}
+	parentCols, err := parentInst.CollectionCounts(ctx)
+	if err != nil {
+		return BranchDiff{}, fmt.Errorf("parent collections: %w", err)
+	}
+	sd := SchemaDiff{Tables: map[string][]string{}}
+	for name := range branchCols {
+		sd.Tables[name] = []string{"vector"}
 		if _, ok := parentCols[name]; !ok {
 			sd.OnlyOnBranch = append(sd.OnlyOnBranch, name)
 		}

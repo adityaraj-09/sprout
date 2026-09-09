@@ -1,6 +1,6 @@
 # Sprout
 
-Copy-on-write database branches for Postgres and MongoDB, with named connectors that sync from production.
+Copy-on-write database branches for Postgres, MongoDB, and Qdrant, with named connectors that sync from production.
 
 Create isolated, writable databases in seconds from a local replica of prod. Branches never talk to production. One connector keeps a single replication slot; apply runs on a schedule or on demand.
 
@@ -27,11 +27,12 @@ data/branches/<name>/          independent primary — CoW clone, no prod traffi
 
 | | |
 |---|---|
-| **Branches** | Filesystem snapshot + clone of PGDATA or Mongo `dbPath` (ZFS on Linux, APFS `cp -c` on macOS, full copy as fallback) |
+| **Branches** | Filesystem snapshot + clone of PGDATA, Mongo `dbPath`, or Qdrant storage (ZFS on Linux, APFS `cp -c` on macOS, full copy as fallback) |
 | **Connectors** | Named remotes. Each gets its own local replica, port, and metadata row |
 | **Physical Postgres** | `pg_basebackup` → hot standby → branch with WAL replay paused for a consistent snapshot |
 | **Logical Postgres** | Publication + schema dump + subscription (Supabase and other managed hosts). Slot kept; apply paused between syncs |
 | **MongoDB** | Point-in-time `mongodump` into local `mongod`. No oplog follow. CoW branches from that snapshot |
+| **Qdrant** | Collection snapshot (or point scroll fallback) into local `qdrant`. No continuous sync. CoW branches from that snapshot |
 | **Control plane** | `sprout-server` HTTP API + thin CLI. State in SQLite (`data/control.db`) |
 
 ---
@@ -41,6 +42,8 @@ data/branches/<name>/          independent primary — CoW clone, no prod traffi
 - **Go 1.24+**
 - Postgres tools on `PATH`: `initdb`, `pg_ctl`, `psql`, `pg_basebackup`, `pg_dump`
   - Match the upstream major version (Supabase PG 17): `export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"`
+- Optional: MongoDB tools (`mongod`, `mongodump`, `mongorestore`, `mongosh`) for `--engine=mongodb`
+- Optional: `qdrant` binary on `PATH` for `--engine=qdrant`
 - **macOS:** APFS volume for CoW clones
 - **Linux:** ZFS when `SPROUT_ZFS_DATASET` is set; otherwise full copy
 - API token (`dev-token` locally; set `SPROUT_TOKEN` when the API is public)
@@ -162,6 +165,7 @@ Hostnames include the GitHub login so two people can both use `testdb` / `supaba
 | **physical** | You control WAL / replication | `pg_basebackup -R` into `data/replicas/<name>/`, streaming hot standby |
 | **logical** | Managed Postgres / Supabase | Publication on prod → local `initdb` → schema dump → subscription. **Slot stays; apply pauses** after the initial copy |
 | **mongodb** | Atlas / `mongodb://` | `mongodump` → local `mongod`. Snapshot only — no oplog |
+| **qdrant** | Qdrant Cloud / `qdrant://` / `:6333` | Collection snapshot → local `qdrant`. Snapshot only — no continuous sync |
 
 Logical publications target `public` schema tables (or `--tables=`). Slot names are per connector (`sprout_pub_<name>`, `sprout_sub_<name>`).
 
@@ -174,9 +178,11 @@ Branches CoW the replica directory and **detach** any cloned subscription so the
 
 Mongo `--tables=` is a collection allowlist and requires a database in the URL. With a DNS `SPROUT_PUBLIC_HOST`, Mongo URLs use port **27017** and `tls=true` (SNI selects the instance). `SPROUT_MONGO_PROXY=false` keeps unique ports.
 
+Qdrant `--tables=` is a collection allowlist. Infer engine from `qdrant://` / `qdrants://`, `*.qdrant.io`, or port **6333** (or pass `--engine=qdrant` on a generic `http(s)://` URL). With a DNS host, Qdrant URLs use port **6333** and HTTPS (SNI selects the instance). `SPROUT_QDRANT_PROXY=false` keeps unique ports. `sprout sync` is unsupported — reconnect with `--wipe` to refresh.
+
 ---
 
-## Public Postgres (and Mongo) URLs
+## Public Postgres, Mongo, and Qdrant URLs
 
 On a VPS, branches are ordinary database processes. The control plane is HTTP; SQL goes through an SNI proxy when the public host is a DNS name.
 
@@ -191,13 +197,14 @@ export SPROUT_SAFE=true
 ```text
 postgresql://sprout:<pass>@testdb-lab.strido.fit:5432/postgres
 mongodb://sprout:<pass>@feat-alice-atlas.strido.fit:27017/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin
+https://feat-alice-vectors.strido.fit:6333/?api-key=<pass>&tlsAllowInvalidCertificates=true
 ```
 
-Point `*.strido.fit` (and the apex) at the VM. Open **8080** (API), **5432** (Postgres SNI), and **27017** (Mongo SNI). Localhost and raw IPs skip the proxy and use unique ports (`localhost:55440`).
+Point `*.strido.fit` (and the apex) at the VM. Open **8080** (API), **5432** (Postgres SNI), **27017** (Mongo SNI), and **6333** (Qdrant SNI). Localhost and raw IPs skip the proxy and use unique ports (`localhost:55440`).
 
-Clients need TLS so SNI is visible (`sslmode=require` or libpq `prefer`; Mongo `tls=true`). A self-signed `*.host` cert is written under `$SPROUT_DATA/tls` unless you set `SPROUT_TLS_CERT` / `SPROUT_TLS_KEY`. Binding 5432/27017 needs root or `setcap cap_net_bind_service=+ep ./bin/sprout-server`.
+Clients need TLS so SNI is visible (`sslmode=require` or libpq `prefer`; Mongo `tls=true`; Qdrant HTTPS). A self-signed `*.host` cert is written under `$SPROUT_DATA/tls` unless you set `SPROUT_TLS_CERT` / `SPROUT_TLS_KEY`. Binding 5432/27017/6333 needs root or `setcap cap_net_bind_service=+ep ./bin/sprout-server`.
 
-Remote auth through the proxy is **SCRAM-SHA-256** (loopback `127.0.0.1` stays trust for the control plane). `SPROUT_PG_PROXY=false` / `SPROUT_MONGO_PROXY=false` advertise unique ports instead. `SPROUT_TRUST_REMOTE=true` is lab-only open trust.
+Remote auth through the proxy is **SCRAM-SHA-256** for Postgres (loopback `127.0.0.1` stays trust for the control plane). `SPROUT_PG_PROXY=false` / `SPROUT_MONGO_PROXY=false` / `SPROUT_QDRANT_PROXY=false` advertise unique ports instead. `SPROUT_TRUST_REMOTE=true` is lab-only open trust.
 
 ```bash
 sprout config set api-url http://strido.fit:8080
@@ -303,7 +310,7 @@ Ports start at **55433**. In-use listeners are skipped so a leftover `mongod` ca
 | `sprout org …` | Orgs and members |
 | `sprout doctor \| health` | Diagnostics |
 
-Defaults: `--name=primary`; `--engine` from URL scheme; Postgres `--mode=physical`; Mongo is always dump-snapshot logical. `connector delete --force` also deletes child branches.
+Defaults: `--name=primary`; `--engine` from URL scheme; Postgres `--mode=physical`; Mongo and Qdrant are always dump-snapshot logical. `connector delete --force` also deletes child branches.
 
 ---
 
