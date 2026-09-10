@@ -28,6 +28,7 @@ type Reconciler struct {
 	Storage    storage.Provider
 	Root       string
 	AutoResume bool
+	IdleAfter  time.Duration // auto-suspend active branches; 0 disables
 
 	StuckAfter          time.Duration // branches / dead bootstrap; 0 = 2m
 	BootstrapStuckAfter time.Duration // live logical copy; 0 = 20m
@@ -113,6 +114,9 @@ func (r *Reconciler) fixBranch(ctx context.Context, b meta.BranchRecord) {
 		if b.Role == "main" {
 			return
 		}
+		if r.maybeIdleSuspend(ctx, b, running) {
+			return
+		}
 		if running {
 			return
 		}
@@ -139,6 +143,32 @@ func (r *Reconciler) fixBranch(ctx context.Context, b meta.BranchRecord) {
 		}
 		fmt.Fprintf(os.Stderr, "reconcile: auto-resumed crashed branch %s\n", b.Name)
 	}
+}
+
+func (r *Reconciler) maybeIdleSuspend(ctx context.Context, b meta.BranchRecord, running bool) bool {
+	if r.IdleAfter <= 0 || b.Role != "branch" {
+		return false
+	}
+	last := b.LastUsedAt
+	if last.IsZero() {
+		last = b.UpdatedAt
+	}
+	if last.IsZero() || time.Since(last) < r.IdleAfter {
+		return false
+	}
+	h := compute.Handle{
+		Provider: r.Compute.Name(), Name: instKey(b), Port: b.Port,
+		DataDir: b.DataDir, ContainerID: b.ContainerID,
+	}
+	if running {
+		_ = r.Compute.Stop(ctx, h)
+	}
+	b.Status = meta.StatusIdle
+	b.ContainerID = ""
+	b.ErrorMessage = fmt.Sprintf("idle %s (SPROUT_IDLE_SUSPEND)", r.IdleAfter)
+	_ = r.Store.UpdateBranch(ctx, b)
+	fmt.Fprintf(os.Stderr, "reconcile: auto-suspended idle branch %s after %s\n", b.Name, r.IdleAfter)
+	return true
 }
 
 func (r *Reconciler) startBranch(ctx context.Context, b meta.BranchRecord) error {

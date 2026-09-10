@@ -4,7 +4,7 @@ Copy-on-write database branches for Postgres, MongoDB, and Qdrant, with named co
 
 Create isolated, writable databases in seconds from a local replica of prod. Branches never talk to production. One connector keeps a single replication slot; apply runs on a schedule or on demand.
 
-[Setup](SETUP.md) · [Architecture](ARCHITECTURE.md) · [CLI skill](SKILL.md) · [npm client](https://www.npmjs.com/package/sproutdb-cli)
+[Setup](SETUP.md) · [Architecture](ARCHITECTURE.md) · [CLI skill](SKILL.md) · [OpenAPI](docs/openapi.yaml) · [llms.txt](docs/llms.txt) · [npm client](https://www.npmjs.com/package/sproutdb-cli) · [CI example](examples/github-action.yml)
 
 [![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![npm](https://img.shields.io/npm/v/sproutdb-cli)](https://www.npmjs.com/package/sproutdb-cli)
@@ -40,10 +40,10 @@ data/branches/<name>/          independent primary — CoW clone, no prod traffi
 ## Requirements
 
 - **Go 1.24+**
-- Postgres tools on `PATH`: `initdb`, `pg_ctl`, `psql`, `pg_basebackup`, `pg_dump`
-  - Match the upstream major version (Supabase PG 17): `export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"`
-- Optional: MongoDB tools (`mongod`, `mongodump`, `mongorestore`, `mongosh`) for `--engine=mongodb`
-- Optional: `qdrant` binary on `PATH` for `--engine=qdrant`
+- **Postgres tools** (`initdb`, `pg_ctl`, `psql`, `pg_basebackup`, `pg_dump`) — required only for Postgres connectors / `sprout init`. Match the upstream major (Supabase PG 17): `export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"`
+- **MongoDB tools** (`mongod`, `mongodump`, `mongorestore`, `mongosh`) — only for `--engine=mongodb`
+- **`qdrant` binary** on `PATH` — only for `--engine=qdrant`
+- A Mongo/Qdrant-only `sprout-server` starts **without** Postgres binaries
 - **macOS:** APFS volume for CoW clones
 - **Linux:** ZFS when `SPROUT_ZFS_DATASET` is set; otherwise full copy
 - API token (`dev-token` locally; set `SPROUT_TOKEN` when the API is public)
@@ -58,12 +58,18 @@ cd sprout
 make build          # bin/sprout + bin/sprout-server
 ```
 
-CLI against a hosted server (no local server required):
+Two CLIs share `~/.sprout/config.json`. Use **one** on PATH:
+
+| Who | Install | Config |
+|---|---|---|
+| This repo / Go | `make build` → `./bin/sprout` | `SPROUT_SERVER` / `SPROUT_TOKEN` or the same config file |
+| Hosted humans | `npm install -g sproutdb-cli` | `sprout config set api-url …` then `sprout login` |
 
 ```bash
 npm install -g sproutdb-cli
-sprout config set api-url http://strido.fit:8080
+sprout config set api-url http://YOUR_HOST:8080
 sprout login
+sprout doctor
 ```
 
 The npm package is **[`sproutdb-cli`](https://www.npmjs.com/package/sproutdb-cli)** (`sprout` on PATH + `SproutClient` SDK). From this repo: `make npm-link`. See [`npm/README.md`](npm/README.md).
@@ -75,19 +81,25 @@ A production-style VM (ZFS, firewall, Postgres 17) is documented in [`SETUP.md`]
 ## Quick start
 
 ```bash
-export PATH="/opt/homebrew/bin:$PATH"
 make build
+./bin/sprout-server                 # terminal 1
+./bin/sprout doctor                 # terminal 2 — binaries, storage, DNS
 ```
 
-### Local demo
+### Local demo (needs Postgres tools)
 
 ```bash
-./bin/sprout-server                 # terminal 1
-
-./bin/sprout init                   # terminal 2
+./bin/sprout init
 ./bin/sprout branch create alice --from=main
-./bin/sprout branch list
-psql postgresql://localhost:<port>/postgres
+./bin/sprout branch switch alice --from=main
+./bin/sprout env --write=.env.sprout
+./bin/sprout url                    # connection string only
+```
+
+Scripts and agents should use `--print-url` / `--format json` instead of scraping human text:
+
+```bash
+DATABASE_URL="$(sprout branch create feat --from=lab --print-url)"
 ```
 
 ### Lab primary + connector
@@ -136,11 +148,13 @@ export SPROUT_GITHUB_CLIENT_ID=Iv1.xxxxxxxx
 **Each person:**
 
 ```bash
-sprout config set api-url http://strido.fit:8080
+sprout config set api-url http://YOUR_HOST:8080
 sprout login
 sprout whoami
+sprout doctor
+sprout connector preflight --mode=logical 'postgresql://…'
 sprout connect --name=supabase --mode=logical 'postgresql://…'
-sprout branch create testdb --from=supabase
+sprout branch create testdb --from=supabase --print-url
 ```
 
 A second `sprout connect` to the **same** host:port/database clones an existing local replica (no extra prod slot). Only the first live replica of that URL opens a logical slot on production.
@@ -179,6 +193,10 @@ Branches CoW the replica directory and **detach** any cloned subscription so the
 Mongo `--tables=` is a collection allowlist and requires a database in the URL. With a DNS `SPROUT_PUBLIC_HOST`, Mongo URLs use port **27017** and `tls=true` (SNI selects the instance). `SPROUT_MONGO_PROXY=false` keeps unique ports.
 
 Qdrant `--tables=` is a collection allowlist. Infer engine from `qdrant://` / `qdrants://`, `*.qdrant.io`, or port **6333** (or pass `--engine=qdrant` on a generic `http(s)://` URL). With a DNS host, Qdrant URLs use port **6333** and HTTPS (SNI selects the instance). `SPROUT_QDRANT_PROXY=false` keeps unique ports. `sprout sync` is unsupported — reconnect with `--wipe` to refresh.
+
+`sprout connector preflight <url>` checks WAL, slots, grants, replica identity, and local tools **without** creating a slot. `--branch-sql=@anonymize.sql` on connect (or `sprout connector hook`) runs Postgres SQL on every new branch. Idle branches auto-suspend after `SPROUT_IDLE_SUSPEND` (default **15m**; `off` to disable).
+
+CI: copy [`examples/github-action.yml`](examples/github-action.yml). Agents: fetch `$SPROUT_SERVER/llms.txt` and `$SPROUT_SERVER/openapi.yaml`.
 
 ---
 
@@ -300,15 +318,22 @@ Ports start at **55433**. In-use listeners are skipped so a leftover `mongod` ca
 | Command | Purpose |
 |---------|---------|
 | `sprout init` | Local demo project + `main` |
-| `sprout connect [--name=] [--engine=] [--mode=] [--wipe\|--no-wipe] [--dry-run] [--tables=] <url>` | Bootstrap a named replica |
+| `sprout connect [--name=] [--engine=] [--mode=] [--wipe\|--no-wipe] [--dry-run] [--tables=] [--branch-sql=] <url>` | Bootstrap a named replica |
 | `sprout status [name]` | Connector lag / logical status |
 | `sprout sync [name]` | Apply queued logical WAL now, then pause (slot kept) |
 | `sprout connector list \| delete [--force] \| suspend \| resume <name>` | Connector lifecycle |
 | `sprout branch create <name> [--from=]` | CoW branch |
-| `sprout branch list \| get \| diff \| reset \| delete \| suspend \| resume` | Branch lifecycle (`--from` if the name is shared) |
+| `sprout branch list \| get \| diff \| reset \| delete \| suspend \| resume \| switch` | Branch lifecycle (`--from` if the name is shared) |
 | `sprout login \| logout \| whoami` | GitHub device flow |
 | `sprout org …` | Orgs and members |
-| `sprout doctor \| health` | Diagnostics |
+| `sprout doctor \| health` | Diagnostics — run doctor first on a new host |
+| `sprout preflight` / `sprout connector preflight` | Probe an upstream URL; creates nothing |
+| `sprout connector hook <name> --sql=@file.sql` | Postgres SQL on every new branch |
+| `sprout env [name] [--write=.env.sprout]` | `DATABASE_URL` / `MONGODB_URI` / `QDRANT_*` |
+| `sprout url [name]` | Connection string only |
+| `sprout branch switch <name>` | Remember current branch (`sprout env` / `sprout url`) |
+
+Global flags: `--print-url`, `--format json`, `--quiet`. Default human output no longer dumps a JSON blob.
 
 Defaults: `--name=primary`; `--engine` from URL scheme; Postgres `--mode=physical`; Mongo and Qdrant are always dump-snapshot logical. `connector delete --force` also deletes child branches.
 
@@ -316,7 +341,7 @@ Defaults: `--name=primary`; `--engine` from URL scheme; Postgres `--mode=physica
 
 ## HTTP API
 
-Base: `http://127.0.0.1:8080`. Header: `Authorization: Bearer <token>` (GitHub user token or `SPROUT_TOKEN`). `/healthz` and `/v1/auth/github` are unauthenticated. Project path is usually `default`.
+Base: `http://127.0.0.1:8080`. Header: `Authorization: Bearer <token>` (GitHub user token or `SPROUT_TOKEN`). Unauthenticated: `/healthz`, `/v1/auth/github`, `/llms.txt`, `/openapi.yaml`. Project path is usually `default`. Full spec: [`docs/openapi.yaml`](docs/openapi.yaml).
 
 <details>
 <summary>Route table</summary>
@@ -324,11 +349,15 @@ Base: `http://127.0.0.1:8080`. Header: `Authorization: Bearer <token>` (GitHub u
 | Method | Path | Notes |
 |--------|------|--------|
 | `GET` | `/healthz` | `{ "status": "ok" }` |
+| `GET` | `/llms.txt` | Agent-oriented CLI/API notes |
+| `GET` | `/openapi.yaml` | OpenAPI spec |
 | `GET` | `/v1/auth/github` | Device-flow metadata |
 | `GET` | `/v1/whoami` | `{kind, login, id, org}` |
 | `POST` | `/v1/init` | Local `main` (machine token) |
 | `GET` | `/v1/connectors` | Passwords redacted |
-| `POST` | `/v1/projects/{project}/connect` | `url`, `engine`, `mode`, `name`, `wipe`, `dry_run`, `tables` |
+| `POST` | `/v1/projects/{project}/preflight` | Probe URL; no slot |
+| `POST` | `/v1/projects/{project}/connect` | `url`, `engine`, `mode`, `name`, `wipe`, `dry_run`, `tables`, `branch_sql` |
+| `PATCH` | `/v1/projects/{project}/connectors/{name}` | `{ "branch_sql": "..." }` |
 | `POST` | `/v1/projects/{project}/sync` | Optional `?name=` |
 | `POST` | `/v1/projects/{project}/connectors/{name}/sync` | Apply logical WAL now |
 | `DELETE` | `/v1/projects/{project}/connectors/{name}` | `?force=true` deletes child branches |
@@ -370,6 +399,7 @@ Long jobs (`connect`, `branch create`, `sync`) stream NDJSON when `Accept: appli
 | `SPROUT_DB_PASSWORD` | random | Shared advertised password; else per instance |
 | `SPROUT_AUTO_RESUME` | unset | `true` restarts crashed connectors/branches |
 | `SPROUT_SYNC_INTERVAL` | `1h` | Logical apply cadence. `off` / `0` disables ticker (`sprout sync` still works) |
+| `SPROUT_IDLE_SUSPEND` | `15m` | Auto-stop idle branches. `off` / `0` disables |
 | `SPROUT_COMPUTE` | `auto` | `local` / `docker` / `auto` |
 | `SPROUT_COLD_SNAP` | `true` | Cold-stop parent for non-standby snapshots |
 

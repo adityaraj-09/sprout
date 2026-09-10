@@ -20,6 +20,7 @@ type Config struct {
 	MetaDB       string
 	ServerURL    string        // CLI only
 	SyncInterval time.Duration // logical apply cadence; 0 disables the ticker
+	IdleSuspend  time.Duration // auto-suspend idle branches; 0 disables
 }
 
 func ServerDefaults() Config {
@@ -38,6 +39,7 @@ func ServerDefaults() Config {
 		PublicHost:   envOr("SPROUT_PUBLIC_HOST", "localhost"),
 		MetaDB:       "",
 		SyncInterval: ParseSyncInterval(os.Getenv("SPROUT_SYNC_INTERVAL")),
+		IdleSuspend:  ParseIdleSuspend(os.Getenv("SPROUT_IDLE_SUSPEND")),
 	}
 }
 
@@ -55,6 +57,24 @@ func ParseSyncInterval(raw string) time.Duration {
 	d, err := time.ParseDuration(s)
 	if err != nil || d < 0 {
 		return time.Hour
+	}
+	return d
+}
+
+// ParseIdleSuspend reads SPROUT_IDLE_SUSPEND.
+// Empty defaults to 15m. 0 / off / false / none disables auto-suspend.
+func ParseIdleSuspend(raw string) time.Duration {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" {
+		return 15 * time.Minute
+	}
+	switch s {
+	case "0", "off", "false", "none", "disable", "disabled":
+		return 0
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return 15 * time.Minute
 	}
 	return d
 }

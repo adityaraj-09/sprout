@@ -11,6 +11,7 @@ export type {
   OrgMember,
   ProgressHandler,
   Project,
+  PreflightReport,
   ReplicationStatus,
   SproutClientOptions,
   SyncResult,

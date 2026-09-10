@@ -22,7 +22,7 @@ On Azure/Linux you typically:
 
 1. Attach a **dedicated data disk** (do not put the pool on the OS disk).
 2. Prefer **ZFS** for real CoW branches, or **`SPROUT_STORAGE=copy`** for a simple full-copy fallback.
-3. Install **Postgres client/server tools** whose major version is **≥ your primary** (Supabase 17 → PG 17 tools).
+3. Install **Postgres client/server tools** only if you connect Postgres (`sprout init` / `--engine=postgres`). A Mongo/Qdrant-only server starts without them. When you do install Postgres, the major version must be **≥ your primary** (Supabase 17 → PG 17 tools).
 4. Run with **`SPROUT_COMPUTE=local`** (Docker often mismatches `initdb` major).
 5. Open **NSG** for API `8080`, Postgres `5432`, Mongo `27017`, and Qdrant `6333` (SNI proxies when using a domain).
 

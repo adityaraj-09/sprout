@@ -1,0 +1,17 @@
+# Example: ephemeral Sprout branch per pull request
+#
+# This file is a template. Copy it into an application repository — it is not
+# wired to run on the Sprout repo itself.
+#
+# Required secrets: SPROUT_SERVER, SPROUT_TOKEN
+# See examples/github-action.yml for the full workflow.
+
+name: sprout-branch-example
+on:
+  workflow_dispatch:
+
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Copy examples/github-action.yml into your app repo."

@@ -27,24 +27,37 @@ type Binaries struct {
 }
 
 func LookBinaries() (Binaries, error) {
-	need := []string{"initdb", "postgres", "pg_ctl", "pg_isready", "createdb", "psql", "pg_basebackup"}
-	found := map[string]string{}
-	for _, n := range need {
+	b := LookBinariesOptional()
+	if !b.Complete() {
+		return b, fmt.Errorf("missing Postgres tools on PATH (initdb/postgres/pg_ctl/psql) — install PostgreSQL to run sprout init, or connect Mongo/Qdrant only")
+	}
+	return b, nil
+}
+
+// LookBinariesOptional resolves Postgres tools when present. Missing binaries
+// stay empty so a Mongo/Qdrant-only server can start.
+func LookBinariesOptional() Binaries {
+	find := func(n string) string {
 		p, err := exec.LookPath(n)
 		if err != nil {
-			return Binaries{}, fmt.Errorf("missing %s in PATH (install PostgreSQL)", n)
+			return ""
 		}
-		found[n] = p
+		return p
 	}
 	return Binaries{
-		InitDB:       found["initdb"],
-		Postgres:     found["postgres"],
-		PgCtl:        found["pg_ctl"],
-		PgIsReady:    found["pg_isready"],
-		Createdb:     found["createdb"],
-		Psql:         found["psql"],
-		PgBaseBackup: found["pg_basebackup"],
-	}, nil
+		InitDB:       find("initdb"),
+		Postgres:     find("postgres"),
+		PgCtl:        find("pg_ctl"),
+		PgIsReady:    find("pg_isready"),
+		Createdb:     find("createdb"),
+		Psql:         find("psql"),
+		PgBaseBackup: find("pg_basebackup"),
+	}
+}
+
+// Complete is true when the binaries needed to start a local Postgres exist.
+func (b Binaries) Complete() bool {
+	return b.InitDB != "" && b.Postgres != "" && b.PgCtl != "" && b.Psql != ""
 }
 
 // Instance is one Postgres process bound to one data directory + port.
@@ -218,6 +231,20 @@ func (i *Instance) ExecSQL(db, sql string) (string, error) {
 	cmd := exec.Command(i.Bins.Psql, "-h", "127.0.0.1", "-p", strconv.Itoa(i.Port), "-d", db, "-v", "ON_ERROR_STOP=1", "-c", sql)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// ExecSQLScript runs a multi-statement script on stdin (ON_ERROR_STOP).
+func (i *Instance) ExecSQLScript(db, sql string) (string, error) {
+	if i.Bins.Psql == "" {
+		return "", fmt.Errorf("psql not on PATH")
+	}
+	cmd := exec.Command(i.Bins.Psql, "-h", "127.0.0.1", "-p", strconv.Itoa(i.Port), "-d", db, "-v", "ON_ERROR_STOP=1")
+	cmd.Stdin = strings.NewReader(sql)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("branch_sql: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
 }
 
 // SeedDemo loads a small but non-trivial table so branch experiments are visible.

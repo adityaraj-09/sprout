@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/adityaraj/sprout/internal/auth"
+	"github.com/adityaraj/sprout/internal/engine"
 	"github.com/adityaraj/sprout/internal/meta"
 	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
@@ -38,6 +39,15 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 	var checks []DoctorCheck
 	add := func(c DoctorCheck) { checks = append(checks, c) }
 
+	cons, _ := s.ListConnectors(ctx)
+	needPG := false
+	for _, c := range cons {
+		if !engine.IsDumpSnapshot(c.Engine) {
+			needPG = true
+			break
+		}
+	}
+
 	// Binaries
 	bins := []struct{ name, path string }{
 		{"initdb", s.Bins.InitDB},
@@ -48,9 +58,15 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 	}
 	for _, b := range bins {
 		if b.path == "" {
-			add(DoctorCheck{Name: "bin:" + b.name, OK: false, Level: "error",
+			level := "warn"
+			ok := true
+			if needPG {
+				level = "error"
+				ok = false
+			}
+			add(DoctorCheck{Name: "bin:" + b.name, OK: ok, Level: level,
 				Detail: "not found on PATH",
-				Hint:   "install PostgreSQL client/server matching your primary major (e.g. postgresql-17 / postgresql-client-17)"})
+				Hint:   "optional unless you connect Postgres — install a client/server matching your primary major (e.g. postgresql-17)"})
 			continue
 		}
 		major, err := postgres.ClientMajor(b.path)
@@ -187,6 +203,16 @@ func (s *Service) Doctor(ctx context.Context) DoctorReport {
 	}
 
 	s.doctorInventory(ctx, add)
+
+	if s.IdleSuspend > 0 {
+		add(DoctorCheck{Name: "idle_suspend", OK: true, Level: "info",
+			Detail: fmt.Sprintf("auto-suspend branches after %s idle", s.IdleSuspend),
+			Hint:   "SPROUT_IDLE_SUSPEND=off to disable; sprout branch resume to wake"})
+	} else {
+		add(DoctorCheck{Name: "idle_suspend", OK: true, Level: "info",
+			Detail: "off",
+			Hint:   "set SPROUT_IDLE_SUSPEND=15m to stop idle branch compute"})
+	}
 
 	// GitHub device-flow login
 	gh := auth.FromEnv()

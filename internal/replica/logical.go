@@ -496,6 +496,11 @@ func (m *Manager) ReloadLocal(ctx context.Context, localHost string, localPort i
 	return m.psqlLocal(ctx, localHost, localPort, "SELECT pg_reload_conf()")
 }
 
+// QueryPrimary runs SQL on the upstream (tuples only, aligned).
+func (m *Manager) QueryPrimary(ctx context.Context, c Conn, sql string) (string, error) {
+	return m.psqlPrimary(ctx, c, sql)
+}
+
 func (m *Manager) psqlPrimary(ctx context.Context, c Conn, sql string) (string, error) {
 	cmd := exec.CommandContext(ctx, m.Bins.Psql,
 		"-h", c.DialHost(), "-p", strconv.Itoa(c.Port), "-U", c.User, "-d", c.Database,

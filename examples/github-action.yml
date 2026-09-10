@@ -1,0 +1,49 @@
+# Example: ephemeral Sprout branch per GitHub Actions job
+#
+# Copy into your app repo as .github/workflows/sprout.yml
+# Secrets: SPROUT_SERVER (http://host:8080), SPROUT_TOKEN (machine token)
+#
+# DATABASE_URL comes from `sprout branch create --print-url` so tests never scrape logs.
+
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      SPROUT_SERVER: ${{ secrets.SPROUT_SERVER }}
+      SPROUT_TOKEN: ${{ secrets.SPROUT_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      # Hosted CLI (same commands as ./bin/sprout):
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install -g sproutdb-cli
+
+      - name: Create branch
+        id: db
+        run: |
+          NAME="pr-${{ github.event.pull_request.number || github.run_id }}"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          URL="$(sprout --quiet branch create "$NAME" --from=prod --print-url)"
+          echo "DATABASE_URL=$URL" >> "$GITHUB_ENV"
+
+      - name: Tests
+        run: |
+          echo "using $DATABASE_URL"
+          # npm test / go test / pytest …
+
+      - name: Delete branch
+        if: always()
+        run: sprout --quiet branch delete "${{ steps.db.outputs.name }}" --from=prod

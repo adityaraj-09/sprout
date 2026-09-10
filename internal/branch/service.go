@@ -38,6 +38,7 @@ type Service struct {
 	ColdSnap     bool
 	MaxLagBytes  int64
 	SyncInterval time.Duration // 0 = no hourly ticker; sprout sync still works
+	IdleSuspend  time.Duration // 0 = do not auto-suspend idle branches
 
 	opsMu sync.Map // per-branch / per-connector locks
 }
@@ -160,6 +161,9 @@ func (s *Service) InitMain(ctx context.Context) (meta.Project, error) {
 	proj, err := s.Store.EnsureProject(ctx, DefaultProject)
 	if err != nil {
 		return meta.Project{}, err
+	}
+	if !s.Bins.Complete() {
+		return proj, fmt.Errorf("postgres binaries not on PATH — sprout init needs PostgreSQL; for Mongo/Qdrant run sprout connect --engine=mongodb|qdrant instead")
 	}
 
 	if err := s.Storage.EnsureVolume(s.MainDir()); err != nil {
@@ -297,6 +301,12 @@ func (s *Service) Create(ctx context.Context, projectID, name, fromConnector str
 	rec.Status = meta.StatusActive
 	rec.ErrorMessage = ""
 	rec.LastUsedAt = time.Now().UTC()
+	if err := s.applyBranchSQL(ctx, rec); err != nil {
+		rec.Status = meta.StatusError
+		rec.ErrorMessage = err.Error()
+		_ = s.Store.UpdateBranch(ctx, rec)
+		return meta.BranchRecord{}, err
+	}
 	if err := s.Store.UpdateBranch(ctx, rec); err != nil {
 		return meta.BranchRecord{}, err
 	}
@@ -952,5 +962,11 @@ func (s *Service) List(ctx context.Context, projectID string) ([]meta.BranchReco
 }
 
 func (s *Service) Get(ctx context.Context, projectID, name, from string) (meta.BranchRecord, error) {
-	return s.lookupBranch(ctx, projectID, name, from)
+	rec, err := s.lookupBranch(ctx, projectID, name, from)
+	if err != nil {
+		return meta.BranchRecord{}, err
+	}
+	rec.LastUsedAt = time.Now().UTC()
+	_ = s.Store.UpdateBranch(ctx, rec)
+	return rec, nil
 }

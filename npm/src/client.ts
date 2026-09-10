@@ -7,6 +7,7 @@ import {
   Org,
   OrgList,
   OrgMember,
+  PreflightReport,
   ProgressHandler,
   Project,
   ReplicationStatus,
@@ -109,6 +110,7 @@ export class SproutClient {
     wipe?: boolean;
     dryRun?: boolean;
     tables?: string[];
+    branchSql?: string;
     onProgress?: ProgressHandler;
   }): Promise<ConnectResult> {
     return this.request(
@@ -122,8 +124,31 @@ export class SproutClient {
         wipe: opts.wipe ?? true,
         dry_run: opts.dryRun ?? false,
         tables: opts.tables,
+        branch_sql: opts.branchSql,
       },
       { progress: true, onProgress: opts.onProgress },
+    );
+  }
+
+  async preflight(opts: {
+    url: string;
+    engine?: string;
+    mode?: string;
+    tables?: string[];
+  }): Promise<PreflightReport> {
+    return this.request("POST", `/v1/projects/${this.project}/preflight`, {
+      url: opts.url,
+      engine: opts.engine,
+      mode: opts.mode,
+      tables: opts.tables,
+    });
+  }
+
+  async setConnectorHook(name: string, branchSql: string): Promise<Connector> {
+    return this.request(
+      "PATCH",
+      `/v1/projects/${this.project}/connectors/${encodeURIComponent(name)}`,
+      { branch_sql: branchSql },
     );
   }
 

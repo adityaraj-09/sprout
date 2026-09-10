@@ -48,12 +48,13 @@ func TestSQLitePasswordRoundTrip(t *testing.T) {
 	if err := store.UpdateConnector(ctx, Connector{
 		ID: c.ID, ProjectID: proj.ID, Name: "sup", Engine: "mongodb", Mode: "logical",
 		Status: ConnectorReplicating, Port: 55434, Password: "secret-conn",
+		BranchSQL: "DELETE FROM audit;",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	c, err = store.GetConnectorByName(ctx, proj.ID, "sup", "")
-	if err != nil || c.Engine != "mongodb" {
-		t.Fatalf("engine round-trip: %+v %v", c, err)
+	if err != nil || c.Engine != "mongodb" || c.BranchSQL != "DELETE FROM audit;" {
+		t.Fatalf("engine/sql round-trip: %+v %v", c, err)
 	}
 	b, err := store.GetBranch(ctx, proj.ID, "feat")
 	if err != nil {

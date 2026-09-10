@@ -1,15 +1,24 @@
 ---
 name: sprout-cli
 description: >
-  Use the Sprout CLI to connect production Postgres or MongoDB, create copy-on-write database
-  branches, and get psql/mongosh URLs. Trigger when the user mentions Sprout, sprout CLI,
-  sproutdb-cli, database branches, connectors, or wants an isolated Postgres for
-  testing against a hosted sprout-server.
+  Use the Sprout CLI to connect production Postgres, MongoDB, or Qdrant, create
+  copy-on-write database branches, and print DATABASE_URL / mongosh / Qdrant URLs.
+  Trigger when the user mentions Sprout, sprout CLI, sproutdb-cli, database branches,
+  connectors, or wants an isolated database for testing against a hosted sprout-server.
 ---
 
 # Sprout CLI
 
-Sprout is a **control plane** for CoW Postgres branches. The CLI talks HTTP to `sprout-server`. It does not start Postgres itself.
+Sprout is a **control plane** for CoW Postgres, MongoDB, and Qdrant branches. The CLI talks HTTP to `sprout-server`. It does not start databases itself.
+
+**Always fetch live docs from the server you are targeting** (commands and flags change):
+
+```bash
+curl -sS "$SPROUT_SERVER/llms.txt"
+curl -sS "$SPROUT_SERVER/openapi.yaml"
+```
+
+Repo copies: [`docs/llms.txt`](docs/llms.txt), [`docs/openapi.yaml`](docs/openapi.yaml). Prefer the live URLs over this file.
 
 Two clients exist:
 
@@ -22,8 +31,10 @@ Prefer whichever `sprout` is on PATH. For a hosted VM, point the CLI at that ser
 
 ## Point the CLI at the server
 
+Replace `YOUR_HOST` with the sprout-server URL the user gave you (do not assume a hostname).
+
 ```bash
-sprout config set api-url http://strido.fit:8080
+sprout config set api-url http://YOUR_HOST:8080
 sprout login          # GitHub device flow (opens a browser)
 sprout whoami
 sprout health
@@ -33,14 +44,27 @@ sprout doctor
 Go binary without login file:
 
 ```bash
-export SPROUT_SERVER=http://strido.fit:8080
+export SPROUT_SERVER=http://YOUR_HOST:8080
 export SPROUT_TOKEN=<machine token>
 sprout health
 ```
 
-One-shot (npm): `sprout --api-url=http://strido.fit:8080 --token=secret health`
+One-shot (npm): `sprout --api-url=http://YOUR_HOST:8080 --token=secret health`
 
-Auth is `Authorization: Bearer <token>`. Optional `X-Sprout-Org: <name-or-id>` (GitHub users default to personal org `default`). Humans use a **GitHub user token** from `sprout login`. Connectors are **org-scoped**: owners can connect/wipe/delete; members can list connectors and mutate only their own branches. `/healthz` and `GET /v1/auth/github` are unauthenticated. The machine `SPROUT_TOKEN` still works for scripts and sees everything. Server must set `SPROUT_GITHUB_CLIENT_ID`. Any GitHub user can sign in unless `SPROUT_GITHUB_USERS` / `SPROUT_GITHUB_ORGS` is set.
+Auth is `Authorization: Bearer <token>`. Optional `X-Sprout-Org: <name-or-id>` (GitHub users default to personal org `default`). Humans use a **GitHub user token** from `sprout login`. Connectors are **org-scoped**: owners can connect/wipe/delete; members can list connectors and mutate only their own branches. `/healthz`, `/v1/auth/github`, `/llms.txt`, and `/openapi.yaml` are unauthenticated. The machine `SPROUT_TOKEN` still works for scripts and sees everything. Server must set `SPROUT_GITHUB_CLIENT_ID`. Any GitHub user can sign in unless `SPROUT_GITHUB_USERS` / `SPROUT_GITHUB_ORGS` is set.
+
+## Scriptable output
+
+Use these instead of scraping human text:
+
+```bash
+sprout branch create feat --from=prod --print-url
+sprout --format json branch list
+sprout env feat --from=prod --write=.env.sprout
+sprout url                          # current branch after sprout branch switch
+```
+
+`--quiet` hides progress. Default human output no longer appends a JSON dump.
 
 ## What to do (typical)
 
@@ -70,7 +94,7 @@ sprout status supabase
 sprout branch create testdb --from=supabase
 ```
 
-Prints `connection_string` and a `psql` / `mongosh` one-liner. Hostnames include the **branch creator** GitHub login (`testdb-alice-supabase.strido.fit`). Use **that URL** in the app.
+Prints `connection_string` and a `psql` / `mongosh` / `curl` one-liner. Hostnames include the **branch creator** GitHub login (`testdb-alice-supabase.YOUR_HOST`). Use **that URL** in the app. Prefer `--print-url` in scripts.
 
 4. `sprout logout` does not fall back to `SPROUT_TOKEN` / `dev-token` against a remote API. Re-login to keep working. `sprout init` is machine-token only.
 
@@ -121,10 +145,10 @@ sprout branch create alice --from=main
 ## Connection URLs
 
 - `/postgres` is the **database name inside the instance**, not the branch name.
-- With a DNS `SPROUT_PUBLIC_HOST` (e.g. `strido.fit`), URLs are:
-  - connector: `postgresql://sprout:<pass>@supabase-alice.strido.fit:5432/postgres`
-  - branch: `postgresql://sprout:<pass>@testdb-alice-supabase.strido.fit:5432/postgres`
-  - unowned/machine: `postgresql://sprout:<pass>@<branch>-<connector>.strido.fit:5432/postgres`
+- With a DNS `SPROUT_PUBLIC_HOST` (your VM hostname), URLs are:
+  - connector: `postgresql://sprout:<pass>@supabase-alice.YOUR_HOST:5432/postgres`
+  - branch: `postgresql://sprout:<pass>@testdb-alice-supabase.YOUR_HOST:5432/postgres`
+  - unowned/machine: `postgresql://sprout:<pass>@<branch>-<connector>.YOUR_HOST:5432/postgres`
 - Port **5432** is the Postgres SNI proxy. Hostname selects the instance. Clients need TLS (`sslmode=require` or libpq `prefer`). Self-signed cert is normal; `verify-full` may fail.
 - Localhost / raw IP: unique ports, no subdomain (`localhost:55440`).
 - MongoDB: same hostname labels. With a DNS host, URLs are `mongodb://sprout:<pass>@<host>:27017/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin`. Port **27017** is the SNI passthrough (`SPROUT_MONGO_PROXY=false` keeps unique ports).
@@ -173,7 +197,7 @@ sprout config unset api-url|token|project|org
 ```bash
 sprout branch list
 sprout branch get ar-login --from=supabase
-psql "postgresql://sprout:<pass>@ar-login-supabase.strido.fit:5432/postgres"
+psql "postgresql://sprout:<pass>@ar-login-supabase.YOUR_HOST:5432/postgres"
 ```
 
 Writes on a branch stay on that branch. `branch reset` re-clones from the snapshot taken at create (loses later writes). `suspend` / `resume` stop/start compute; data is kept.

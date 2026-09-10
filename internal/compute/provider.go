@@ -109,6 +109,9 @@ func (l *Local) Start(ctx context.Context, spec Spec) (Handle, error) {
 		}
 		return h, nil
 	}
+	if l.Bins.PgCtl == "" {
+		return Handle{}, fmt.Errorf("missing postgres binaries on PATH (install PostgreSQL matching the primary major, or connect Mongo/Qdrant only)")
+	}
 	inst := l.instance(spec)
 	if inst.IsRunning() {
 		return h, nil

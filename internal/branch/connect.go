@@ -27,13 +27,14 @@ const (
 
 // ConnectOpts controls connector bootstrap.
 type ConnectOpts struct {
-	Name   string
-	URL    string
-	Engine string
-	Mode   string
-	Wipe   bool     // default true — destroy local replica and rebootstrap
-	DryRun bool     // estimate only (logical)
-	Tables []string // optional table/collection allowlist (logical)
+	Name      string
+	URL       string
+	Engine    string
+	Mode      string
+	Wipe      bool     // default true — destroy local replica and rebootstrap
+	DryRun    bool     // estimate only (logical)
+	Tables    []string // optional table/collection allowlist (logical)
+	BranchSQL string   // Postgres SQL to run on every new branch from this connector
 }
 
 // ConnectResult is returned for dry-run or full connect.
@@ -94,6 +95,10 @@ func (s *Service) Connect(ctx context.Context, projectID string, opts ConnectOpt
 	if err != nil {
 		return ConnectResult{}, err
 	}
+	if opts.BranchSQL != "" {
+		c.BranchSQL = opts.BranchSQL
+		_ = s.Store.UpdateConnector(ctx, c)
+	}
 	return ConnectResult{Connector: &c, Lag: &lag}, nil
 }
 
@@ -119,7 +124,7 @@ func (s *Service) connectPhysical(ctx context.Context, projectID, name, primaryU
 		return meta.Connector{}, replica.Lag{}, err
 	}
 
-	c, err := s.prepareConnectorRecord(ctx, projectID, name, primaryURL, ModePhysical, engine.Postgres)
+	c, err := s.prepareConnectorRecord(ctx, projectID, name, primaryURL, ModePhysical, engine.Postgres, "")
 	if err != nil {
 		return meta.Connector{}, replica.Lag{}, err
 	}
@@ -198,7 +203,7 @@ func (s *Service) connectLogical(ctx context.Context, projectID string, opts Con
 		return ConnectResult{DryRun: true, Estimate: est}, nil
 	}
 
-	c, err := s.prepareConnectorRecord(ctx, projectID, opts.Name, opts.URL, ModeLogical, engine.Postgres)
+	c, err := s.prepareConnectorRecord(ctx, projectID, opts.Name, opts.URL, ModeLogical, engine.Postgres, opts.BranchSQL)
 	if err != nil {
 		return ConnectResult{}, err
 	}
@@ -347,7 +352,7 @@ func (s *Service) connectMongoLogical(ctx context.Context, projectID string, opt
 		return ConnectResult{DryRun: true, Estimate: est}, nil
 	}
 
-	c, err := s.prepareConnectorRecord(ctx, projectID, opts.Name, opts.URL, ModeLogical, engine.Mongo)
+	c, err := s.prepareConnectorRecord(ctx, projectID, opts.Name, opts.URL, ModeLogical, engine.Mongo, opts.BranchSQL)
 	if err != nil {
 		return ConnectResult{}, err
 	}
@@ -456,7 +461,7 @@ func (s *Service) connectQdrantLogical(ctx context.Context, projectID string, op
 		return ConnectResult{DryRun: true, Estimate: est}, nil
 	}
 
-	c, err := s.prepareConnectorRecord(ctx, projectID, opts.Name, opts.URL, ModeLogical, engine.Qdrant)
+	c, err := s.prepareConnectorRecord(ctx, projectID, opts.Name, opts.URL, ModeLogical, engine.Qdrant, opts.BranchSQL)
 	if err != nil {
 		return ConnectResult{}, err
 	}
@@ -644,7 +649,7 @@ func (s *Service) cloneConnectorFromLocal(ctx context.Context, projectID string,
 	return s.finishConnector(ctx, projectID, dest, lag)
 }
 
-func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, primaryURL, mode, eng string) (meta.Connector, error) {
+func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, primaryURL, mode, eng, branchSQL string) (meta.Connector, error) {
 	owner := auth.OwnerFrom(ctx)
 	dataDir := s.ReplicaDir(name, owner)
 	eng = engine.Normalize(eng)
@@ -661,6 +666,9 @@ func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, p
 		}
 		if existing.Password == "" {
 			existing.Password = postgres.GeneratePassword()
+		}
+		if branchSQL != "" {
+			existing.BranchSQL = branchSQL
 		}
 		if err := s.Store.UpdateConnector(ctx, existing); err != nil {
 			return meta.Connector{}, err
@@ -685,6 +693,7 @@ func (s *Service) prepareConnectorRecord(ctx context.Context, projectID, name, p
 		ID: uuid.NewString(), ProjectID: projectID, Name: name, PrimaryURL: primaryURL, Engine: eng, Mode: mode,
 		Status: meta.ConnectorBootstrapping, DataDir: dataDir, Port: port,
 		Password:  postgres.GeneratePassword(),
+		BranchSQL: branchSQL,
 		CreatedBy: owner,
 		OrgID:     auth.OrgIDFrom(ctx),
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
