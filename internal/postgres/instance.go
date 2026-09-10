@@ -186,7 +186,7 @@ func EnsurePortFree(port int) error {
 	if !PortListening(port) {
 		return nil
 	}
-	return fmt.Errorf("port %d already in use — stop leftover sprout compute (postgres or mongod): pg_ctl -D <datadir> stop  (or fuser -k %d/tcp)", port, port)
+	return fmt.Errorf("port %d already in use — stop leftover sprout compute (postgres, mongod, or qdrant): fuser -k %d/tcp", port, port)
 }
 
 // PortListening reports whether 127.0.0.1:port accepts a TCP connection.

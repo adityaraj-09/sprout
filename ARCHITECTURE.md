@@ -1,6 +1,6 @@
 # Sprout architecture
 
-Sprout is a **control plane** for copy-on-write Postgres branching. The server owns replicas, clones, and postmasters. Clients (CLI, npm SDK, `psql`) never touch PGDATA directly.
+Sprout is a **control plane** for copy-on-write Postgres, MongoDB, and Qdrant branching. The server owns replicas, clones, and database processes. Clients (CLI, npm SDK, `psql` / `mongosh` / HTTP) never touch data dirs directly.
 
 ## 1. System context
 
@@ -87,6 +87,8 @@ internal/
   postgres/   initdb, checkpoint, PrepareClone, advertised URLs
   pgproxy/    TLS SNI router on :5432
   mongoproxy/ TLS SNI passthrough on :27017
+  qdrant/     local qdrant process, snapshot import, HTTP URLs
+  qdrantproxy/TLS SNI passthrough on :6333
   meta/       SQLite → data/control.db
   reconcile/  keep compute vs metadata aligned
   config/     env defaults
@@ -102,6 +104,7 @@ flowchart TB
     API["HTTP :8080"]
     SNI["TLS SNI proxy :5432"]
     MNI["Mongo SNI passthrough :27017"]
+    QNI["Qdrant SNI passthrough :6333"]
   end
 
   subgraph loop [Loopback]
@@ -110,6 +113,7 @@ flowchart TB
     BX["branch test from x  127.0.0.2:55440  SCRAM"]
     BY["branch test from y  127.0.0.2:55441  SCRAM"]
     MX["mongod atlas  127.0.0.1:55461  TLS"]
+    QX["qdrant vectors  127.0.0.1:55480  TLS/HTTP"]
     MAIN["optional main  :55432"]
   end
 
@@ -178,6 +182,8 @@ Physical replicas stay standbys (WAL replay). Logical replicas keep **one publis
 
 MongoDB connectors (`mongodb://` / `mongodb+srv://`) skip this Postgres path: `mongodump` into a local standalone `mongod`, then the same CoW snapshot/clone. There is no oplog follow. Clients use `mongodb://sprout:<pass>@<host>:27017/?tls=true` when the SNI passthrough is on (`SPROUT_MONGO_PROXY=false` keeps unique ports).
 
+Qdrant connectors (`qdrant://` / `qdrants://` / http(s) on `:6333` or `*.qdrant.io`) copy collections into a local `qdrant` (snapshot upload, with point-scroll fallback). There is no continuous sync. Clients use `https://<host>:6333/?api-key=…` when the SNI passthrough is on (`SPROUT_QDRANT_PROXY=false` keeps unique HTTP ports).
+
 ## 5. Branch create (CoW)
 
 ```mermaid
@@ -234,6 +240,22 @@ sequenceDiagram
 ```
 
 `SPROUT_MONGO_PROXY=false` advertises unique Mongo ports instead.
+
+Qdrant with a DNS host enables TLS on the local process. `qdrantproxy` peeks SNI the same way and splices to loopback `qdrant`.
+
+```mermaid
+sequenceDiagram
+  participant App as curl / SDK
+  participant PX as qdrantproxy :6333
+  participant Q as qdrant 127.0.0.1:port
+
+  App->>PX: TLS ClientHello SNI=feat-vectors.strido.fit
+  PX->>PX: Lookup control.db → port 55480
+  PX->>Q: splice ClientHello + TCP
+  App->>Q: TLS + api-key + HTTP
+```
+
+`SPROUT_QDRANT_PROXY=false` advertises unique Qdrant ports instead.
 
 ## 7. Storage and compute
 

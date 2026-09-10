@@ -15,6 +15,7 @@ import (
 	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
 	"github.com/adityaraj/sprout/internal/progress"
+	"github.com/adityaraj/sprout/internal/qdrant"
 	"github.com/adityaraj/sprout/internal/replica"
 	"github.com/google/uuid"
 )
@@ -53,10 +54,10 @@ func (s *Service) Connect(ctx context.Context, projectID string, opts ConnectOpt
 	}
 	opts.Engine = engine.Normalize(opts.Engine)
 	if !engine.IsKnown(opts.Engine) {
-		return ConnectResult{}, fmt.Errorf("invalid_engine: use postgres or mongodb")
+		return ConnectResult{}, fmt.Errorf("invalid_engine: use %s", engine.KnownList())
 	}
 	if opts.Mode == "" {
-		if engine.IsMongo(opts.Engine) {
+		if engine.IsDumpSnapshot(opts.Engine) {
 			opts.Mode = ModeLogical
 		} else {
 			opts.Mode = ModePhysical
@@ -76,6 +77,12 @@ func (s *Service) Connect(ctx context.Context, projectID string, opts ConnectOpt
 			return ConnectResult{}, fmt.Errorf("invalid_mode: mongodb only supports mode=logical (mongodump snapshot) in this version")
 		}
 		return s.connectMongoLogical(ctx, projectID, opts)
+	}
+	if engine.IsQdrant(opts.Engine) {
+		if opts.Mode == ModePhysical {
+			return ConnectResult{}, fmt.Errorf("invalid_mode: qdrant only supports mode=logical (snapshot copy) in this version")
+		}
+		return s.connectQdrantLogical(ctx, projectID, opts)
 	}
 	if opts.Mode == ModeLogical {
 		return s.connectLogical(ctx, projectID, opts)
@@ -423,6 +430,115 @@ func (s *Service) connectMongoLogical(ctx context.Context, projectID string, opt
 	return ConnectResult{Connector: &c, Lag: &lag}, nil
 }
 
+func (s *Service) connectQdrantLogical(ctx context.Context, projectID string, opts ConnectOpts) (ConnectResult, error) {
+	unlock, err := s.lockBranch(ctx, s.connectorLockKey(opts.Name, auth.OwnerFrom(ctx)))
+	if err != nil {
+		return ConnectResult{}, err
+	}
+	defer unlock()
+
+	conn, err := qdrant.ParseURL(opts.URL)
+	if err != nil {
+		return ConnectResult{}, err
+	}
+	bins, err := qdrant.LookBinaries()
+	if err != nil {
+		return ConnectResult{}, err
+	}
+	if err := conn.Ping(ctx); err != nil {
+		return ConnectResult{}, err
+	}
+	if opts.DryRun {
+		est, err := conn.Estimate(ctx, opts.Tables)
+		if err != nil {
+			return ConnectResult{}, err
+		}
+		return ConnectResult{DryRun: true, Estimate: est}, nil
+	}
+
+	c, err := s.prepareConnectorRecord(ctx, projectID, opts.Name, opts.URL, ModeLogical, engine.Qdrant)
+	if err != nil {
+		return ConnectResult{}, err
+	}
+
+	progress.Println(ctx, "=== connect qdrant (snapshot copy, no continuous sync) ===")
+	fmt.Printf("  name=%s port=%d dir=%s wipe=%v\n", c.Name, c.Port, c.DataDir, opts.Wipe)
+	fmt.Printf("  primary: %s:%d tls=%v\n", conn.Host, conn.Port, conn.TLS)
+	if len(opts.Tables) > 0 {
+		fmt.Printf("  collections: %s\n", strings.Join(opts.Tables, ", "))
+	}
+
+	h := s.connectorHandle(c)
+	needBootstrap := opts.Wipe
+	if !needBootstrap {
+		if !qdrant.HasDataDir(c.DataDir) {
+			needBootstrap = true
+		}
+	}
+
+	if needBootstrap {
+		if err := s.stopConnectorForWipe(ctx, c); err != nil {
+			_, _, e := s.failConnector(ctx, c, fmt.Errorf("storage_failed: stop replica: %w", err))
+			return ConnectResult{}, e
+		}
+		if err := s.Storage.Destroy(c.DataDir); err != nil {
+			_, _, e := s.failConnector(ctx, c, fmt.Errorf("storage_failed: destroy replica volume: %w", err))
+			return ConnectResult{}, e
+		}
+		if err := s.Storage.EnsureVolume(c.DataDir); err != nil {
+			_, _, e := s.failConnector(ctx, c, err)
+			return ConnectResult{}, e
+		}
+		inst := &qdrant.Instance{
+			Name: c.Name, Owner: c.CreatedBy, DataDir: c.DataDir, Port: c.Port,
+			LogFile: s.logPath(postgres.ReplicaComputeName(c.Name, c.CreatedBy)), Bins: bins, Password: c.Password,
+		}
+		progress.Println(ctx, "→ init local qdrant")
+		if err := inst.Init(); err != nil {
+			_, _, e := s.failConnector(ctx, c, err)
+			return ConnectResult{}, e
+		}
+		if _, err := s.Compute.Start(ctx, compute.Spec{
+			Name: postgres.ReplicaComputeName(c.Name, c.CreatedBy), DataDir: c.DataDir, Port: c.Port,
+			LogFile: s.logPath(postgres.ReplicaComputeName(c.Name, c.CreatedBy)), Engine: engine.Qdrant,
+		}); err != nil {
+			_, _, e := s.failConnector(ctx, c, err)
+			return ConnectResult{}, e
+		}
+		progress.Println(ctx, "→ copy collections (snapshot, fallback to point scroll)")
+		if err := qdrant.DumpImport(ctx, conn, inst, opts.Tables); err != nil {
+			_, _, e := s.failConnector(ctx, c, err)
+			return ConnectResult{}, e
+		}
+		if err := inst.EnsureAppRoles(); err != nil {
+			_, _, e := s.failConnector(ctx, c, err)
+			return ConnectResult{}, e
+		}
+	} else {
+		progress.Println(ctx, "→ resume existing replica (--no-wipe)")
+		if err := s.Storage.EnsureVolume(c.DataDir); err != nil {
+			_, _, e := s.failConnector(ctx, c, err)
+			return ConnectResult{}, e
+		}
+		running, _ := s.Compute.IsRunning(ctx, h)
+		if !running {
+			if _, err := s.Compute.Start(ctx, compute.Spec{
+				Name: postgres.ReplicaComputeName(c.Name, c.CreatedBy), DataDir: c.DataDir, Port: c.Port,
+				LogFile: s.logPath(postgres.ReplicaComputeName(c.Name, c.CreatedBy)), Engine: engine.Qdrant,
+			}); err != nil {
+				_, _, e := s.failConnector(ctx, c, err)
+				return ConnectResult{}, e
+			}
+		}
+	}
+
+	c, lag, err := s.finishConnector(ctx, projectID, c, replica.Lag{})
+	if err != nil {
+		return ConnectResult{}, err
+	}
+	return ConnectResult{Connector: &c, Lag: &lag}, nil
+}
+
 func (s *Service) findSeedReplica(ctx context.Context, projectID, primaryURL, excludeID string) (meta.Connector, bool) {
 	want := replica.PrimaryKeyFromURL(primaryURL)
 	if want == "" {
@@ -601,6 +717,17 @@ func (s *Service) stopConnectorForWipe(ctx context.Context, c meta.Connector) er
 		}
 		return nil
 	}
+	if engine.IsQdrant(c.Engine) {
+		inst := &qdrant.Instance{
+			Name: h.Name, DataDir: c.DataDir, Port: c.Port,
+			Bins: qdrant.FindOnPath(), Password: c.Password,
+		}
+		_ = inst.Stop()
+		if err := inst.WaitPortFree(20 * time.Second); err != nil {
+			return err
+		}
+		return nil
+	}
 	_ = s.Compute.Stop(ctx, h)
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
@@ -693,7 +820,7 @@ func (s *Service) finishConnector(ctx context.Context, projectID string, c meta.
 		c.LastLSN = lag.ReceiveLSN
 	}
 	c.LastLagBytes = lag.LagBytes
-	if c.LastSyncedAt.IsZero() && (c.Mode != ModeLogical || engine.IsMongo(c.Engine)) {
+	if c.LastSyncedAt.IsZero() && (c.Mode != ModeLogical || engine.IsDumpSnapshot(c.Engine)) {
 		c.LastSyncedAt = time.Now().UTC()
 	}
 	_ = s.Store.UpdateConnector(ctx, c)
@@ -716,6 +843,10 @@ func advertiseConnector(c meta.Connector) (connURL, oneLiner string) {
 		return mongo.FormatConnString(c.Port, "", c.Password, c.Name, "", c.CreatedBy),
 			mongo.MongoshOneLiner(c.Port, c.Password, c.Name, "", c.CreatedBy)
 	}
+	if engine.IsQdrant(c.Engine) {
+		return qdrant.FormatConnString(c.Port, c.Password, c.Name, "", c.CreatedBy),
+			qdrant.CurlOneLiner(c.Port, c.Password, c.Name, "", c.CreatedBy)
+	}
 	return postgres.FormatConnString(c.Port, "postgres", c.Password, c.Name, "", c.CreatedBy),
 		postgres.PsqlOneLiner(c.Port, c.Password, c.Name, "", c.CreatedBy)
 }
@@ -724,6 +855,10 @@ func advertiseBranch(rec meta.BranchRecord, eng string) (connURL, oneLiner strin
 	if engine.IsMongo(eng) {
 		return mongo.FormatConnString(rec.Port, "", rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy),
 			mongo.MongoshOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
+	}
+	if engine.IsQdrant(eng) {
+		return qdrant.FormatConnString(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy),
+			qdrant.CurlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
 	}
 	return postgres.FormatConnString(rec.Port, "postgres", rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy),
 		postgres.PsqlOneLiner(rec.Port, rec.Password, rec.Name, rec.SourceConnector, rec.CreatedBy)
@@ -739,7 +874,7 @@ func (s *Service) ReplicationStatus(ctx context.Context, projectID, name string)
 	if err != nil {
 		return meta.Connector{}, replica.Lag{}, err
 	}
-	if engine.IsMongo(c.Engine) {
+	if engine.IsDumpSnapshot(c.Engine) {
 		return c, replica.Lag{}, nil
 	}
 	rm := &replica.Manager{Bins: s.Bins}
@@ -810,7 +945,7 @@ func (s *Service) DeleteConnector(ctx context.Context, projectID, name string, f
 	rm := &replica.Manager{Bins: s.Bins}
 	h := s.connectorHandle(c)
 
-	if c.Mode == ModeLogical && !engine.IsMongo(c.Engine) {
+	if c.Mode == ModeLogical && !engine.IsDumpSnapshot(c.Engine) {
 		running, _ := s.Compute.IsRunning(ctx, h)
 		if running {
 			_ = rm.DropSubscriptionLocal(ctx, "127.0.0.1", c.Port, subName(c))

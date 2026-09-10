@@ -24,7 +24,7 @@ On Azure/Linux you typically:
 2. Prefer **ZFS** for real CoW branches, or **`SPROUT_STORAGE=copy`** for a simple full-copy fallback.
 3. Install **Postgres client/server tools** whose major version is **≥ your primary** (Supabase 17 → PG 17 tools).
 4. Run with **`SPROUT_COMPUTE=local`** (Docker often mismatches `initdb` major).
-5. Open **NSG** for API `8080`, Postgres `5432`, and Mongo `27017` (SNI proxies when using a domain).
+5. Open **NSG** for API `8080`, Postgres `5432`, Mongo `27017`, and Qdrant `6333` (SNI proxies when using a domain).
 
 ---
 
@@ -47,6 +47,7 @@ On Azure/Linux you typically:
 | `8080` | `sprout-server` API |
 | `5432` | Postgres SNI proxy (domain URLs). Unique branch ports stay on the VM loopback. |
 | `27017` | Mongo SNI passthrough (domain URLs). `mongod` unique ports stay on loopback. |
+| `6333` | Qdrant SNI passthrough (domain URLs). Unique qdrant ports stay on loopback. |
 
 From your laptop you will connect like:
 
@@ -116,6 +117,8 @@ If `pg_dump` major is lower than the primary, logical connect fails with `versio
 ## 3b. Optional: MongoDB tools (dump-restore connectors)
 
 MongoDB connectors need `mongod`, `mongodump`, `mongorestore`, and `mongosh` on `PATH`. Compute is **local only** (`SPROUT_COMPUTE=local`). There is no Docker Mongo. With a DNS `SPROUT_PUBLIC_HOST`, clients use `:27017` (`tls=true`); hostname SNI selects the instance. `SPROUT_MONGO_PROXY=false` keeps unique ports.
+
+Qdrant connectors need the `qdrant` server binary on `PATH` (also local compute only). With a DNS host, clients use `:6333` (HTTPS); `SPROUT_QDRANT_PROXY=false` keeps unique ports.
 
 Ubuntu **24.04 (noble)** has MongoDB **8.0** packages. Ubuntu **22.04 (jammy)** has **7.0**. There is no `noble/mongodb-org/7.0` repo.
 
@@ -247,6 +250,7 @@ export SPROUT_DB_USER=sprout                     # login role in connection stri
 # export SPROUT_BRANCH_SUBDOMAIN=false           # keep host as-is (default auto-on for DNS names)
 # export SPROUT_PG_PROXY=false                   # advertise unique ports; skip the :5432 SNI proxy
 # export SPROUT_MONGO_PROXY=false                # advertise unique Mongo ports; skip the :27017 SNI passthrough
+# export SPROUT_QDRANT_PROXY=false               # advertise unique Qdrant ports; skip the :6333 SNI passthrough
 # export SPROUT_TRUST_REMOTE=true                # lab-only: remote trust instead of SCRAM
 # export SPROUT_AUTO_RESUME=true                 # restart crashed connectors/branches
 # export SPROUT_SYNC_INTERVAL=1h                 # logical apply cadence (off/0 disables ticker)
@@ -350,6 +354,16 @@ sprout branch create feat --from=mongo
 # mongosh "<that url>"
 ```
 
+Qdrant uses the **same CoW path** (stop `qdrant`, snapshot the replica dataset, clone a branch dataset, start a new process). Put the `qdrant` binary on `PATH`:
+
+```bash
+sprout connect --name=vectors 'https://YOUR-CLUSTER.cloud.qdrant.io:6333?api-key=KEY'
+# or: sprout connect --name=vectors --engine=qdrant 'http://127.0.0.1:6333'
+sprout branch create feat --from=vectors
+# https://feat-<github>-vectors.strido.fit:6333/?api-key=<pass>
+# curl -sk -H 'api-key: <pass>' https://feat-<github>-vectors.strido.fit:6333/collections
+```
+
 Useful flags:
 
 | Flag | Meaning |
@@ -437,7 +451,7 @@ pkill -f sprout-server || true
 - [ ] Postgres **17** (or matching major) first on `PATH`
 - [ ] `SPROUT_COMPUTE=local`, `SPROUT_STORAGE=zfs`, `SPROUT_ZFS_DATASET=sprout/data`, `SPROUT_ZFS_SUDO=true`, `SPROUT_PUBLIC_HOST=server_domain`, `SPROUT_SAFE=true`
 - [ ] Wildcard DNS `*.strido.fit` → VM if using a domain (optional)
-- [ ] NSG: `8080` + `5432` + `27017` (domain) or unique branch ports (raw IP)
+- [ ] NSG: `8080` + `5432` + `27017` + `6333` (domain) or unique branch ports (raw IP)
 - [ ] `make build` + `sprout-server` running
 - [ ] `sprout doctor` / `sprout health` OK from laptop
 - [ ] `connect --mode=logical` then `branch create`

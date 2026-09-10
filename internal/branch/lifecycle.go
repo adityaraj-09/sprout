@@ -10,6 +10,7 @@ import (
 	"github.com/adityaraj/sprout/internal/meta"
 	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
+	"github.com/adityaraj/sprout/internal/qdrant"
 )
 
 // ConnectorLifecycleResult is returned by connector suspend/resume.
@@ -96,6 +97,12 @@ func (s *Service) ResumeConnector(ctx context.Context, projectID, name string) (
 		inst := &mongo.Instance{
 			Name: h.Name, Owner: c.CreatedBy, DataDir: h.DataDir, Port: h.Port,
 			LogFile: s.logPath(h.Name), Bins: mongo.FindOnPath(), Password: c.Password,
+		}
+		_ = inst.EnsureAppRoles()
+	} else if engine.IsQdrant(c.Engine) {
+		inst := &qdrant.Instance{
+			Name: h.Name, Owner: c.CreatedBy, DataDir: h.DataDir, Port: h.Port,
+			LogFile: s.logPath(h.Name), Bins: qdrant.FindOnPath(), Password: c.Password,
 		}
 		_ = inst.EnsureAppRoles()
 	} else {
@@ -222,10 +229,14 @@ func (s *Service) resumeBranchBestEffort(ctx context.Context, rec meta.BranchRec
 	rec.Status = meta.StatusActive
 	rec.ErrorMessage = ""
 	rec.ConnString, _ = advertiseBranch(rec, eng)
-	if engine.IsMongo(eng) {
+	switch {
+	case engine.IsMongo(eng):
 		inst := &mongo.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: mongo.FindOnPath(), Password: rec.Password}
 		_ = inst.EnsureAppRoles()
-	} else {
+	case engine.IsQdrant(eng):
+		inst := &qdrant.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: qdrant.FindOnPath(), Password: rec.Password}
+		_ = inst.EnsureAppRoles()
+	default:
 		inst := &postgres.Instance{Name: rec.Name, Source: rec.SourceConnector, Owner: rec.CreatedBy, DataDir: rec.DataDir, Port: rec.Port, LogFile: s.logPath(key), Bins: s.Bins, Password: rec.Password}
 		_ = inst.EnsureAppRoles()
 	}

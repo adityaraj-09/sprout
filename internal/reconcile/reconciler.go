@@ -12,6 +12,7 @@ import (
 	"github.com/adityaraj/sprout/internal/meta"
 	"github.com/adityaraj/sprout/internal/mongo"
 	"github.com/adityaraj/sprout/internal/postgres"
+	"github.com/adityaraj/sprout/internal/qdrant"
 	"github.com/adityaraj/sprout/internal/storage"
 )
 
@@ -146,6 +147,8 @@ func (r *Reconciler) startBranch(ctx context.Context, b meta.BranchRecord) error
 		if c, err := r.Store.GetConnectorByID(ctx, b.SourceConnectorID); err == nil {
 			eng = engine.Normalize(c.Engine)
 		}
+	} else if qdrant.HasDataDir(b.DataDir) {
+		eng = engine.Qdrant
 	} else if mongo.HasDataDir(b.DataDir) {
 		eng = engine.Mongo
 	}

@@ -99,7 +99,15 @@ sprout branch create feat --from=atlas
 # mongosh "mongodb://sprout:<pass>@feat-<owner>-atlas.host:27017/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin"
 ```
 
-`--engine` is inferred from the URL. MongoDB only supports `--mode=logical`. `--tables=orders,items` is a collection allowlist and requires a database in the URL. With a DNS host, connection strings use port **27017** (`tls=true`); SNI selects the instance.
+Qdrant (snapshot collections into local `qdrant`; no continuous sync):
+
+```bash
+sprout connect --name=vectors 'https://YOUR-CLUSTER.cloud.qdrant.io:6333?api-key=KEY'
+sprout branch create feat --from=vectors
+# curl -sk -H 'api-key: <pass>' https://feat-<owner>-vectors.host:6333/collections
+```
+
+`--engine` is inferred from the URL. MongoDB and Qdrant only support `--mode=logical`. `--tables=orders,items` is a collection allowlist (Mongo also requires a database in the URL). With a DNS host, Mongo URLs use port **27017** (`tls=true`) and Qdrant URLs use port **6333** (HTTPS); SNI selects the instance.
 
 Local demo only (no remote):
 
@@ -108,7 +116,7 @@ sprout init
 sprout branch create alice --from=main
 ```
 
-`connect` defaults: `--name=primary`, `--wipe` (destroys the local replica and rebootstrap). `--mode` defaults to `physical` for Postgres and `logical` for MongoDB. Use `--no-wipe` to resume. `--tables=a,b` allowlists logical Postgres tables or Mongo collections.
+`connect` defaults: `--name=primary`, `--wipe` (destroys the local replica and rebootstrap). `--mode` defaults to `physical` for Postgres and `logical` for MongoDB/Qdrant. Use `--no-wipe` to resume. `--tables=a,b` allowlists logical Postgres tables or Mongo/Qdrant collections.
 
 ## Connection URLs
 
@@ -120,6 +128,7 @@ sprout branch create alice --from=main
 - Port **5432** is the Postgres SNI proxy. Hostname selects the instance. Clients need TLS (`sslmode=require` or libpq `prefer`). Self-signed cert is normal; `verify-full` may fail.
 - Localhost / raw IP: unique ports, no subdomain (`localhost:55440`).
 - MongoDB: same hostname labels. With a DNS host, URLs are `mongodb://sprout:<pass>@<host>:27017/?tls=true&tlsAllowInvalidCertificates=true&authSource=admin`. Port **27017** is the SNI passthrough (`SPROUT_MONGO_PROXY=false` keeps unique ports).
+- Qdrant: same hostname labels. With a DNS host, URLs are `https://<host>:6333/?api-key=<pass>&tlsAllowInvalidCertificates=true`. Port **6333** is the SNI passthrough (`SPROUT_QDRANT_PROXY=false` keeps unique ports).
 - A branch is an **independent primary**. It does not keep replicating from prod. A **logical connector** keeps one prod slot but **pauses apply** after connect; `sprout sync` or `SPROUT_SYNC_INTERVAL` (default 1h) applies queued WAL then pauses again. `sprout branch create` detaches any cloned logical subscription so the branch cannot steal the connector's WAL slot.
 - Do **not** `sprout connect` using a branch URL as the upstream unless the user explicitly wants a replica-of-a-branch. Day-to-day testing = `psql` / app DSN to the branch URL.
 
@@ -134,7 +143,7 @@ sprout whoami
 sprout org list | create <name> | use <name> | delete <name>
 sprout org members list | add <login> | remove <login>
 sprout init
-sprout connect [--name=<id>] [--engine=postgres|mongodb] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
+sprout connect [--name=<id>] [--engine=postgres|mongodb|qdrant] [--mode=logical|physical] [--wipe|--no-wipe] [--dry-run] [--tables=a,b] <url>
 sprout status [connector-name]
 sprout sync [connector-name]
 sprout connector list
