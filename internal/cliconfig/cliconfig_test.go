@@ -25,6 +25,25 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCurrentBranchRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SPROUT_CONFIG", filepath.Join(dir, "config.json"))
+	if _, err := Save(File{CurrentBranch: "feat", CurrentFrom: "lab"}); err != nil {
+		t.Fatal(err)
+	}
+	got := Load()
+	if got.CurrentBranch != "feat" || got.CurrentFrom != "lab" {
+		t.Fatalf("%+v", got)
+	}
+	if _, err := Save(File{CurrentBranch: "other", CurrentFrom: ""}); err != nil {
+		t.Fatal(err)
+	}
+	got = Load()
+	if got.CurrentBranch != "other" || got.CurrentFrom != "" {
+		t.Fatalf("switch without from: %+v", got)
+	}
+}
+
 func TestUnsetToken(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("SPROUT_CONFIG", filepath.Join(dir, "config.json"))

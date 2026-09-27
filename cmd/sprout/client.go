@@ -16,26 +16,11 @@ import (
 type client struct {
 	base, token, org string
 	http             *http.Client
+	out              output
 }
 
 func peelOrg() string {
-	org := ""
-	out := []string{os.Args[0]}
-	args := os.Args[1:]
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if strings.HasPrefix(a, "--org=") {
-			org = strings.TrimPrefix(a, "--org=")
-			continue
-		}
-		if a == "--org" && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-			org = args[i+1]
-			i++
-			continue
-		}
-		out = append(out, a)
-	}
-	os.Args = out
+	org, _ := peelGlobals()
 	return org
 }
 
@@ -145,11 +130,14 @@ func (c *client) doProgress(method, path string, body any, out any) error {
 		}
 		switch fmt.Sprint(ev["type"]) {
 		case "step":
+			if c.out.hideProg() {
+				continue
+			}
 			step, _ := ev["step"].(string)
 			detail, _ := ev["detail"].(string)
 			msg := strings.TrimSpace(strings.TrimSpace(step + " " + detail))
 			if msg != "" {
-				fmt.Println(msg)
+				fmt.Fprintln(progressWriter(c.out), msg)
 			}
 		case "result":
 			raw, err := json.Marshal(ev["result"])
@@ -183,6 +171,7 @@ func httpAPIError(data []byte) error {
 	var er struct {
 		Error   string `json:"error"`
 		Message string `json:"message"`
+		Hint    string `json:"hint"`
 	}
 	_ = json.Unmarshal(data, &er)
 	if er.Message == "" {
@@ -190,6 +179,9 @@ func httpAPIError(data []byte) error {
 	}
 	if er.Error == "" {
 		er.Error = "error"
+	}
+	if er.Hint != "" {
+		return fmt.Errorf("%s: %s\nhint: %s", er.Error, er.Message, er.Hint)
 	}
 	return fmt.Errorf("%s: %s", er.Error, er.Message)
 }

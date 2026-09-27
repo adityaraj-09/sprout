@@ -4,11 +4,11 @@ Node.js **CLI + SDK** for [Sprout](https://github.com/adityaraj-09/sprout) — t
 
 Installs the **`sprout`** binary on your PATH.
 
-**Version:** 0.7.0 — MongoDB connectors, orgs/members, streamed connect/branch progress, richer `sprout doctor`.
+**Version:** 0.9.0 — `--print-url` / `--format json`, `sprout env`, connector preflight, branch switch, branch_sql hooks.
 
 **Repo:** [https://github.com/adityaraj-09/sprout](https://github.com/adityaraj-09/sprout)  
 **npm:** [https://www.npmjs.com/package/sproutdb-cli](https://www.npmjs.com/package/sproutdb-cli)  
-**Agent skill:** [`SKILL.md`](../SKILL.md) in the Sprout repo (commands, hosted URLs, `--from=`).
+**Agent skill:** fetch `$SPROUT_SERVER/llms.txt` and `$SPROUT_SERVER/openapi.yaml` (also [`SKILL.md`](../SKILL.md)).
 
 ## Requirements
 
@@ -72,10 +72,10 @@ sprout sync prod                  # apply queued WAL now; apply stays paused bet
 sprout status atlas
 
 # branch from a connector
-sprout branch create my-feature --from=prod
-# prints:
-#   postgresql://sprout@<name>-<github>-<connector>.host:5432/postgres
-#   psql "postgresql://..."
+sprout branch create my-feature --from=prod --print-url
+sprout env my-feature --from=prod --write=.env.sprout
+sprout branch switch my-feature --from=prod
+sprout url
 
 sprout branch create mongo-feat --from=atlas
 # prints:
@@ -93,6 +93,8 @@ sprout branch diff my-feature --from=prod
 sprout branch delete my-feature --from=prod
 
 sprout connector list
+sprout connector preflight --mode=logical 'postgresql://...'
+sprout connector hook prod --sql=@anonymize.sql
 sprout connector delete prod
 sprout connector suspend prod   # stop replica + all branches from it
 sprout connector resume prod
@@ -109,6 +111,8 @@ sprout connector resume prod
 | `--wipe` / `--no-wipe` | Rebootstrap (default) or resume existing replica |
 | `--dry-run` | Estimate tables/rows/collections without copying |
 | `--tables=a,b` | Postgres table / Mongo or Qdrant collection allowlist |
+| `--branch-sql=@file.sql` | Postgres SQL run on every new branch |
+| `--print-url` / `--format json` / `--quiet` | Script-friendly output (global) |
 
 ### Hosted URLs
 

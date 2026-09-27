@@ -67,6 +67,7 @@ export type Connector = {
   last_lag_bytes: number;
   last_synced_at?: string;
   apply_paused?: boolean;
+  branch_sql?: string;
   created_by?: string;
   org_id?: string;
   created_at: string;
@@ -130,6 +131,23 @@ export type SyncResult = {
   lag: Record<string, unknown>;
   reason?: string;
   message?: string;
+};
+
+export type PreflightCheck = {
+  name: string;
+  ok: boolean;
+  detail: string;
+  hint?: string;
+  sql?: string;
+};
+
+export type PreflightReport = {
+  ok: boolean;
+  engine: string;
+  mode: string;
+  url_host?: string;
+  checks: PreflightCheck[];
+  fix_sql?: string[];
 };
 
 export type WhoAmI = {

@@ -40,6 +40,8 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes() {
 	s.Mux.HandleFunc("GET /healthz", s.handleHealth)
+	s.Mux.HandleFunc("GET /llms.txt", s.handleLLMs)
+	s.Mux.HandleFunc("GET /openapi.yaml", s.handleOpenAPI)
 	s.Mux.HandleFunc("GET /v1/auth/github", s.handleAuthGitHub)
 	s.Mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)
 	s.Mux.HandleFunc("GET /v1/orgs", s.handleListOrgs)
@@ -52,6 +54,8 @@ func (s *Server) routes() {
 	s.Mux.HandleFunc("POST /v1/init", s.handleInit)
 	s.Mux.HandleFunc("GET /v1/connectors", s.handleListConnectors)
 	s.Mux.HandleFunc("POST /v1/projects/{project}/connect", s.handleConnect)
+	s.Mux.HandleFunc("POST /v1/projects/{project}/preflight", s.handlePreflight)
+	s.Mux.HandleFunc("PATCH /v1/projects/{project}/connectors/{name}", s.handlePatchConnector)
 	s.Mux.HandleFunc("DELETE /v1/projects/{project}/connectors/{name}", s.handleDeleteConnector)
 	s.Mux.HandleFunc("POST /v1/projects/{project}/connectors/{name}/suspend", s.handleSuspendConnector)
 	s.Mux.HandleFunc("POST /v1/projects/{project}/connectors/{name}/resume", s.handleResumeConnector)
@@ -129,13 +133,14 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		URL    string   `json:"url"`
-		Engine string   `json:"engine"`
-		Mode   string   `json:"mode"`
-		Name   string   `json:"name"`
-		Wipe   *bool    `json:"wipe"`
-		DryRun bool     `json:"dry_run"`
-		Tables []string `json:"tables"`
+		URL       string   `json:"url"`
+		Engine    string   `json:"engine"`
+		Mode      string   `json:"mode"`
+		Name      string   `json:"name"`
+		Wipe      *bool    `json:"wipe"`
+		DryRun    bool     `json:"dry_run"`
+		Tables    []string `json:"tables"`
+		BranchSQL string   `json:"branch_sql"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.URL == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_body",
@@ -151,7 +156,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := s.Service.Connect(ctx, proj.ID, branch.ConnectOpts{
 		Name: body.Name, URL: body.URL, Engine: body.Engine, Mode: body.Mode,
-		Wipe: wipe, DryRun: body.DryRun, Tables: body.Tables,
+		Wipe: wipe, DryRun: body.DryRun, Tables: body.Tables, BranchSQL: body.BranchSQL,
 	})
 	if err != nil {
 		writeProgressErr(w, streamed, err)
@@ -186,6 +191,54 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeProgressResult(w, streamed, http.StatusOK, out)
+}
+
+func (s *Server) handlePreflight(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		URL    string   `json:"url"`
+		Engine string   `json:"engine"`
+		Mode   string   `json:"mode"`
+		Tables []string `json:"tables"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.URL == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_body",
+			`JSON {"url":"postgresql://...","engine":"postgres|mongodb|qdrant","mode":"logical|physical","tables":["t"]} required`)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	rep, err := s.Service.Preflight(ctx, branch.PreflightOpts{
+		URL: body.URL, Engine: body.Engine, Mode: body.Mode, Tables: body.Tables,
+	})
+	if err != nil {
+		code, status := mapErr(err)
+		writeErr(w, status, code, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+func (s *Server) handlePatchConnector(w http.ResponseWriter, r *http.Request) {
+	proj, err := s.resolveProject(r)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "project_not_found", err.Error())
+		return
+	}
+	var body struct {
+		BranchSQL *string `json:"branch_sql"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.BranchSQL == nil {
+		writeErr(w, http.StatusBadRequest, "invalid_body", `JSON {"branch_sql":"..."} required (empty string clears)`)
+		return
+	}
+	c, err := s.Service.SetConnectorHook(r.Context(), proj.ID, r.PathValue("name"), *body.BranchSQL)
+	if err != nil {
+		code, status := mapErr(err)
+		writeErr(w, status, code, err.Error())
+		return
+	}
+	c.PrimaryURL = redactURL(c.PrimaryURL)
+	writeJSON(w, http.StatusOK, c)
 }
 
 func (s *Server) handleDeleteConnector(w http.ResponseWriter, r *http.Request) {

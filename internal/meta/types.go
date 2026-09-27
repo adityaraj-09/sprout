@@ -72,6 +72,7 @@ type Connector struct {
 	LastLagBytes int64     `json:"last_lag_bytes"`
 	LastSyncedAt time.Time `json:"last_synced_at,omitempty"`
 	ApplyPaused  bool      `json:"apply_paused,omitempty"` // not persisted; set from pg_subscription
+	BranchSQL    string    `json:"branch_sql,omitempty"`   // Postgres SQL run on every new branch
 	Password     string    `json:"-"`
 	CreatedBy    string    `json:"created_by,omitempty"`
 	OrgID        string    `json:"org_id,omitempty"`

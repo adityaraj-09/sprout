@@ -36,6 +36,20 @@ func TestParseSyncInterval(t *testing.T) {
 	}
 }
 
+func TestParseIdleSuspend(t *testing.T) {
+	if d := ParseIdleSuspend(""); d != 15*time.Minute {
+		t.Fatalf("empty default=%s", d)
+	}
+	if d := ParseIdleSuspend("30m"); d != 30*time.Minute {
+		t.Fatalf("30m=%s", d)
+	}
+	for _, off := range []string{"0", "off", "false", "none", "disabled"} {
+		if d := ParseIdleSuspend(off); d != 0 {
+			t.Fatalf("%s should disable, got %s", off, d)
+		}
+	}
+}
+
 func TestCLIDefaultsLoopbackDevToken(t *testing.T) {
 	t.Setenv("SPROUT_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
 	t.Setenv("SPROUT_SERVER", "http://127.0.0.1:8080")

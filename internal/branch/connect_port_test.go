@@ -22,7 +22,7 @@ func TestPrepareConnectorSkipsBusyPort(t *testing.T) {
 
 	svc, proj := testService(t)
 	c, err := svc.prepareConnectorRecord(context.Background(), proj.ID, "pgtest",
-		"postgres://u@h/db", ModeLogical, engine.Postgres)
+		"postgres://u@h/db", ModeLogical, engine.Postgres, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestPrepareConnectorReallocatesBusyExistingPort(t *testing.T) {
 	}
 
 	c, err := svc.prepareConnectorRecord(ctx, proj.ID, "pgtest",
-		"postgres://u@h/db", ModeLogical, engine.Postgres)
+		"postgres://u@h/db", ModeLogical, engine.Postgres, "")
 	if err != nil {
 		t.Fatal(err)
 	}

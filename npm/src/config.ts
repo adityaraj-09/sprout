@@ -8,6 +8,8 @@ export type SproutConfigFile = {
   project?: string;
   githubLogin?: string;
   org?: string;
+  currentBranch?: string;
+  currentFrom?: string;
 };
 
 /** ~/.sprout/config.json (override with SPROUT_CONFIG) */

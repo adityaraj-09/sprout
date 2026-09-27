@@ -86,6 +86,35 @@ func TestReconcileIdleStaysIdle(t *testing.T) {
 	}
 }
 
+func TestReconcileIdleSuspendActiveBranch(t *testing.T) {
+	ctx := context.Background()
+	store, err := meta.OpenFile(filepath.Join(t.TempDir(), "control.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	proj, _ := store.EnsureProject(ctx, "default")
+	dir := t.TempDir()
+	_ = store.PutBranch(ctx, meta.BranchRecord{
+		ID: "b1", ProjectID: proj.ID, Name: "feat", Role: "branch",
+		Status: meta.StatusActive, Port: 55440, DataDir: dir,
+		LastUsedAt: time.Now().Add(-time.Hour),
+	})
+	comp := &fakeCompute{running: map[string]bool{dir: true}}
+	r := &Reconciler{
+		Store: store, Compute: comp, Storage: storage.NewCopy(t.TempDir()),
+		Root: t.TempDir(), IdleAfter: 15 * time.Minute,
+	}
+	r.RunOnce(ctx)
+	got, _ := store.GetBranch(ctx, proj.ID, "feat")
+	if got.Status != meta.StatusIdle {
+		t.Fatalf("status=%s want idle", got.Status)
+	}
+	if comp.running[dir] {
+		t.Fatal("compute should be stopped")
+	}
+}
+
 func TestReconcileAutoResumeCrashed(t *testing.T) {
 	ctx := context.Background()
 	store, err := meta.OpenFile(filepath.Join(t.TempDir(), "control.json"))

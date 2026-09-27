@@ -1,0 +1,294 @@
+openapi: 3.1.0
+info:
+  title: Sprout control plane
+  version: "0.9.0"
+  description: >
+    Copy-on-write database branches for Postgres, MongoDB, and Qdrant.
+    Thin CLI talks to this HTTP API. Branches never connect to production.
+servers:
+  - url: http://127.0.0.1:8080
+    description: local sprout-server
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get:
+      security: []
+      summary: Liveness
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+  /llms.txt:
+    get:
+      security: []
+      summary: Agent-oriented CLI/API reference
+      responses:
+        "200":
+          description: text
+          content:
+            text/plain:
+              schema: { type: string }
+  /openapi.yaml:
+    get:
+      security: []
+      summary: This OpenAPI document
+      responses:
+        "200":
+          description: yaml
+  /v1/doctor:
+    get:
+      summary: Environment readiness (binaries, storage, DNS, inventory)
+      responses:
+        "200":
+          description: report
+  /v1/whoami:
+    get:
+      summary: Authenticated actor + org memberships
+      responses:
+        "200":
+          description: actor
+  /v1/init:
+    post:
+      summary: Local demo Postgres (machine token only)
+      responses:
+        "200": { description: project }
+        "403": { description: GitHub users must connect their own replica }
+  /v1/connectors:
+    get:
+      summary: List connectors visible to the caller
+      responses:
+        "200":
+          description: connectors
+  /v1/projects/{project}/preflight:
+    post:
+      summary: Probe an upstream URL without creating a slot or replica
+      parameters:
+        - $ref: "#/components/parameters/project"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string }
+                engine: { type: string, enum: [postgres, mongodb, qdrant] }
+                mode: { type: string, enum: [logical, physical] }
+                tables:
+                  type: array
+                  items: { type: string }
+      responses:
+        "200":
+          description: checks + optional fix_sql
+  /v1/projects/{project}/connect:
+    post:
+      summary: Bootstrap a named local replica from production
+      parameters:
+        - $ref: "#/components/parameters/project"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string }
+                name: { type: string, default: primary }
+                engine: { type: string }
+                mode: { type: string }
+                wipe: { type: boolean, default: true }
+                dry_run: { type: boolean }
+                tables:
+                  type: array
+                  items: { type: string }
+                branch_sql:
+                  type: string
+                  description: Postgres SQL run on every new branch from this connector
+      responses:
+        "200":
+          description: connector + connection_string
+  /v1/projects/{project}/connectors/{name}:
+    delete:
+      summary: Drop local replica (and publication for logical Postgres)
+      parameters:
+        - $ref: "#/components/parameters/project"
+        - $ref: "#/components/parameters/connectorName"
+        - name: force
+          in: query
+          schema: { type: boolean }
+      responses:
+        "204": { description: deleted }
+    patch:
+      summary: Update connector hook (branch_sql)
+      parameters:
+        - $ref: "#/components/parameters/project"
+        - $ref: "#/components/parameters/connectorName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                branch_sql: { type: string }
+      responses:
+        "200":
+          description: connector
+  /v1/projects/{project}/connectors/{name}/suspend:
+    post:
+      summary: Stop connector + its branches (data kept)
+      parameters:
+        - $ref: "#/components/parameters/project"
+        - $ref: "#/components/parameters/connectorName"
+      responses:
+        "200": { description: lifecycle }
+  /v1/projects/{project}/connectors/{name}/resume:
+    post:
+      summary: Start connector + idle branches
+      parameters:
+        - $ref: "#/components/parameters/project"
+        - $ref: "#/components/parameters/connectorName"
+      responses:
+        "200": { description: lifecycle }
+  /v1/projects/{project}/connectors/{name}/sync:
+    post:
+      summary: Apply queued logical WAL now, then pause
+      parameters:
+        - $ref: "#/components/parameters/project"
+        - $ref: "#/components/parameters/connectorName"
+      responses:
+        "200": { description: lag }
+  /v1/projects/{project}/sync:
+    post:
+      summary: Sync default/sole connector
+      parameters:
+        - $ref: "#/components/parameters/project"
+      responses:
+        "200": { description: lag }
+  /v1/projects/{project}/replication:
+    get:
+      summary: Replication status
+      parameters:
+        - $ref: "#/components/parameters/project"
+      responses:
+        "200": { description: connector + lag }
+  /v1/projects/{project}/connectors/{name}/replication:
+    get:
+      summary: Named connector replication status
+      parameters:
+        - $ref: "#/components/parameters/project"
+        - $ref: "#/components/parameters/connectorName"
+      responses:
+        "200": { description: connector + lag }
+  /v1/projects/{project}/branches:
+    get:
+      summary: List branches
+      parameters:
+        - $ref: "#/components/parameters/project"
+      responses:
+        "200": { description: branches }
+    post:
+      summary: Create a CoW branch
+      parameters:
+        - $ref: "#/components/parameters/project"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                from: { type: string, description: connector name or main }
+      responses:
+        "201":
+          description: branch + connection_string + psql/mongosh/curl
+  /v1/projects/{project}/branches/{name}:
+    get:
+      summary: Get branch (touches last_used_at)
+      parameters:
+        - $ref: "#/components/parameters/project"
+        - $ref: "#/components/parameters/branchName"
+        - $ref: "#/components/parameters/from"
+      responses:
+        "200": { description: branch }
+    delete:
+      summary: Delete branch
+      parameters:
+        - $ref: "#/components/parameters/project"
+        - $ref: "#/components/parameters/branchName"
+        - $ref: "#/components/parameters/from"
+      responses:
+        "204": { description: deleted }
+  /v1/projects/{project}/branches/{name}/diff:
+    get:
+      parameters:
+        - $ref: "#/components/parameters/project"
+        - $ref: "#/components/parameters/branchName"
+        - $ref: "#/components/parameters/from"
+      responses:
+        "200": { description: diff }
+  /v1/projects/{project}/branches/{name}/reset:
+    post:
+      parameters:
+        - $ref: "#/components/parameters/project"
+        - $ref: "#/components/parameters/branchName"
+        - $ref: "#/components/parameters/from"
+      responses:
+        "200": { description: branch }
+  /v1/projects/{project}/branches/{name}/suspend:
+    post:
+      parameters:
+        - $ref: "#/components/parameters/project"
+        - $ref: "#/components/parameters/branchName"
+        - $ref: "#/components/parameters/from"
+      responses:
+        "200": { description: branch }
+  /v1/projects/{project}/branches/{name}/resume:
+    post:
+      parameters:
+        - $ref: "#/components/parameters/project"
+        - $ref: "#/components/parameters/branchName"
+        - $ref: "#/components/parameters/from"
+      responses:
+        "200": { description: branch }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: GitHub user token from sprout login, or SPROUT_TOKEN
+  parameters:
+    project:
+      name: project
+      in: path
+      required: true
+      schema: { type: string, default: default }
+    connectorName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string }
+    branchName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string }
+    from:
+      name: from
+      in: query
+      schema: { type: string }
+      description: Source connector when the branch name is shared
+  headers:
+    X-Sprout-Org:
+      schema: { type: string }
+      description: Org name or id. GitHub users default to personal org "default".

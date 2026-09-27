@@ -9,11 +9,13 @@ import (
 
 // File is ~/.sprout/config.json — shared by the Go CLI and npm sproutdb-cli.
 type File struct {
-	APIUrl      string `json:"apiUrl,omitempty"`
-	Token       string `json:"token,omitempty"`
-	Project     string `json:"project,omitempty"`
-	GitHubLogin string `json:"githubLogin,omitempty"`
-	Org         string `json:"org,omitempty"`
+	APIUrl        string `json:"apiUrl,omitempty"`
+	Token         string `json:"token,omitempty"`
+	Project       string `json:"project,omitempty"`
+	GitHubLogin   string `json:"githubLogin,omitempty"`
+	Org           string `json:"org,omitempty"`
+	CurrentBranch string `json:"currentBranch,omitempty"`
+	CurrentFrom   string `json:"currentFrom,omitempty"`
 }
 
 func Path() string {
@@ -61,6 +63,11 @@ func Unset(keys ...string) (File, error) {
 			cur.GitHubLogin = ""
 		case "org":
 			cur.Org = ""
+		case "currentBranch", "current-branch", "branch":
+			cur.CurrentBranch = ""
+			cur.CurrentFrom = ""
+		case "currentFrom", "current-from":
+			cur.CurrentFrom = ""
 		}
 	}
 	if err := write(cur); err != nil {
@@ -99,6 +106,12 @@ func merge(base, patch File) File {
 	}
 	if patch.Org != "" {
 		base.Org = strings.ToLower(strings.TrimSpace(patch.Org))
+	}
+	if patch.CurrentBranch != "" {
+		base.CurrentBranch = strings.TrimSpace(patch.CurrentBranch)
+	}
+	if patch.CurrentFrom != "" || patch.CurrentBranch != "" {
+		base.CurrentFrom = strings.TrimSpace(patch.CurrentFrom)
 	}
 	return base
 }

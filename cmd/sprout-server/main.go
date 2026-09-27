@@ -31,10 +31,7 @@ func main() {
 		fatal(err)
 	}
 
-	bins, err := postgres.LookBinaries()
-	if err != nil {
-		fatal(err)
-	}
+	bins := postgres.LookBinariesOptional()
 	stor, err := storage.Detect(cfg.DataRoot)
 	if err != nil {
 		fatal(err)
@@ -57,6 +54,7 @@ func main() {
 		Bins:         bins,
 		ColdSnap:     cfg.ColdSnap,
 		SyncInterval: cfg.SyncInterval,
+		IdleSuspend:  cfg.IdleSuspend,
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -65,6 +63,7 @@ func main() {
 	rec := &reconcile.Reconciler{
 		Store: store, Compute: comp, Storage: stor,
 		Root: cfg.DataRoot, AutoResume: cfg.AutoResume,
+		IdleAfter: cfg.IdleSuspend,
 	}
 	go rec.Loop(ctx, 30*time.Second)
 	go svc.SyncLoop(ctx)
@@ -142,6 +141,11 @@ func main() {
 		fmt.Printf("  sync:      logical apply every %s (sprout sync for now; SPROUT_SYNC_INTERVAL=off to disable ticker)\n", cfg.SyncInterval)
 	} else {
 		fmt.Println("  sync:      scheduled apply off (sprout sync still works)")
+	}
+	if cfg.IdleSuspend > 0 {
+		fmt.Printf("  idle:      auto-suspend branches after %s (SPROUT_IDLE_SUSPEND=off to disable)\n", cfg.IdleSuspend)
+	} else {
+		fmt.Println("  idle:      auto-suspend off")
 	}
 	fmt.Printf("  compute:   %s\n", comp.Name())
 	fmt.Printf("  meta:      %s\n", cfg.MetaPath())

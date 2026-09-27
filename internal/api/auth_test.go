@@ -26,6 +26,27 @@ func TestAuthHealthzOpen(t *testing.T) {
 	}
 }
 
+func TestAuthDocsOpen(t *testing.T) {
+	s := &Server{Token: "secret", Mux: http.NewServeMux()}
+	s.routes()
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	for _, path := range []string{"/llms.txt", "/openapi.yaml"} {
+		res, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(res.Body)
+		_ = res.Body.Close()
+		if res.StatusCode != 200 {
+			t.Fatalf("%s status %d", path, res.StatusCode)
+		}
+		if len(b) < 20 {
+			t.Fatalf("%s too short", path)
+		}
+	}
+}
+
 func TestAuthSharedToken(t *testing.T) {
 	s := &Server{Token: "secret", Mux: http.NewServeMux()}
 	s.Mux.HandleFunc("GET /v1/whoami", s.handleWhoAmI)

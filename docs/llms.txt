@@ -1,0 +1,88 @@
+# Sprout — agent reference
+
+Sprout is a self-hosted control plane for copy-on-write database branches (Postgres, MongoDB, Qdrant). The CLI talks HTTP to sprout-server. Branches never talk to production.
+
+Fetch this file live from the server you are using:
+
+- GET $SPROUT_SERVER/llms.txt
+- GET $SPROUT_SERVER/openapi.yaml
+
+Repo copies: docs/llms.txt and docs/openapi.yaml.
+
+## Clients
+
+- Go: `./bin/sprout` (this repo). Config: ~/.sprout/config.json + SPROUT_SERVER / SPROUT_TOKEN
+- npm: `sproutdb-cli` (binary name `sprout`). `sprout config set api-url <url>`
+- Prefer whichever `sprout` is on PATH. Do not start a second server against a hosted VM.
+
+## Scriptable output (use these in CI and agent loops)
+
+Global flags (Go + npm):
+
+- `--print-url` — stdout is only the connection string
+- `--format json` — machine JSON, no extra dump
+- `--quiet` / `-q` — hide progress
+
+Examples:
+
+```bash
+sprout branch create pr-123 --from=prod --print-url
+# postgresql://sprout:...@pr-123-alice-prod.host:5432/postgres
+
+DATABASE_URL="$(sprout branch create pr-123 --from=prod --print-url)"
+sprout env pr-123 --from=prod --write=.env.sprout
+sprout url                    # current branch after `sprout branch switch`
+```
+
+Do not scrape human text. Default human output no longer appends a JSON blob.
+
+## Typical loop
+
+```bash
+sprout login                  # GitHub device flow (hosted)
+sprout doctor                 # first command on a new server
+sprout connector preflight --mode=logical 'postgresql://user:pass@host:5432/postgres'
+sprout connect --name=prod --mode=logical 'postgresql://...'
+sprout branch create feat --from=prod
+sprout branch switch feat --from=prod
+sprout env --write=.env.sprout
+# run tests against DATABASE_URL
+sprout branch delete feat --from=prod
+```
+
+Dump-snapshot engines (Mongo, Qdrant) have no incremental `sprout sync`. Refresh with `sprout connect --wipe`.
+
+## Current branch
+
+`sprout branch switch <name> [--from=connector]` writes currentBranch/currentFrom to ~/.sprout/config.json.
+`sprout branch list` marks the current branch with `*`.
+`sprout env` / `sprout url` use the current branch when no name is given.
+
+## Connect / preflight
+
+`sprout connector preflight` (alias: `sprout preflight`) checks WAL, slots, grants, replica identity, local tools. It creates nothing.
+
+`sprout connect --branch-sql=@anonymize.sql` stores Postgres SQL that runs on every new branch.
+`sprout connector hook <name> --sql=@file.sql` updates the hook later. `--clear` removes it.
+
+Engine inference: `mongodb://` → mongodb; `qdrant://` / `:6333` / `*.qdrant.io` → qdrant; else postgres.
+
+## Idle compute
+
+Server auto-suspends branches after SPROUT_IDLE_SUSPEND (default 15m). `sprout branch resume` wakes them. Set `off` to disable.
+
+Postgres binaries are optional: a Mongo/Qdrant-only server starts without initdb/psql.
+
+## Auth
+
+Authorization: Bearer <token>
+Optional X-Sprout-Org: <name-or-id>
+GitHub users default to personal org `default`. Machine SPROUT_TOKEN sees everything. `sprout init` is machine-token only.
+
+## URLs
+
+Postgres: postgresql://sprout:<pass>@<name>-<github>-<connector>.<host>:5432/postgres
+Mongo: mongodb://sprout:<pass>@...:27017/... (tls=true when SNI proxy)
+Qdrant: https://<name>-<github>-<connector>.<host>:6333?api-key=<pass>
+
+`/postgres` is the database inside the instance, not the branch name.

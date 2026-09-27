@@ -124,6 +124,9 @@ CREATE TABLE IF NOT EXISTS connectors (
 	if err := s.ensureColumn("connectors", "last_synced_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn("connectors", "branch_sql", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	if err := s.ensureOwnedUniques(); err != nil {
 		return err
 	}
@@ -608,14 +611,14 @@ func putConnectorTx(tx *sql.Tx, c Connector) error {
 	c.UpdatedAt = now
 	_, err := tx.Exec(`
 INSERT INTO connectors(
-  id, project_id, name, primary_url, engine, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, last_synced_at, password, created_by, org_id, created_at, updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  id, project_id, name, primary_url, engine, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, last_synced_at, branch_sql, password, created_by, org_id, created_at, updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   project_id=excluded.project_id, name=excluded.name, primary_url=excluded.primary_url, engine=excluded.engine, mode=excluded.mode,
   status=excluded.status, data_dir=excluded.data_dir, port=excluded.port, error_message=excluded.error_message,
-  last_lsn=excluded.last_lsn, last_lag_bytes=excluded.last_lag_bytes, last_synced_at=excluded.last_synced_at, password=excluded.password,
+  last_lsn=excluded.last_lsn, last_lag_bytes=excluded.last_lag_bytes, last_synced_at=excluded.last_synced_at, branch_sql=excluded.branch_sql, password=excluded.password,
   created_by=excluded.created_by, org_id=excluded.org_id, updated_at=excluded.updated_at
-`, c.ID, c.ProjectID, c.Name, c.PrimaryURL, connectorEngine(c), c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes, formatTimeOpt(c.LastSyncedAt), c.Password,
+`, c.ID, c.ProjectID, c.Name, c.PrimaryURL, connectorEngine(c), c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes, formatTimeOpt(c.LastSyncedAt), c.BranchSQL, c.Password,
 		c.CreatedBy, c.OrgID, formatTime(c.CreatedAt), formatTime(c.UpdatedAt))
 	return err
 }
@@ -655,14 +658,14 @@ func (s *SQLiteStore) PutConnector(ctx context.Context, c Connector) error {
 
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO connectors(
-  id, project_id, name, primary_url, engine, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, last_synced_at, password, created_by, org_id, created_at, updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  id, project_id, name, primary_url, engine, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, last_synced_at, branch_sql, password, created_by, org_id, created_at, updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   project_id=excluded.project_id, name=excluded.name, primary_url=excluded.primary_url, engine=excluded.engine, mode=excluded.mode,
   status=excluded.status, data_dir=excluded.data_dir, port=excluded.port, error_message=excluded.error_message,
-  last_lsn=excluded.last_lsn, last_lag_bytes=excluded.last_lag_bytes, last_synced_at=excluded.last_synced_at, password=excluded.password,
+  last_lsn=excluded.last_lsn, last_lag_bytes=excluded.last_lag_bytes, last_synced_at=excluded.last_synced_at, branch_sql=excluded.branch_sql, password=excluded.password,
   created_by=excluded.created_by, org_id=excluded.org_id, updated_at=excluded.updated_at
-`, c.ID, c.ProjectID, c.Name, c.PrimaryURL, connectorEngine(c), c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes, formatTimeOpt(c.LastSyncedAt), c.Password,
+`, c.ID, c.ProjectID, c.Name, c.PrimaryURL, connectorEngine(c), c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes, formatTimeOpt(c.LastSyncedAt), c.BranchSQL, c.Password,
 		c.CreatedBy, c.OrgID, formatTime(c.CreatedAt), formatTime(c.UpdatedAt))
 	return err
 }
@@ -674,7 +677,7 @@ func connectorEngine(c Connector) string {
 	return c.Engine
 }
 
-const connectorCols = `id, project_id, name, primary_url, engine, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, last_synced_at, password, created_by, org_id, created_at, updated_at`
+const connectorCols = `id, project_id, name, primary_url, engine, mode, status, data_dir, port, error_message, last_lsn, last_lag_bytes, last_synced_at, branch_sql, password, created_by, org_id, created_at, updated_at`
 
 func scanConnector(scanner interface {
 	Scan(dest ...any) error
@@ -683,7 +686,7 @@ func scanConnector(scanner interface {
 	var created, updated, lastSynced string
 	err := scanner.Scan(
 		&c.ID, &c.ProjectID, &c.Name, &c.PrimaryURL, &c.Engine, &c.Mode, &c.Status, &c.DataDir, &c.Port,
-		&c.ErrorMessage, &c.LastLSN, &c.LastLagBytes, &lastSynced, &c.Password, &c.CreatedBy, &c.OrgID, &created, &updated,
+		&c.ErrorMessage, &c.LastLSN, &c.LastLagBytes, &lastSynced, &c.BranchSQL, &c.Password, &c.CreatedBy, &c.OrgID, &created, &updated,
 	)
 	if err != nil {
 		return Connector{}, err
@@ -740,9 +743,9 @@ func (s *SQLiteStore) UpdateConnector(ctx context.Context, c Connector) error {
 	c.UpdatedAt = time.Now().UTC()
 	res, err := s.db.ExecContext(ctx, `
 UPDATE connectors SET
-  project_id=?, name=?, primary_url=?, engine=?, mode=?, status=?, data_dir=?, port=?, error_message=?, last_lsn=?, last_lag_bytes=?, last_synced_at=?, password=?, created_by=?, org_id=?, updated_at=?
+  project_id=?, name=?, primary_url=?, engine=?, mode=?, status=?, data_dir=?, port=?, error_message=?, last_lsn=?, last_lag_bytes=?, last_synced_at=?, branch_sql=?, password=?, created_by=?, org_id=?, updated_at=?
 WHERE id=?`,
-		c.ProjectID, c.Name, c.PrimaryURL, connectorEngine(c), c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes, formatTimeOpt(c.LastSyncedAt), c.Password,
+		c.ProjectID, c.Name, c.PrimaryURL, connectorEngine(c), c.Mode, c.Status, c.DataDir, c.Port, c.ErrorMessage, c.LastLSN, c.LastLagBytes, formatTimeOpt(c.LastSyncedAt), c.BranchSQL, c.Password,
 		c.CreatedBy, c.OrgID, formatTime(c.UpdatedAt), c.ID)
 	if err != nil {
 		return err

@@ -54,7 +54,7 @@ func (s *Server) auth(next http.Handler) http.Handler {
 }
 
 func publicPath(p string) bool {
-	return p == "/healthz" || p == "/v1/auth/github"
+	return p == "/healthz" || p == "/v1/auth/github" || p == "/llms.txt" || p == "/openapi.yaml"
 }
 
 func bearerToken(h string) (string, bool) {
